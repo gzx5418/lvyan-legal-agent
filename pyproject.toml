@@ -1,0 +1,51 @@
+[project]
+name = "lvyan"
+version = "0.1.0"
+description = "律言法律智能体 Agent Runtime（LangGraph 编排的中国法律 Agent）"
+readme = { content = "律言法律智能体 Agent Runtime。", content-type = "text/plain" }
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "律言项目组" }]
+
+dependencies = [
+    "langgraph>=0.2",                  # Agent 编排（显式状态图）
+    "pydantic>=2.0",                   # 数据模型（CaseState、Authority 等）
+    "fastapi>=0.110",                  # API 入口
+    "uvicorn",                         # ASGI 服务器
+    "sse-starlette",                   # SSE 流式响应（可选，未安装时降级为 StreamingResponse）
+    "sqlalchemy>=2.0",                 # ORM，配合 PostgreSQL
+    "psycopg[binary]",                 # PostgreSQL 驱动
+    "langgraph-checkpoint-postgres",   # LangGraph PostgreSQL checkpoint
+    "opensearch-py",                   # OpenSearch 检索
+    "httpx",                           # HTTP 客户端，用于模型网关调用
+    "python-docx",                     # DOCX 导出，复用现有能力
+    "pyyaml",                          # 解析法规 front matter
+    "langfuse",                        # 可观测性
+    "opentelemetry-api",               # 追踪 API
+    "opentelemetry-sdk",               # 追踪 SDK
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lvyan"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]

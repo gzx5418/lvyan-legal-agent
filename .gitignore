@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 分发包
+build/
+dist/
+*.egg-info/
+*.egg
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.ruff_cache/
+
+# 环境变量与密钥（永不提交）
+.env
+.env.*
+!.env.example
+
+# uv lock（可选保留，按团队约定；如需锁定可删除此行）
+# uv.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 本地运行产物
+*.log
+tmp/
+
+# 用户上传的文件（运行时生成，不入库）
+data/uploads/
+
+# 索引缓存（大文件，运行时重建）
+knowledge/manifests/*.pkl
+knowledge/manifests/*.json
+
+# 输出产物（运行时生成）
+outputs/
+
+# LangGraph checkpoint 数据
+checkpoints.db
+*.db-journal

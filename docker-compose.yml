@@ -1,0 +1,99 @@
+# 本地开发环境一键拉起的律言 Agent Runtime 基础设施。
+# 包含：PostgreSQL（checkpoint + 元数据）、OpenSearch（条文检索）、MinIO（案件加密空间）、Langfuse（可观测性）。
+#
+# 注意：这是本地开发配置，密码/密钥均为弱默认值，安全插件已禁用以简化联调。
+# 生产环境部署前必须：
+#   1. 修改所有默认密码（POSTGRES_PASSWORD / MINIO_ROOT_PASSWORD / NEXTAUTH_SECRET 等）
+#   2. 启用 OpenSearch 安全插件与 TLS
+#   3. 为 Langfuse 配置独立的强 NEXTAUTH_SECRET 与 SALT
+#   4. 限制端口暴露范围（不要直接对外暴露 5432/9200/9000/3000）
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lvyan-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lvyan
+      POSTGRES_PASSWORD: lvyan
+      POSTGRES_DB: lvyan
+    ports:
+      - "5432:5432"
+    volumes:
+      - lvyan-postgres-data:/var/lib/postgresql/data
+    networks:
+      - lvyan-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lvyan -d lvyan"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: lvyan-opensearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"  # 本地开发简化，禁用安全插件；生产环境必须启用
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - lvyan-opensearch-data:/usr/share/opensearch/data
+    networks:
+      - lvyan-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio
+    container_name: lvyan-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: lvyan
+      MINIO_ROOT_PASSWORD: lvyan_dev_password
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web Console
+    volumes:
+      - lvyan-minio-data:/data
+    networks:
+      - lvyan-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: lvyan-langfuse
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://lvyan:lvyan@postgres:5432/lvyan"
+      NEXTAUTH_URL: "http://localhost:3000"
+      NEXTAUTH_SECRET: "lvyan-dev-nextauth-secret-change-me"  # 生产环境必须替换为强随机串
+      SALT: "lvyan-dev-salt-change-me"                         # 生产环境必须替换
+      # 关闭可选依赖以简化本地启动
+      DISABLE_TELEMETRY: "true"
+    ports:
+      - "3000:3000"
+    networks:
+      - lvyan-net
+
+networks:
+  lvyan-net:
+    driver: bridge
+
+volumes:
+  lvyan-postgres-data:
+  lvyan-opensearch-data:
+  lvyan-minio-data:

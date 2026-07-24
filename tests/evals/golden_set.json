@@ -1,0 +1,251 @@
+[
+  {
+    "id": "labor_001",
+    "category": "劳动争议",
+    "query": "公司辞退我怎么赔偿",
+    "expected_statutes": [
+      {"title": "中华人民共和国劳动合同法", "article_keywords": ["经济补偿", "第四十七条"]},
+      {"title": "中华人民共和国劳动法", "article_keywords": ["解除"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "应召回劳动合同法经济补偿条款，不应召回已废止版本",
+    "answer_golden": {
+      "disputed_issues": ["是否构成违法解除", "经济补偿计算基数"],
+      "evidence_gaps": ["工资流水", "解除通知书"],
+      "defendant_arguments": ["原告严重违反规章制度"],
+      "ruling_tendency": "较有利"
+    }
+  },
+  {
+    "id": "labor_002",
+    "category": "劳动争议",
+    "query": "老板拖欠工资不发怎么办",
+    "expected_statutes": [
+      {"title": "中华人民共和国劳动法", "article_keywords": ["工资", "支付"]},
+      {"title": "中华人民共和国劳动合同法", "article_keywords": ["劳动报酬"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "欠薪场景：应召回劳动法工资支付条款及劳动合同法劳动报酬条款",
+    "answer_golden": {
+      "disputed_issues": ["欠薪金额认定", "工资支付义务履行情况"],
+      "evidence_gaps": ["工资条", "考勤记录"],
+      "defendant_arguments": ["已足额支付工资", "原告未提供劳动"],
+      "ruling_tendency": "较有利"
+    }
+  },
+  {
+    "id": "labor_003",
+    "category": "劳动争议",
+    "query": "上班受伤算工伤吗怎么认定",
+    "expected_statutes": [
+      {"title": "工伤保险条例", "article_keywords": ["工伤", "认定"]},
+      {"title": "中华人民共和国社会保险法", "article_keywords": ["工伤"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "工伤认定场景：应召回工伤保险条例认定条款与社会保险法工伤保险条款",
+    "answer_golden": {
+      "disputed_issues": ["是否构成工伤", "事故是否发生在工作时间及工作场所"],
+      "evidence_gaps": ["医疗诊断证明", "事故现场证明"],
+      "defendant_arguments": ["原告受伤非因工作原因"],
+      "ruling_tendency": "胶着"
+    }
+  },
+  {
+    "id": "labor_004",
+    "category": "劳动争议",
+    "query": "没签劳动合同怎么要求双倍工资",
+    "expected_statutes": [
+      {"title": "中华人民共和国劳动合同法", "article_keywords": ["劳动合同", "二倍工资", "第八十二条"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "未签书面合同场景：应召回劳动合同法第八十二条二倍工资条款",
+    "answer_golden": {
+      "disputed_issues": ["是否存在事实劳动关系", "双倍工资计算期间"],
+      "evidence_gaps": ["入职登记表", "工资发放记录"],
+      "defendant_arguments": ["双方系劳务关系非劳动关系"],
+      "ruling_tendency": "较有利"
+    }
+  },
+  {
+    "id": "labor_005",
+    "category": "劳动争议",
+    "query": "加班费怎么计算不给加班费怎么办",
+    "expected_statutes": [
+      {"title": "中华人民共和国劳动法", "article_keywords": ["加班", "工资", "延长工作时间"]},
+      {"title": "中华人民共和国劳动合同法", "article_keywords": ["加班"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "加班费场景：应召回劳动法第四十四条加班工资计算条款",
+    "answer_golden": {
+      "disputed_issues": ["加班事实是否存在", "加班费计算基数"],
+      "evidence_gaps": ["考勤记录", "加班审批单"],
+      "defendant_arguments": ["原告系自愿加班无需支付加班费"],
+      "ruling_tendency": "胶着"
+    }
+  },
+  {
+    "id": "contract_001",
+    "category": "合同纠纷",
+    "query": "对方违约不履行合同怎么追责",
+    "expected_statutes": [
+      {"title": "中华人民共和国民法典", "article_keywords": ["违约", "违约责任"]},
+      {"title": "中华人民共和国民法典", "article_keywords": ["合同", "履行"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "违约场景：应召回民法典合同编违约责任条款，不应召回已废止的合同法"
+  },
+  {
+    "id": "contract_002",
+    "category": "合同纠纷",
+    "query": "租房子交了押金房东不退怎么办",
+    "expected_statutes": [
+      {"title": "中华人民共和国民法典", "article_keywords": ["押金", "租赁", "返还"]},
+      {"title": "中华人民共和国民法典", "article_keywords": ["合同", "租赁"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "押金纠纷场景：应召回民法典合同编租赁合同相关条款"
+  },
+  {
+    "id": "contract_003",
+    "category": "合同纠纷",
+    "query": "买卖合同卖方不交货怎么维权",
+    "expected_statutes": [
+      {"title": "中华人民共和国民法典", "article_keywords": ["买卖合同", "交付"]},
+      {"title": "中华人民共和国民法典", "article_keywords": ["违约", "责任"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "买卖合同纠纷：应召回民法典合同编买卖合同章交付义务条款"
+  },
+  {
+    "id": "contract_004",
+    "category": "合同纠纷",
+    "query": "交了定金对方违约能要双倍返还吗",
+    "expected_statutes": [
+      {"title": "中华人民共和国民法典", "article_keywords": ["定金", "双倍"]},
+      {"title": "中华人民共和国民法典", "article_keywords": ["定金", "返还"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "定金罚则场景：应召回民法典定金双倍返还条款（原担保法已废止并入民法典）"
+  },
+  {
+    "id": "tort_001",
+    "category": "侵权纠纷",
+    "query": "发生交通事故对方全责怎么赔偿",
+    "expected_statutes": [
+      {"title": "中华人民共和国道路交通安全法", "article_keywords": ["赔偿", "责任"]},
+      {"title": "中华人民共和国民法典", "article_keywords": ["损害赔偿", "机动车"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "交通事故场景：应召回道路交通安全法责任认定条款与民法典侵权责任编机动车条款"
+  },
+  {
+    "id": "tort_002",
+    "category": "侵权纠纷",
+    "query": "医院手术失误造成医疗事故怎么索赔",
+    "expected_statutes": [
+      {"title": "中华人民共和国民法典", "article_keywords": ["医疗", "损害", "责任"]},
+      {"title": "医疗事故处理条例", "article_keywords": ["医疗事故", "赔偿"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "医疗损害场景：应召回民法典侵权责任编医疗损害责任章与医疗事故处理条例"
+  },
+  {
+    "id": "tort_003",
+    "category": "侵权纠纷",
+    "query": "被人打伤怎么要求人身损害赔偿",
+    "expected_statutes": [
+      {"title": "中华人民共和国民法典", "article_keywords": ["损害赔偿", "人身"]},
+      {"title": "中华人民共和国治安管理处罚法", "article_keywords": ["殴打", "伤害"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "人身损害场景：应召回民法典侵权责任编损害赔偿条款，不应召回已废止的侵权责任法"
+  },
+  {
+    "id": "family_001",
+    "category": "婚姻家庭",
+    "query": "离婚时夫妻财产怎么分割",
+    "expected_statutes": [
+      {"title": "中华人民共和国民法典", "article_keywords": ["离婚", "财产", "分割"]},
+      {"title": "中华人民共和国民法典", "article_keywords": ["夫妻", "共同财产"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "离婚财产分割：应召回民法典婚姻家庭编离婚财产分割条款，不应召回已废止的婚姻法"
+  },
+  {
+    "id": "family_002",
+    "category": "婚姻家庭",
+    "query": "离婚后孩子抚养权归谁怎么判",
+    "expected_statutes": [
+      {"title": "中华人民共和国民法典", "article_keywords": ["抚养", "子女", "离婚"]},
+      {"title": "中华人民共和国民法典", "article_keywords": ["抚养权"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "抚养权场景：应召回民法典婚姻家庭编抚养权条款"
+  },
+  {
+    "id": "family_003",
+    "category": "婚姻家庭",
+    "query": "父母去世遗产怎么继承分配",
+    "expected_statutes": [
+      {"title": "中华人民共和国民法典", "article_keywords": ["继承", "遗产"]},
+      {"title": "中华人民共和国民法典", "article_keywords": ["法定继承"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "继承场景：应召回民法典继承编法定继承条款，不应召回已废止的继承法"
+  },
+  {
+    "id": "lease_001",
+    "category": "租赁纠纷",
+    "query": "租房合同到期房东不退押金怎么办",
+    "expected_statutes": [
+      {"title": "中华人民共和国民法典", "article_keywords": ["押金", "租赁", "返还"]},
+      {"title": "中华人民共和国民法典", "article_keywords": ["租赁合同"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "押金退还场景：应召回民法典合同编租赁合同章押金返还相关条款"
+  },
+  {
+    "id": "lease_002",
+    "category": "租赁纠纷",
+    "query": "租房没到期想提前退租怎么处理",
+    "expected_statutes": [
+      {"title": "中华人民共和国民法典", "article_keywords": ["租赁", "解除", "合同"]},
+      {"title": "中华人民共和国民法典", "article_keywords": ["违约", "租赁"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "提前退租场景：应召回民法典合同编租赁合同解除条款"
+  },
+  {
+    "id": "consumer_001",
+    "category": "消费者权益",
+    "query": "买到假货怎么要求三倍赔偿",
+    "expected_statutes": [
+      {"title": "中华人民共和国消费者权益保护法", "article_keywords": ["三倍", "赔偿", "欺诈"]},
+      {"title": "中华人民共和国产品质量法", "article_keywords": ["产品", "质量"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "假货索赔场景：应召回消费者权益保护法第五十五条三倍赔偿条款及产品质量法"
+  },
+  {
+    "id": "consumer_002",
+    "category": "消费者权益",
+    "query": "买到不符合食品安全标准的食品怎么索赔",
+    "expected_statutes": [
+      {"title": "中华人民共和国食品安全法", "article_keywords": ["食品", "赔偿", "十倍"]},
+      {"title": "中华人民共和国消费者权益保护法", "article_keywords": ["食品", "赔偿"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "食品安全场景：应召回食品安全法第一百四十八条十倍赔偿条款"
+  },
+  {
+    "id": "privacy_001",
+    "category": "个人信息保护",
+    "query": "公司未经同意公开我的健康信息怎么办",
+    "expected_statutes": [
+      {"title": "中华人民共和国个人信息保护法", "article_keywords": ["个人信息", "同意", "公开"]},
+      {"title": "中华人民共和国民法典", "article_keywords": ["隐私", "个人信息"]}
+    ],
+    "expected_effective_only": true,
+    "notes": "召回漏洞回归场景：应召回个人信息保护法同意规则条款与民法典隐私权条款，验证 BM25 不再因标题预筛漏召回"
+  }
+]
