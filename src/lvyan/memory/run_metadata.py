@@ -27,6 +27,12 @@ class RunMetadataStore(Protocol):
 
     def get_thread(self, thread_id: str) -> dict[str, Any] | None: ...
 
+    def list_threads(self, user_id: str) -> list[tuple[str, dict[str, Any]]]: ...
+
+    def delete_thread(self, thread_id: str, user_id: str) -> bool: ...
+
+    def mark_thread_output(self, thread_id: str) -> None: ...
+
     def claim_hitl_run(
         self, run_id: str, user_id: str
     ) -> dict[str, Any] | None: ...
@@ -183,6 +189,55 @@ class PostgresRunMetadataStore:
                 )
                 row = cur.fetchone()
         return dict(row) if row else None
+
+    def list_threads(self, user_id: str) -> list[tuple[str, dict[str, Any]]]:
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT thread_id, user_id, title, complexity,
+                           has_output, created_at, updated_at
+                    FROM agent_threads
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                    """,
+                    (user_id,),
+                )
+                rows = cur.fetchall()
+        return [
+            (str(row["thread_id"]), dict(row))
+            for row in rows
+        ]
+
+    def delete_thread(self, thread_id: str, user_id: str) -> bool:
+        """Delete a user-owned thread and cascade-delete its run records."""
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM agent_threads
+                    WHERE thread_id = %s AND user_id = %s
+                    RETURNING thread_id
+                    """,
+                    (thread_id, user_id),
+                )
+                row = cur.fetchone()
+        return row is not None
+
+    def mark_thread_output(self, thread_id: str) -> None:
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE agent_threads
+                    SET has_output = TRUE
+                    WHERE thread_id = %s
+                    """,
+                    (thread_id,),
+                )
 
     def claim_hitl_run(
         self,

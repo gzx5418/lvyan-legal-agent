@@ -57,6 +57,8 @@ class RunContext:
         self.non_recoverable: bool = False
         # HITL 中断信息（LangGraph interrupt 机制）
         self.hitl_interrupt: dict[str, Any] | None = None
+        self.hitl_persisted: bool = False
+        self._persist_hitl_callback: Callable[[dict[str, Any]], bool] | None = None
         # P3-24：TTL 摘要（用于 RunManager 自动清理过期运行）
         self.created_at: float = 0.0
         self.completed_at: float | None = None
@@ -64,6 +66,14 @@ class RunContext:
     async def publish(self, event: dict[str, Any]) -> None:
         """发布一个 SSE 事件到队列，供流式消费者读取。"""
         await self.queue.put(event)
+
+    def persist_hitl_state(self, interrupt_info: dict[str, Any]) -> bool:
+        """Persist HITL before exposing an approval action to the client."""
+        if self._persist_hitl_callback is None:
+            self.hitl_persisted = True
+            return True
+        self.hitl_persisted = bool(self._persist_hitl_callback(interrupt_info))
+        return self.hitl_persisted
 
 
 class RunManager:
@@ -80,6 +90,14 @@ class RunManager:
         self._runs: dict[str, RunContext] = {}
         self._runner: Runner | None = runner
         self._metadata_store = metadata_store
+
+    def _bind_context(self, ctx: RunContext) -> RunContext:
+        ctx._persist_hitl_callback = lambda interrupt_info: self._update_metadata(
+            ctx.run_id,
+            status="awaiting_hitl",
+            interrupt_payload=interrupt_info,
+        )
+        return ctx
 
     def _update_metadata(self, run_id: str, **values: Any) -> bool:
         if self._metadata_store is None:
@@ -116,6 +134,20 @@ class RunManager:
             return ("forbidden", existing)
         return ("conflict", existing)
 
+    def _mark_thread_output(self, thread_id: str) -> bool:
+        if self._metadata_store is None:
+            return True
+        try:
+            self._metadata_store.mark_thread_output(thread_id)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "thread metadata output mark failed for %s: %s",
+                thread_id,
+                exc,
+            )
+            return False
+
     # ------------------------------------------------------------------
     # 运行生命周期
     # ------------------------------------------------------------------
@@ -132,12 +164,12 @@ class RunManager:
 
         run_id = f"run-{uuid.uuid4().hex}"
         resolved_thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"
-        ctx = RunContext(
+        ctx = self._bind_context(RunContext(
             run_id,
             resolved_thread_id,
             user_id=user_id,
             law_as_of_date=law_as_of_date,
-        )
+        ))
         ctx.created_at = _time.time()
         self._runs[run_id] = ctx
         if self._metadata_store is not None:
@@ -182,14 +214,24 @@ class RunManager:
             else:
                 output = await default_runner(query, ctx.thread_id, complexity, ctx)
 
+            if ctx.status == "failed":
+                return
+
             # P0-1 修复：runner 主动进入 awaiting_hitl 时不覆盖状态
             if ctx.status == "awaiting_hitl":
+                if (
+                    not ctx.hitl_persisted
+                    and not ctx.persist_hitl_state(ctx.hitl_interrupt or {})
+                ):
+                    ctx.status = "failed"
+                    ctx.error = "无法持久化 HITL 状态，运行不可安全恢复"
+                    await ctx.publish({
+                        "event": "error",
+                        "code": "hitl_persistence_failed",
+                        "message": ctx.error,
+                    })
+                    return
                 interrupted = True
-                self._update_metadata(
-                    ctx.run_id,
-                    status="awaiting_hitl",
-                    interrupt_payload=ctx.hitl_interrupt,
-                )
                 return
 
             ctx.final_output = output or ""
@@ -203,6 +245,7 @@ class RunManager:
                 final_output=ctx.final_output,
                 completed_at=datetime.now(timezone.utc),
             )
+            self._mark_thread_output(ctx.thread_id)
             await ctx.publish({"event": "final_output", "output": ctx.final_output})
         except Exception as exc:  # noqa: BLE001 入口层需宽口径捕获
             ctx.status = "failed"
@@ -292,7 +335,7 @@ class RunManager:
             if claim_status == "not_found":
                 return ("not_found", f"run {run_id} 不存在")
             if claim_status == "unavailable":
-                return ("error", f"run {run_id} 的审批状态暂时不可用")
+                return ("unavailable", f"run {run_id} 的审批状态暂时不可用")
 
             # 恢复执行并继续流式推送
             ctx.status = "running"
@@ -368,7 +411,9 @@ class RunManager:
                 if is_auth_enabled() and user_id != current_user_id:
                     return ("forbidden", f"run {run_id} 不属于当前用户（owner={user_id}）")
 
-                ctx = RunContext(run_id, thread_id, user_id=user_id)
+                ctx = self._bind_context(
+                    RunContext(run_id, thread_id, user_id=user_id)
+                )
                 ctx.status = "awaiting_hitl"
                 ctx.hitl_interrupt = interrupt_info
                 ctx.created_at = meta.get("created_at", 0.0)
@@ -390,7 +435,7 @@ class RunManager:
                     return ("not_found", f"run {run_id} 不存在")
                 if claim_status == "unavailable":
                     self._runs.pop(run_id, None)
-                    return ("error", f"run {run_id} 的审批状态暂时不可用")
+                    return ("unavailable", f"run {run_id} 的审批状态暂时不可用")
 
                 ctx.status = "running"
                 asyncio.create_task(
@@ -465,14 +510,18 @@ class RunManager:
             # 再次检查是否还有中断
             interrupt_info = _check_interrupt(graph, config)
             if interrupt_info:
+                if not ctx.persist_hitl_state(interrupt_info):
+                    ctx.status = "failed"
+                    ctx.error = "无法持久化 HITL 状态，运行不可安全恢复"
+                    await ctx.publish({
+                        "event": "error",
+                        "code": "hitl_persistence_failed",
+                        "message": ctx.error,
+                    })
+                    return
                 ctx.status = "awaiting_hitl"
                 ctx.hitl_interrupt = interrupt_info
                 interrupted = True
-                self._update_metadata(
-                    ctx.run_id,
-                    status="awaiting_hitl",
-                    interrupt_payload=interrupt_info,
-                )
                 await ctx.publish(
                     {"event": "hitl_required", "run_id": ctx.run_id, "message": interrupt_info.get("message", "")}
                 )
@@ -489,6 +538,7 @@ class RunManager:
                 final_output=ctx.final_output,
                 completed_at=datetime.now(timezone.utc),
             )
+            self._mark_thread_output(ctx.thread_id)
 
             # 标记会话已有输出
             try:
@@ -735,6 +785,15 @@ async def default_runner(
         # 检查是否有 LangGraph interrupt（HITL）
         interrupt_info = _check_interrupt(graph, config)
         if interrupt_info:
+            if not ctx.persist_hitl_state(interrupt_info):
+                ctx.status = "failed"
+                ctx.error = "无法持久化 HITL 状态，运行不可安全恢复"
+                await ctx.publish({
+                    "event": "error",
+                    "code": "hitl_persistence_failed",
+                    "message": ctx.error,
+                })
+                return ""
             ctx.status = "awaiting_hitl"
             ctx.hitl_interrupt = interrupt_info
             # The persisted run_id -> thread_id mapping is the cross-instance

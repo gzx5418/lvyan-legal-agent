@@ -38,7 +38,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from lvyan.config import AGENT_DIR, is_official_db_available, settings
@@ -131,6 +131,15 @@ def _state_summary(state: Any) -> dict[str, Any]:
         "cases_count": len(state.cases),
         "pending_human_approval": getattr(state, "pending_human_approval", None) is not None,
     }
+
+
+def _as_unix_timestamp(value: Any) -> float:
+    if hasattr(value, "timestamp"):
+        return float(value.timestamp())
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return time.time()
 
 
 def _check_database() -> str:
@@ -281,7 +290,7 @@ def create_app(
         return {"status": "ok"}
 
     @app.get("/readyz")
-    async def readyz() -> dict[str, Any]:
+    async def readyz() -> JSONResponse:
         """就绪检查：实际探测 DB / 检索 / 模型网关，任一不可用则 not-ready。
 
         - ``database``：``SELECT 1``
@@ -302,13 +311,16 @@ def create_app(
         gw = _check_model_gateway_ready()
         ready = db == "ok" and ret == "ok"
         # model_gateway 不可用不阻断 ready（可降级到规则路径）
-        return {
-            "status": "ready" if ready else "not-ready",
-            "database": db,
-            "retrieval": ret,
-            "model_gateway": gw,
-            "object_storage": "unknown",
-        }
+        return JSONResponse(
+            status_code=200 if ready else 503,
+            content={
+                "status": "ready" if ready else "not-ready",
+                "database": db,
+                "retrieval": ret,
+                "model_gateway": gw,
+                "object_storage": "unknown",
+            },
+        )
 
     @app.post("/api/agent/run", response_model=AgentRunResponse)
     async def run(
@@ -506,8 +518,16 @@ def create_app(
         thread_id: str,
         user_id: str = Depends(get_current_user_id),
     ) -> dict[str, Any]:
-        # P2-13：ownership 校验（认证启用时强制；单租户模式下放行）
-        meta = dict(mem.list_threads()).get(thread_id)
+        if metadata_store is not None:
+            try:
+                meta = metadata_store.get_thread(thread_id)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail="thread metadata 暂时不可用",
+                ) from exc
+        else:
+            meta = dict(mem.list_threads()).get(thread_id)
         assert_thread_owner(meta, user_id, thread_id)
         cs = mem.load(thread_id)
         if cs is None:
@@ -520,9 +540,36 @@ def create_app(
         user_id: str = Depends(get_current_user_id),
     ) -> DeleteResponse:
         """删除指定会话：从 checkpointer 与索引中移除。"""
-        meta = dict(mem.list_threads()).get(thread_id)
-        assert_thread_owner(meta, user_id, thread_id)
-        mem.delete(thread_id)
+        if metadata_store is not None:
+            try:
+                meta = metadata_store.get_thread(thread_id)
+                assert_thread_owner(meta, user_id, thread_id)
+                deleted = metadata_store.delete_thread(thread_id, user_id)
+            except HTTPException:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail="thread metadata 暂时不可用",
+                ) from exc
+            if not deleted:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"thread {thread_id} 无记录",
+                )
+            try:
+                mem.delete(thread_id)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "durable thread deleted but local checkpoint cleanup failed "
+                    "for %s: %s",
+                    thread_id,
+                    exc,
+                )
+        else:
+            meta = dict(mem.list_threads()).get(thread_id)
+            assert_thread_owner(meta, user_id, thread_id)
+            mem.delete(thread_id)
         return DeleteResponse(deleted=True, thread_id=thread_id)
 
     @app.get("/api/agent/threads", response_model=ThreadListResponse)
@@ -536,7 +583,16 @@ def create_app(
         """
         from .auth import ANONYMOUS_USER, is_auth_enabled
 
-        threads = mem.list_threads()
+        if metadata_store is not None:
+            try:
+                threads = metadata_store.list_threads(user_id)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail="thread metadata 暂时不可用",
+                ) from exc
+        else:
+            threads = mem.list_threads()
         summaries: list[ThreadSummary] = []
         for tid, meta in threads:
             # ownership 过滤
@@ -547,7 +603,7 @@ def create_app(
                 thread_id=tid,
                 title=title,
                 complexity=meta.get("complexity") or "light",
-                created_at=float(meta.get("created_at") or time.time()),
+                created_at=_as_unix_timestamp(meta.get("created_at")),
                 has_output=bool(meta.get("has_output")),
             ))
         return ThreadListResponse(threads=summaries)
@@ -684,6 +740,8 @@ def create_app(
             raise HTTPException(status_code=404, detail=message)
         if status == "forbidden":
             raise HTTPException(status_code=403, detail=message)
+        if status == "unavailable":
+            raise HTTPException(status_code=503, detail=message)
         if status == "error":
             raise HTTPException(status_code=409, detail=message)
         return HITLResponse(run_id=run_id, status=status, message=message)

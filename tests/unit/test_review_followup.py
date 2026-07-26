@@ -387,6 +387,9 @@ class _ApiMemory:
     def mark_output(self, _thread_id: str) -> None:
         return None
 
+    def delete(self, thread_id: str) -> None:
+        self.items.pop(thread_id, None)
+
 
 def test_metadata_creation_failure_returns_503():
     from fastapi.testclient import TestClient
@@ -522,3 +525,199 @@ def test_cross_instance_running_stream_requires_affinity():
 
     assert response.status_code == 409
     assert "session affinity" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_hitl_persistence_failure_does_not_publish_approval(monkeypatch):
+    from lvyan.api import sse
+
+    class FailingStore:
+        def update_run(self, _run_id: str, **_values: Any) -> None:
+            raise OSError("database unavailable")
+
+    class FakeGraph:
+        async def astream(self, *_args: Any, **_kwargs: Any):
+            if False:
+                yield None
+
+        def get_state(self, _config: dict[str, Any]):
+            interrupt = SimpleNamespace(value={"message": "approve"})
+            return SimpleNamespace(
+                next=("output_guardrail",),
+                values={"run_id": "run-1"},
+                tasks=(SimpleNamespace(interrupts=[interrupt]),),
+            )
+
+    class Memory:
+        def register(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def mark_output(self, _thread_id: str) -> None:
+            return None
+
+    manager = sse.RunManager(metadata_store=FailingStore())
+    ctx = manager._bind_context(sse.RunContext("run-1", "thread-1"))
+    manager._runs[ctx.run_id] = ctx
+    monkeypatch.setattr(sse, "_get_graph", lambda: FakeGraph())
+    monkeypatch.setattr("lvyan.runtime.get_case_memory", lambda: Memory())
+
+    output = await sse.default_runner("问题", "thread-1", "light", ctx)
+
+    events = []
+    while not ctx.queue.empty():
+        events.append(ctx.queue.get_nowait())
+    assert output == ""
+    assert ctx.status == "failed"
+    assert not any(event.get("event") == "hitl_required" for event in events)
+    assert any(
+        event.get("code") == "hitl_persistence_failed"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_second_hitl_persistence_failure_closes_without_approval(
+    monkeypatch,
+):
+    from lvyan.api import sse
+
+    class FailingStore:
+        def update_run(self, _run_id: str, **_values: Any) -> None:
+            raise OSError("database unavailable")
+
+    class FakeGraph:
+        async def astream(self, *_args: Any, **_kwargs: Any):
+            if False:
+                yield None
+
+        def get_state(self, _config: dict[str, Any]):
+            interrupt = SimpleNamespace(value={"message": "approve again"})
+            return SimpleNamespace(
+                next=("output_guardrail",),
+                values={"run_id": "run-1"},
+                tasks=(SimpleNamespace(interrupts=[interrupt]),),
+            )
+
+    manager = sse.RunManager(metadata_store=FailingStore())
+    ctx = manager._bind_context(sse.RunContext("run-1", "thread-1"))
+    manager._runs[ctx.run_id] = ctx
+    monkeypatch.setattr(sse, "_get_graph", lambda: FakeGraph())
+
+    await manager._resume_drive(
+        ctx,
+        command={"resume": "approve"},
+        config={"configurable": {"thread_id": "thread-1"}},
+    )
+
+    events = []
+    while not ctx.queue.empty():
+        event = ctx.queue.get_nowait()
+        if event is not None:
+            events.append(event)
+    assert ctx.status == "failed"
+    assert not any(event.get("event") == "hitl_required" for event in events)
+    assert any(
+        event.get("code") == "hitl_persistence_failed"
+        for event in events
+    )
+
+
+def test_delete_thread_uses_durable_store_and_local_cleanup():
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+
+    calls: list[tuple[str, str]] = []
+    memory = _ApiMemory()
+    memory.items["thread-1"] = {"user_id": "anonymous"}
+
+    class Store:
+        def get_thread(self, thread_id: str):
+            return {"thread_id": thread_id, "user_id": "anonymous"}
+
+        def delete_thread(self, thread_id: str, user_id: str) -> bool:
+            calls.append((thread_id, user_id))
+            return True
+
+    async def runner(*_args: Any, **_kwargs: Any) -> str:
+        return ""
+
+    response = TestClient(create_app(
+        runner=runner,
+        memory=memory,
+        metadata_store=Store(),
+    )).delete("/api/agent/state/thread-1")
+
+    assert response.status_code == 200
+    assert calls == [("thread-1", "anonymous")]
+    assert "thread-1" not in memory.items
+
+
+def test_thread_list_uses_durable_store_not_sidecar():
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+
+    class Store:
+        def list_threads(self, user_id: str):
+            assert user_id == "anonymous"
+            return [
+                (
+                    "thread-db",
+                    {
+                        "thread_id": "thread-db",
+                        "user_id": user_id,
+                        "title": "数据库会话",
+                        "complexity": "deep",
+                        "created_at": 1.0,
+                        "has_output": True,
+                    },
+                )
+            ]
+
+    async def runner(*_args: Any, **_kwargs: Any) -> str:
+        return ""
+
+    response = TestClient(create_app(
+        runner=runner,
+        memory=_ApiMemory(),
+        metadata_store=Store(),
+    )).get("/api/agent/threads")
+
+    assert response.status_code == 200
+    assert response.json()["threads"][0]["thread_id"] == "thread-db"
+
+
+def test_hitl_metadata_unavailable_returns_503(monkeypatch):
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+    from lvyan.api.sse import RunManager
+
+    async def unavailable(*_args: Any, **_kwargs: Any):
+        return ("unavailable", "审批状态暂时不可用")
+
+    monkeypatch.setattr(RunManager, "resolve_hitl", unavailable)
+    response = TestClient(create_app(
+        runner=lambda *_args, **_kwargs: None,
+        memory=_ApiMemory(),
+    )).post(
+        "/api/agent/hitl/run-1",
+        json={"action": "approve"},
+    )
+
+    assert response.status_code == 503
+
+
+def test_readyz_returns_503_when_dependency_not_ready(monkeypatch):
+    from fastapi.testclient import TestClient
+    from lvyan.api import server
+
+    monkeypatch.setattr(server, "_check_database_ready", lambda: "unavailable")
+    monkeypatch.setattr(server, "_check_retrieval", lambda: "ok")
+    monkeypatch.setattr(server, "_check_model_gateway_ready", lambda: "ok")
+
+    response = TestClient(server.create_app(
+        runner=lambda *_args, **_kwargs: None,
+        memory=_ApiMemory(),
+    )).get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "not-ready"
