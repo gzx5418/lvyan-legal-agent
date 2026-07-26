@@ -68,13 +68,24 @@ class RunManager:
         return ctx
 
     async def _drive(self, ctx: RunContext, query: str, complexity: str) -> None:
-        """驱动 runner 执行，捕获异常，最终推送 final_output 并关闭流。"""
+        """驱动 runner 执行，捕获异常，最终推送 final_output 并关闭流。
+
+        关键：runner 进入 ``awaiting_hitl`` 状态时不覆盖、不发送 final_output、
+        不关闭 SSE 流，由 :meth:`_resume_drive` 在 HITL 决策后负责收尾。
+        """
         ctx.status = "running"
+        interrupted = False
         try:
             if self._runner is not None:
                 output = await self._runner(query, ctx.thread_id, complexity, ctx)
             else:
                 output = await default_runner(query, ctx.thread_id, complexity, ctx)
+
+            # P0-1 修复：runner 主动进入 awaiting_hitl 时不覆盖状态
+            if ctx.status == "awaiting_hitl":
+                interrupted = True
+                return
+
             ctx.final_output = output or ""
             ctx.status = "completed"
             await ctx.publish({"event": "final_output", "output": ctx.final_output})
@@ -84,8 +95,9 @@ class RunManager:
             _logger.exception("Agent run %s failed", ctx.run_id)
             await ctx.publish({"event": "error", "message": str(exc)})
         finally:
-            # 哨兵：通知 SSE 流结束
-            await ctx.queue.put(None)
+            # 仅在非中断时关闭 SSE 流；HITL 由 _resume_drive 收尾
+            if not interrupted:
+                await ctx.queue.put(None)
 
     # ------------------------------------------------------------------
     # 查询

@@ -97,17 +97,31 @@ class CaseMemory:
         title: str = "",
         complexity: str = "light",
     ) -> None:
-        """注册新会话到索引。
+        """注册新会话到索引；已存在时仅更新可变字段，不覆盖创建时间。
 
-        Agent 运行时状态由 checkpointer 自动保存，此方法仅更新索引元数据。
+        P1 修复：原实现无条件覆盖 ``created_at`` / ``has_output``，导致用户
+        「继续」会话后标题被截短、创建时间被刷新、``has_output`` 被重置。
+        现区分新建 vs 更新：
+          - 新建：写入完整元数据。
+          - 已存在：只更新 ``complexity`` / ``updated_at``；仅当旧标题为空或
+            等于 thread_id（占位符）时才用新标题覆盖；``has_output`` 保持不变。
         """
         with self._lock:
-            self._index[thread_id] = {
-                "title": title or thread_id,
-                "complexity": complexity,
-                "created_at": time.time(),
-                "has_output": False,
-            }
+            existing = self._index.get(thread_id)
+            if existing is not None:
+                existing["complexity"] = complexity
+                existing["updated_at"] = time.time()
+                old_title = existing.get("title", "")
+                if title and (not old_title or old_title == thread_id):
+                    existing["title"] = title
+            else:
+                self._index[thread_id] = {
+                    "title": title or thread_id,
+                    "complexity": complexity,
+                    "created_at": time.time(),
+                    "updated_at": time.time(),
+                    "has_output": False,
+                }
             self._save_index()
 
     def mark_output(self, thread_id: str) -> None:

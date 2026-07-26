@@ -92,6 +92,31 @@ def _chunk_attr(chunk: Any, name: str, default: Any = None) -> Any:
     return getattr(chunk, name, default)
 
 
+def _effective_as_of(authority: Authority, target_date: date) -> bool:
+    """判断法规在 ``target_date`` 时间点是否有效。
+
+    判定规则（按 P0-5 修复）：
+      - ``effective_date`` 已知且晚于 ``target_date``：尚未生效 → 无效
+      - ``expiry_date`` 已知且不晚于 ``target_date``：已失效 → 无效
+      - ``status == "repealed"`` 且 ``expiry_date`` 未知：保守视为已失效
+        （无法确定废止日期是否落在 target_date 之后）
+      - 其余视为有效
+
+    注意：``status`` 反映的是「当前元数据状态」。查询历史时间点时，必须按
+    时间窗口判断，而不是直接看 ``status == "effective"``，否则会错误排除
+    「现在已经废止、但在 target_date 当时仍然有效」的法规（如已废止的
+    《合同法》《婚姻法》《继承法》在 2021-01-01 民法典生效前仍然有效）。
+    """
+    if authority.effective_date is not None and authority.effective_date > target_date:
+        return False
+    if authority.expiry_date is not None and authority.expiry_date <= target_date:
+        return False
+    if authority.status == "repealed" and authority.expiry_date is None:
+        # 已废止但无废止日期 → 保守排除（无法证明它在 target_date 仍有效）
+        return False
+    return True
+
+
 def _passes_version_filter(
     authority: Authority,
     as_of_date: date | None,
@@ -99,15 +124,19 @@ def _passes_version_filter(
 ) -> bool:
     """``as_of`` + ``only_effective`` 二次校验。
 
-    ``hybrid_search`` 已做一次过滤；此处兜底防止边角情况漏过：
-      - ``only_effective=True`` 时要求 ``status == "effective"``
-      - ``as_of`` 给定时要求 ``effective_date <= as_of``（None 视为未知，保留）
+    ``hybrid_search`` 已做一次过滤；此处兜底防止边角情况漏过。
+
+    判定规则（P0-5 修复后）：
+      - ``as_of_date`` 给定：按 :func:`_effective_as_of` 时间点判断，**不再**
+        要求 ``status == "effective"``。这样能召回「现已废止但在目标时间点
+        仍有效」的历史法规（例如 2018 年案件应能召回当时仍有效的《合同法》）。
+      - ``as_of_date`` 为 ``None`` 且 ``only_effective=True``：要求当前状态
+        为 ``effective``（与历史时间点查询解耦）。
     """
+    if as_of_date is not None:
+        return _effective_as_of(authority, as_of_date)
     if only_effective and authority.status != "effective":
         return False
-    if as_of_date is not None and authority.effective_date is not None:
-        if authority.effective_date > as_of_date:
-            return False
     return True
 
 
@@ -287,14 +316,16 @@ def verify_statute_status(
     # expiry_date：LawMetadata 暂未解析该字段，统一 None
     expiry_date: date | None = None
 
-    # 计算有效性
+    # 计算有效性（P0-5 修复：as_of 给定时不强制 status == "effective"）
     if as_of_date is not None:
-        # 时间点查询：三条件全满足才有效
-        if meta.status != "effective":
-            is_effective = False
-        elif meta.effective_date is not None and meta.effective_date > as_of_date:
+        # 时间点查询：按时间窗口判断，不要求当前 status=effective
+        # 这样能正确识别「现已废止但在目标日期仍有效」的历史法规
+        if meta.effective_date is not None and meta.effective_date > as_of_date:
             is_effective = False
         elif expiry_date is not None and expiry_date <= as_of_date:
+            is_effective = False
+        elif meta.status == "repealed" and expiry_date is None:
+            # 已废止但无废止日期 → 保守视为失效
             is_effective = False
         else:
             is_effective = True

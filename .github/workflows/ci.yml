@@ -82,11 +82,12 @@ jobs:
 
       - name: Verify degrade mode triggers failure
         run: |
-          python tests/evals/run_regression.py --limit 3 --degrade && {
-            echo "ERROR: degrade 模式应失败但通过了"; exit 1
-          } || {
+          if python tests/evals/run_regression.py --limit 3 --degrade; then
+            echo "ERROR: degrade 模式应失败但通过了"
+            exit 1
+          else
             echo "OK: degrade 模式正确触发阈值失败"
-          }
+          fi
 
       - name: Upload regression report
         if: always()

@@ -387,7 +387,8 @@ def _try_llm_extract_facts(
         temperature=0.1,
         max_tokens=1200,
     )
-    if result is None:
+    if result is None or not isinstance(result, dict):
+        # P0-6 防御：chat_json 返回非 dict（如 str/None）时直接降级
         return None
 
     # 规则校验 + 转换

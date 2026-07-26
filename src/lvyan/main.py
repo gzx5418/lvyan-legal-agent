@@ -22,6 +22,7 @@ from typing import Any, Iterator
 from pydantic import BaseModel, Field
 
 from lvyan.graph import build_graph
+from lvyan.runtime import get_shared_graph
 from lvyan.schemas import CaseState
 
 __all__ = ["run_agent", "run_agent_with_state", "stream_agent", "AgentResult", "main"]
@@ -69,7 +70,9 @@ def run_agent_with_state(
     initial = _build_initial_state(
         run_id, resolved_thread_id, query, complexity, case_type
     )
-    graph = build_graph()
+    # P1-5 修复：CLI / Python API 改用共享图实例（同一 checkpointer），
+    # 与 API 入口保持单一状态源，支持 interrupt resume
+    graph = get_shared_graph()
     config = {"configurable": {"thread_id": resolved_thread_id}}
     result = graph.invoke(initial.model_dump(), config)
     state_dict = result if isinstance(result, dict) else {}
@@ -125,7 +128,8 @@ def stream_agent(
     initial = _build_initial_state(
         run_id, resolved_thread_id, query, complexity, case_type
     )
-    graph = build_graph()
+    # P1-5 修复：CLI 流式入口同样使用共享图实例
+    graph = get_shared_graph()
     config = {"configurable": {"thread_id": resolved_thread_id}}
     final_output = ""
     try:

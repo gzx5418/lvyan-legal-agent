@@ -3,14 +3,17 @@
 定义 ``GraphState``，与 :class:`lvyan.schemas.CaseState` 字段一一对齐，
 作为 LangGraph ``StateGraph`` 的状态 schema。
 
-设计要点
---------
+设计要点（P0-4 修复后）
+-----------------------
 - 采用 ``TypedDict`` 而非直接复用 ``CaseState``（Pydantic 模型）：
   TypedDict 在 LangGraph 中序列化开销更低，且可在字段注解上挂载
-  ``Annotated[list[X], operator.add]`` 显式声明「追加」reducer 语义。
-- 「追加」语义字段（事实 / 时间线 / 检索结果等列表）：节点返回的新增元素会
-  被 ``operator.add`` 拼接到既有列表末尾，而非整体覆盖。这保证多轮检索、
-  多节点写入的事实不会相互冲掉。
+  自定义 reducer 显式声明合并语义。
+- 「键控合并」语义字段（plan / retrieval_queries / statutes / cases /
+  evidence_requirements / conflicts / missing_facts）：
+  节点返回的完整列表与旧列表按唯一键去重合并，避免 ``operator.add`` 与
+  「节点返回完整结果」冲突导致状态不断复制。reducer 保留分数更高/更新版本。
+- 「追加」语义字段（facts / disputed_facts / timeline / uploaded_documents）：
+  节点返回的增量元素被拼接到既有列表末尾。这些字段的节点产出本身就是增量。
 - 「覆盖」语义字段（运行标识 / 元信息 / 推理结果 / 迭代计数等）：节点返回
   的值直接覆盖旧值，符合「最新一次计算为准」的直觉。
 
@@ -39,15 +42,147 @@ from lvyan.schemas.output import CitationAudit, ReasoningResult
 __all__ = ["GraphState"]
 
 
+# ---------------------------------------------------------------------------
+# 键控合并 reducer：节点返回完整列表时，按唯一键与新旧合并，避免状态翻倍
+# ---------------------------------------------------------------------------
+def _get_attr(item: object, name: str, default: object = None) -> object:
+    if item is None:
+        return default
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def merge_plan(old: list[PlanStep], new: list[PlanStep]) -> list[PlanStep]:
+    """PlanStep 按 step_id 去重，新值覆盖旧值（status/result_summary 更新）。"""
+    merged: dict[object, PlanStep] = {}
+    order: list[object] = []
+    for step in [*old, *new]:
+        key = _get_attr(step, "step_id", None) or id(step)
+        if key not in merged:
+            order.append(key)
+        merged[key] = step
+    return [merged[k] for k in order]
+
+
+def merge_retrieval_queries(
+    old: list[RetrievalQuery], new: list[RetrievalQuery]
+) -> list[RetrievalQuery]:
+    """RetrievalQuery 按 query_id 去重，新值覆盖旧值。"""
+    merged: dict[object, RetrievalQuery] = {}
+    order: list[object] = []
+    for q in [*old, *new]:
+        key = _get_attr(q, "query_id", None) or _get_attr(q, "query_text", None) or id(q)
+        if key not in merged:
+            order.append(key)
+        merged[key] = q
+    return [merged[k] for k in order]
+
+
+def _authority_score(item: object) -> float:
+    """取 Authority 三路分数的最大值（缺失视为 0）。"""
+    scores = (
+        float(_get_attr(item, "rerank_score", 0.0) or 0.0),
+        float(_get_attr(item, "dense_score", 0.0) or 0.0),
+        float(_get_attr(item, "lexical_score", 0.0) or 0.0),
+    )
+    return max(scores)
+
+
+def merge_authorities(old: list[Authority], new: list[Authority]) -> list[Authority]:
+    """Authority 按 (source_id, article_number) 去重，保留分数更高者。
+
+    authority_resolver / retrieve_statutes 返回完整列表时，
+    新值与旧值按键合并；同键保留分数更高者，避免重复检索导致状态膨胀。
+    """
+    merged: dict[tuple[object, object], Authority] = {}
+    order: list[tuple[object, object]] = []
+    for item in [*old, *new]:
+        source_id = str(_get_attr(item, "source_id", "") or "")
+        article_number = _get_attr(item, "article_number", None)
+        article_key = article_number if article_number is not None else ""
+        key = (source_id, article_key)
+        if key not in merged:
+            order.append(key)
+            merged[key] = item
+            continue
+        existing = merged[key]
+        if _authority_score(item) > _authority_score(existing):
+            merged[key] = item
+    return [merged[k] for k in order]
+
+
+def merge_cases(old: list[CaseAuthority], new: list[CaseAuthority]) -> list[CaseAuthority]:
+    """CaseAuthority 按 case_id 去重，保留 similarity_score 更高者。"""
+    merged: dict[object, CaseAuthority] = {}
+    order: list[object] = []
+    for item in [*old, *new]:
+        key = _get_attr(item, "case_id", None) or id(item)
+        if key not in merged:
+            order.append(key)
+            merged[key] = item
+            continue
+        existing = merged[key]
+        new_score = float(_get_attr(item, "similarity_score", 0.0) or 0.0)
+        old_score = float(_get_attr(existing, "similarity_score", 0.0) or 0.0)
+        if new_score > old_score:
+            merged[key] = item
+    return [merged[k] for k in order]
+
+
+def merge_evidence_requirements(
+    old: list[EvidenceRequirement], new: list[EvidenceRequirement]
+) -> list[EvidenceRequirement]:
+    """EvidenceRequirement 按 requirement_id 去重，新值覆盖旧值。"""
+    merged: dict[object, EvidenceRequirement] = {}
+    order: list[object] = []
+    for item in [*old, *new]:
+        key = _get_attr(item, "requirement_id", None) or id(item)
+        if key not in merged:
+            order.append(key)
+        merged[key] = item
+    return [merged[k] for k in order]
+
+
+def merge_conflicts(
+    old: list[AuthorityConflict], new: list[AuthorityConflict]
+) -> list[AuthorityConflict]:
+    """AuthorityConflict 按 conflict_id 去重，新值覆盖旧值。"""
+    merged: dict[object, AuthorityConflict] = {}
+    order: list[object] = []
+    for item in [*old, *new]:
+        key = _get_attr(item, "conflict_id", None) or id(item)
+        if key not in merged:
+            order.append(key)
+        merged[key] = item
+    return [merged[k] for k in order]
+
+
+def merge_missing_facts(
+    old: list[MissingFact], new: list[MissingFact]
+) -> list[MissingFact]:
+    """MissingFact 按 fact_key 去重，新值覆盖旧值。"""
+    merged: dict[object, MissingFact] = {}
+    order: list[object] = []
+    for item in [*old, *new]:
+        key = _get_attr(item, "fact_key", None) or id(item)
+        if key not in merged:
+            order.append(key)
+        merged[key] = item
+    return [merged[k] for k in order]
+
+
 class GraphState(TypedDict):
     """LangGraph 跨节点流转状态，镜像 :class:`CaseState` 全部字段，并新增
     ``critic_report`` / ``critic_feedback`` 供 Critic 节点使用，
     ``pending_human_approval`` / ``output_iteration`` / ``output_retry_needed``
     供 output_guardrail 节点使用。
 
-    追加语义字段（``Annotated[list[...], operator.add]``）：
-        facts, disputed_facts, timeline, missing_facts, uploaded_documents,
-        plan, retrieval_queries, statutes, cases, evidence_requirements, conflicts
+    合并语义字段：
+      - 键控合并（去重，新值覆盖旧值）：plan / retrieval_queries / statutes /
+        cases / evidence_requirements / conflicts / missing_facts
+      - 追加（operator.add，节点返回增量）：facts / disputed_facts / timeline /
+        uploaded_documents
 
     覆盖语义字段：
         run_id, thread_id, current_date, user_goal, jurisdiction, case_type,
@@ -68,22 +203,22 @@ class GraphState(TypedDict):
     case_type: str | None
     complexity: Literal["light", "deep", "document"]
 
-    # --- 事实与文档（追加） ---
+    # --- 事实与文档（追加；节点返回增量） ---
     facts: Annotated[list[Fact], operator.add]
     disputed_facts: Annotated[list[Fact], operator.add]
     timeline: Annotated[list[TimelineEvent], operator.add]
-    missing_facts: Annotated[list[MissingFact], operator.add]
     uploaded_documents: Annotated[list[DocumentRef], operator.add]
 
-    # --- 计划与检索（追加） ---
-    plan: Annotated[list[PlanStep], operator.add]
-    retrieval_queries: Annotated[list[RetrievalQuery], operator.add]
+    # --- 计划与检索（键控合并；节点可返回完整列表） ---
+    plan: Annotated[list[PlanStep], merge_plan]
+    retrieval_queries: Annotated[list[RetrievalQuery], merge_retrieval_queries]
 
-    # --- 权威与证据（追加） ---
-    statutes: Annotated[list[Authority], operator.add]
-    cases: Annotated[list[CaseAuthority], operator.add]
-    evidence_requirements: Annotated[list[EvidenceRequirement], operator.add]
-    conflicts: Annotated[list[AuthorityConflict], operator.add]
+    # --- 权威与证据（键控合并；节点可返回完整列表） ---
+    statutes: Annotated[list[Authority], merge_authorities]
+    cases: Annotated[list[CaseAuthority], merge_cases]
+    evidence_requirements: Annotated[list[EvidenceRequirement], merge_evidence_requirements]
+    conflicts: Annotated[list[AuthorityConflict], merge_conflicts]
+    missing_facts: Annotated[list[MissingFact], merge_missing_facts]
 
     # --- 推理与审计（覆盖） ---
     reasoning_result: ReasoningResult | None

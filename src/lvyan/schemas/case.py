@@ -32,8 +32,16 @@ class Fact(BaseModel):
     fact_id: str
     category: Literal["当事人", "时间", "金额", "行为", "证据", "其他"]
     content: str
-    source: Literal["user", "extracted"]
+    # P0-3 修复：新增 "llm" 与 "document" 来源
+    # - "user"：用户原始陈述
+    # - "extracted"：规则/正则抽取
+    # - "llm"：LLM 结构化抽取（与规则降级区分）
+    # - "document"：从上传文档解析（markitdown 转换后）
+    source: Literal["user", "extracted", "llm", "document"]
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    # 原始证据片段（LLM 抽取或文档解析时填，便于追溯）
+    source_ref: str | None = None
+    evidence_span: str | None = None
 
 
 class TimelineEvent(BaseModel):

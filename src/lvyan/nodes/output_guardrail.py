@@ -243,31 +243,53 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
                     "message": (
                         "以下操作需要您确认后才能执行："
                         + "；".join(irreversible_ops)
-                        + "。请回复「approve」（批准）/「reject」（拒绝）"
-                        "或直接发送编辑后的文本。"
+                        + "。请回复 action=approve / action=reject / "
+                        "action=edit（后者附带 edited_output 字段）。"
                     ),
                     "draft_output": final_output,
                 }
             )
-            # 处理用户响应
-            if user_response is None or user_response == "reject":
-                return {
-                    "final_output": "操作已取消。",
-                    "output_retry_needed": False,
-                    "pending_human_approval": {
-                        **pending_human_approval,
-                        "status": "rejected",
-                    },
-                }
-            elif isinstance(user_response, str) and user_response != "approve":
-                # 用户编辑了输出 → 替换 final_output
-                final_output = user_response
+
+            # P0-2 修复：统一解析结构化响应（dict）和兼容字符串
+            if isinstance(user_response, dict):
+                action = user_response.get("action")
+                edited_output = user_response.get("edited_output")
+            elif isinstance(user_response, str):
+                # 兼容旧式字符串响应：approve / reject / 视作 edit
+                action = user_response.strip()
+                edited_output = None
+                if action not in ("approve", "reject"):
+                    # 非明确 approve/reject 的字符串 → 当作 edit 内容
+                    edited_output = action
+                    action = "edit"
+            else:
+                action = "approve"
+                edited_output = None
+
+            # 拒绝：保留原分析正文，仅追加拒绝提示与状态标记
+            if action == "reject":
+                final_output = (
+                    final_output
+                    + "\n\n---\n⚠ 您已拒绝执行上述操作。Agent 不会自动执行。"
+                )
+                notes.append("用户已拒绝不可逆操作，原分析正文已保留")
+                pending_human_approval["status"] = "rejected"
+                # 直接进入最终输出阶段（跳过下面的「待确认」拼接）
+                pending_human_approval = pending_human_approval  # noqa: B018
+
+            elif action == "edit":
+                if not edited_output:
+                    raise ValueError("edit 操作缺少 edited_output")
+                final_output = str(edited_output)
                 pending_human_approval["status"] = "edited"
                 notes.append("用户已编辑输出，已替换 final_output")
-            else:
-                # 批准 → 继续
+
+            elif action == "approve":
                 pending_human_approval["status"] = "approved"
                 notes.append("用户已批准不可逆操作")
+
+            else:
+                raise ValueError(f"未知 HITL action: {action}")
         final_output = (
             final_output
             + "\n\n---\n⚠ 以下操作需要您确认后才能执行："

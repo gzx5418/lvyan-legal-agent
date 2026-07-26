@@ -387,33 +387,50 @@ def test_hitl_approve_response(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 14. HITL reject → 「操作已取消。」
+# 14. HITL reject → 保留分析正文 + 追加拒绝提示（P0-2 修复后行为）
 # ---------------------------------------------------------------------------
 def test_hitl_reject_response(monkeypatch):
-    """用户拒绝 → final_output=「操作已取消。」, status=rejected。"""
+    """用户拒绝 → 原分析正文保留，仅追加拒绝提示，status=rejected。
+
+    P0-2 修复回归：旧实现把整篇输出擦成「操作已取消。」，丢失法律分析正文。
+    新实现保留正文，仅追加拒绝提示。
+    """
     monkeypatch.setattr(settings, "hitl_enabled", True)
     state = _make_irreversible_state()
+    original = state["final_output"]
     with patch(
         "lvyan.nodes.output_guardrail.interrupt",
         return_value="reject",
     ):
         result = output_guardrail(state)
-    assert result["final_output"] == "操作已取消。"
+    # 原分析正文必须保留（不再被擦成「操作已取消。」）
+    assert result["final_output"] != "操作已取消。"
+    assert original in result["final_output"]
+    # 含拒绝提示
+    assert "拒绝" in result["final_output"]
     assert result["output_retry_needed"] is False
     assert result["pending_human_approval"]["status"] == "rejected"
 
 
-def test_hitl_none_response_treated_as_reject(monkeypatch):
-    """用户响应为 None → 视为拒绝。"""
+def test_hitl_none_response_treated_as_approve(monkeypatch):
+    """P0-2 修复：用户响应为 None（异常情况）→ 默认视为 approve，不擦正文。
+
+    旧实现 None 触发 reject 擦除正文；新实现 None 走 fallback approve，
+    保留分析正文，避免在异常路径下丢失用户可见的法律分析。
+    """
     monkeypatch.setattr(settings, "hitl_enabled", True)
     state = _make_irreversible_state()
+    original = state["final_output"]
     with patch(
         "lvyan.nodes.output_guardrail.interrupt",
         return_value=None,
     ):
         result = output_guardrail(state)
-    assert result["final_output"] == "操作已取消。"
-    assert result["pending_human_approval"]["status"] == "rejected"
+    # 原文保留
+    assert original in result["final_output"]
+    assert result["final_output"] != "操作已取消。"
+    # None 走 fallback：approve
+    assert result["pending_human_approval"]["status"] == "approved"
 
 
 # ---------------------------------------------------------------------------
