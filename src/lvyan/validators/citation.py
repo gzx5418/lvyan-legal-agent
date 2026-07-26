@@ -274,11 +274,11 @@ def _find_matching_statute(
     return None
 
 
-def _check_status(authority: Any) -> str:
-    """核验 Authority 当前状态。
+def _check_status(authority: Any, as_of: date | None = None) -> str:
+    """核验 Authority 当前状态（或在 as_of 时间点的有效性）。
 
-    优先使用 ``verify_statute_status``；查询失败或返回 ``unknown`` 时回退到
-    ``authority.status`` 字段。
+    优先使用 ``verify_statute_status``，传入 as_of 以支持历史法规验证；
+    查询失败或返回 ``unknown`` 时回退到 ``authority.status`` 字段。
     """
     source_id = str(_get(authority, "source_id", "") or "")
     own_status = str(_get(authority, "status", "unknown") or "unknown")
@@ -287,9 +287,16 @@ def _check_status(authority: Any) -> str:
         return own_status
 
     try:
-        verification = verify_statute_status(source_id)
+        verification = verify_statute_status(source_id, as_of=as_of)
     except Exception:  # noqa: BLE001 查询失败回退到 authority.status
         return own_status
+
+    if as_of is not None:
+        is_effective = _get(verification, "is_effective_as_of", None)
+        if is_effective is True:
+            return "effective"
+        if is_effective is False:
+            return "repealed"
 
     current_status = str(_get(verification, "current_status", "unknown") or "unknown")
     if current_status == "unknown":
@@ -303,14 +310,14 @@ def _check_status(authority: Any) -> str:
 def validate_citations(
     reasoning_result: Any,
     statutes: list[Any],
-    current_date: date | None = None,  # 暂未使用，保留供未来 as_of 校验
+    current_date: date | None = None,
 ) -> CitationValidationReport:
     """验证 ``reasoning_result`` 中的法条引用。
 
     Args:
         reasoning_result: ``ReasoningResult`` 实例（或 dict / None）
         statutes: ``list[Authority]``（``state.statutes``）
-        current_date: 当前日期（保留参数，暂未使用）
+        current_date: 当前日期，传入后用于 as_of 历史法规校验
 
     Returns:
         CitationValidationReport：含 ``total_citations`` / ``valid_citations`` /
@@ -326,7 +333,6 @@ def validate_citations(
     for citation in citations:
         citation_id = citation["citation_id"]
 
-        # 检查 article_number 是否存在
         if not citation["article_str"]:
             issues.append(
                 CitationIssue(
@@ -339,7 +345,6 @@ def validate_citations(
             )
             continue
 
-        # 1. 查找匹配的 statute
         matched = _find_matching_statute(citation, statutes)
 
         if matched is None:
@@ -355,10 +360,9 @@ def validate_citations(
             error_citation_ids.add(citation_id)
             continue
 
-        # 2. 内容匹配检查
         article_text = str(_get(matched, "article_text", "") or "")
         article_grams = _char_bigrams(article_text)
-        if article_grams:  # 条文非空才检查
+        if article_grams:
             context_grams = _char_bigrams(citation["context"])
             common = context_grams & article_grams
             similarity = _jaccard(context_grams, article_grams)
@@ -382,8 +386,7 @@ def validate_citations(
                 error_citation_ids.add(citation_id)
                 continue
 
-        # 3. 状态检查
-        current_status = _check_status(matched)
+        current_status = _check_status(matched, as_of=current_date)
         if current_status != "effective":
             issues.append(
                 CitationIssue(

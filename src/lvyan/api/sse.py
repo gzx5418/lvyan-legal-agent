@@ -229,10 +229,9 @@ class RunManager:
 
                 # 找到匹配 thread → P0-5 ownership 校验
                 user_id = meta.get("user_id", "anonymous")
-                if current_user_id and current_user_id != "anonymous":
-                    from .auth import is_auth_enabled
-                    if is_auth_enabled() and user_id != current_user_id:
-                        return ("forbidden", f"run {run_id} 不属于当前用户（owner={user_id}）")
+                from .auth import is_auth_enabled
+                if is_auth_enabled() and user_id != current_user_id:
+                    return ("forbidden", f"run {run_id} 不属于当前用户（owner={user_id}）")
 
                 ctx = RunContext(run_id, thread_id, user_id=user_id)
                 ctx.status = "awaiting_hitl"
@@ -278,19 +277,19 @@ class RunManager:
                 payload = part.get("data", part)
 
                 if mode == "tasks" and isinstance(payload, dict):
+                    task_id = payload.get("id", "")
                     task_name = payload.get("name", "")
                     if not task_name:
                         continue
-                    task_event = payload.get("event", "")
-                    if task_event == "start":
-                        pending_starts[task_name] = _time.time()
+                    if "input" in payload:
+                        pending_starts[task_id or task_name] = _time.time()
                         await ctx.publish({
                             "event": "node_start",
                             "node": task_name,
-                            "timestamp": pending_starts[task_name],
+                            "timestamp": pending_starts[task_id or task_name],
                         })
-                    elif task_event in ("finish", "error"):
-                        start_ts = pending_starts.pop(task_name, None)
+                    elif "result" in payload or "error" in payload:
+                        start_ts = pending_starts.pop(task_id or task_name, None)
                         now = _time.time()
                         duration_ms = max(0.0, (now - (start_ts or now)) * 1000.0)
                         await ctx.publish({
@@ -497,6 +496,7 @@ async def default_runner(
             current_date=_date.today(),
             user_goal=query,
             complexity=complexity,
+            user_id=ctx.user_id,
         )
         final_output = ""
         last_state: dict[str, Any] = {}
@@ -521,19 +521,19 @@ async def default_runner(
                 payload = part.get("data", part)
 
                 if mode == "tasks" and isinstance(payload, dict):
+                    task_id = payload.get("id", "")
                     task_name = payload.get("name", "")
                     if not task_name:
                         continue
-                    task_event = payload.get("event", "")
-                    if task_event == "start":
-                        pending_starts[task_name] = _time.time()
+                    if "input" in payload:
+                        pending_starts[task_id or task_name] = _time.time()
                         await ctx.publish({
                             "event": "node_start",
                             "node": task_name,
-                            "timestamp": pending_starts[task_name],
+                            "timestamp": pending_starts[task_id or task_name],
                         })
-                    elif task_event in ("finish", "error"):
-                        start_ts = pending_starts.pop(task_name, None)
+                    elif "result" in payload or "error" in payload:
+                        start_ts = pending_starts.pop(task_id or task_name, None)
                         now = _time.time()
                         duration_ms = max(0.0, (now - (start_ts or now)) * 1000.0)
                         await ctx.publish({
@@ -542,7 +542,7 @@ async def default_runner(
                             "timestamp": now,
                             "duration_ms": round(duration_ms, 2),
                         })
-                        if task_event == "error":
+                        if "error" in payload:
                             err_msg = payload.get("error", "unknown error")
                             await ctx.publish({
                                 "event": "node_error",
@@ -577,7 +577,9 @@ async def default_runner(
                             if out:
                                 final_output = out
 
-        except Exception:  # noqa: BLE001 v2 失败 → 回退 v1 updates
+        except TypeError as exc:  # v2 参数不兼容 → 回退 v1 updates
+            if "version" not in str(exc):
+                raise
             pending_starts = {}
             async for chunk in graph.astream(
                 initial.model_dump(), config, stream_mode="updates"

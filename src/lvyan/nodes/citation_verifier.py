@@ -384,31 +384,54 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
     # 检查最终输出中是否存在 reasoning_result 未覆盖的引用（如 composer 自行添加的）
     if final_output:
         output_citations = _extract_citations(final_output)
-        if output_citations and statutes:
-            for oc in output_citations:
-                matched = _find_matching_statute(oc, statutes)
-                if matched is None:
-                    from lvyan.validators.citation import (
-                        CitationValidationReport,
-                        CitationIssue,
+        if output_citations:
+            if not statutes:
+                from lvyan.validators.citation import (
+                    CitationValidationReport,
+                    CitationIssue,
+                )
+                existing_issues = list(_get(citation_report, "issues", []) or [])
+                existing_issues.extend(
+                    CitationIssue(
+                        citation_id=oc.get("citation_id", f"output-unverified-{i}"),
+                        issue_type="not_found",
+                        expected="存在可核验的法规来源",
+                        actual="statutes 为空",
+                        severity="error",
                     )
-                    existing_issues = list(_get(citation_report, "issues", []) or [])
-                    oc_text = f"《{oc.get('law', '')}》第{oc.get('article_str', '')}条"
-                    existing_issues.append(
-                        CitationIssue(
-                            citation_id=oc.get("citation_id", "output-unverified"),
-                            issue_type="not_found",
-                            expected="最终输出中的引用应存在于 state.statutes",
-                            actual=oc_text,
-                            severity="error",
+                    for i, oc in enumerate(output_citations)
+                )
+                citation_report = CitationValidationReport(
+                    total_citations=int(_get(citation_report, "total_citations", 0) or 0) + len(output_citations),
+                    valid_citations=int(_get(citation_report, "valid_citations", 0) or 0),
+                    issues=existing_issues,
+                    passed=False,
+                )
+            else:
+                for oc in output_citations:
+                    matched = _find_matching_statute(oc, statutes)
+                    if matched is None:
+                        from lvyan.validators.citation import (
+                            CitationValidationReport,
+                            CitationIssue,
                         )
-                    )
-                    citation_report = CitationValidationReport(
-                        total_citations=int(_get(citation_report, "total_citations", 0) or 0) + 1,
-                        valid_citations=int(_get(citation_report, "valid_citations", 0) or 0),
-                        issues=existing_issues,
-                        passed=False,
-                    )
+                        existing_issues = list(_get(citation_report, "issues", []) or [])
+                        oc_text = f"《{oc.get('law', '')}》第{oc.get('article_str', '')}条"
+                        existing_issues.append(
+                            CitationIssue(
+                                citation_id=oc.get("citation_id", "output-unverified"),
+                                issue_type="not_found",
+                                expected="最终输出中的引用应存在于 state.statutes",
+                                actual=oc_text,
+                                severity="error",
+                            )
+                        )
+                        citation_report = CitationValidationReport(
+                            total_citations=int(_get(citation_report, "total_citations", 0) or 0) + 1,
+                            valid_citations=int(_get(citation_report, "valid_citations", 0) or 0),
+                            issues=existing_issues,
+                            passed=False,
+                        )
 
     # --- 2. 汇总为 CitationAudit ---
     details = _build_citation_details(

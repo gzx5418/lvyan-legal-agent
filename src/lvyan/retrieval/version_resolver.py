@@ -59,6 +59,9 @@ class LawMetadata(BaseModel):
     author: str | None = None
     publication_date: date | None = None
     effective_date: date | None = None
+    # P0-1：新增 expiry_date / superseded_by，支持历史法规时间窗口判定
+    expiry_date: date | None = None
+    superseded_by: str | None = None
     status: AuthorityStatus = "unknown"
     group: str | None = None  # 法律/行政法规/司法解释/宪法/监察法规
     categories: list[str] = Field(default_factory=list)
@@ -195,6 +198,9 @@ def parse_law_metadata(filepath: Path) -> LawMetadata:
     # publication_date 优先取自身字段，缺失时回退到 date
     pub_raw = _get("publication_date", _get("date"))
 
+    # P0-1：expiry_date 优先取自身字段，缺失时回退到 repeal_date
+    expiry_raw = _get("expiry_date", _get("repeal_date"))
+
     return LawMetadata(
         source_id=source_id,
         title=title,
@@ -202,6 +208,8 @@ def parse_law_metadata(filepath: Path) -> LawMetadata:
         author=author,
         publication_date=_parse_date(pub_raw),
         effective_date=_parse_date(_get("effective_date")),
+        expiry_date=_parse_date(expiry_raw),
+        superseded_by=_get("superseded_by") if isinstance(_get("superseded_by"), str) else None,
         status=_map_status(_get("status")),
         group=group,
         categories=_as_str_list(_get("categories")),

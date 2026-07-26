@@ -238,6 +238,8 @@ def search_statutes(
             authority_level=_chunk_attr(chunk, "authority_level", "") or "其他",
             publication_date=_chunk_attr(chunk, "publication_date", None),
             effective_date=_chunk_attr(chunk, "effective_date", None),
+            # P0-1：复制 expiry_date 到 Authority，供 _effective_as_of 时间窗口判定
+            expiry_date=_chunk_attr(chunk, "expiry_date", None),
             status=_chunk_attr(chunk, "status", "unknown") or "unknown",
             jurisdiction=_chunk_attr(chunk, "jurisdiction", jurisdiction) or jurisdiction,
             official_source=_chunk_attr(chunk, "official_source", None),
@@ -313,8 +315,9 @@ def verify_statute_status(
 
     as_of_date = _parse_as_of(as_of)
 
-    # expiry_date：LawMetadata 暂未解析该字段，统一 None
-    expiry_date: date | None = None
+    # P0-1：使用 LawMetadata.expiry_date（已从 front matter 解析）；
+    # LawMetadata 未提供时回退 None（与旧逻辑兼容）。
+    expiry_date: date | None = meta.expiry_date
 
     # 计算有效性（P0-5 修复：as_of 给定时不强制 status == "effective"）
     if as_of_date is not None:
@@ -325,7 +328,7 @@ def verify_statute_status(
         elif expiry_date is not None and expiry_date <= as_of_date:
             is_effective = False
         elif meta.status == "repealed" and expiry_date is None:
-            # 已废止但无废止日期 → 保守视为失效
+            # 已废止但无废止日期 -> 保守视为失效
             is_effective = False
         else:
             is_effective = True
@@ -333,19 +336,21 @@ def verify_statute_status(
         # 当前有效性：status=effective 且未被 superseded
         is_effective = meta.status == "effective" and not meta.superseded
 
-    # 查找取代关系：从已构建的 VersionGroup 中查同标题的 current_effective
-    superseded_by: str | None = None
-    groups = _groups_cache or []
-    for group in groups:
-        if group.title == meta.title:
-            current = group.current_effective
-            if (
-                current is not None
-                and current.source_id != source_id
-                and meta.status == "effective"
-            ):
-                superseded_by = current.source_id
-            break
+    # P0-1：superseded_by 优先取 LawMetadata.superseded_by（front matter），
+    # 否则从 VersionGroup.current_effective 推导
+    superseded_by: str | None = meta.superseded_by
+    if superseded_by is None:
+        groups = _groups_cache or []
+        for group in groups:
+            if group.title == meta.title:
+                current = group.current_effective
+                if (
+                    current is not None
+                    and current.source_id != source_id
+                    and meta.status == "effective"
+                ):
+                    superseded_by = current.source_id
+                break
 
     official_source = meta.official_urls[0] if meta.official_urls else None
 

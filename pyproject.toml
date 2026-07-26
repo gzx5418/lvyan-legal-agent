@@ -8,7 +8,8 @@ license = { text = "MIT" }
 authors = [{ name = "律言项目组" }]
 
 dependencies = [
-    "langgraph>=0.2",                  # Agent 编排（显式状态图）
+    "langgraph>=1.0,<2.0",                   # Agent 编排（显式状态图，v1+ 支持 version="v2" 与 tasks stream mode）
+    "langgraph-checkpoint-postgres>=2.0,<4.0", # LangGraph PostgreSQL checkpoint
     "pydantic>=2.0",                   # 数据模型（CaseState、Authority 等）
     "fastapi>=0.110",                  # API 入口
     "uvicorn",                         # ASGI 服务器
@@ -16,7 +17,6 @@ dependencies = [
     "python-multipart>=0.0.20",        # FastAPI 文件上传必需（UploadFile）
     "sqlalchemy>=2.0",                 # ORM，配合 PostgreSQL
     "psycopg[binary]",                 # PostgreSQL 驱动
-    "langgraph-checkpoint-postgres",   # LangGraph PostgreSQL checkpoint
     "opensearch-py",                   # OpenSearch 检索
     "httpx",                           # HTTP 客户端，用于模型网关调用
     "python-docx",                     # DOCX 导出，复用现有能力

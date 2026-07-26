@@ -73,11 +73,13 @@ def _mock_verify(status: str = "effective", superseded_by: str | None = None):
     """构造 mock verify_statute_status 函数。"""
 
     def _mock(source_id: str, as_of: Any = None) -> StatuteVerification:
+        is_effective_as_of = (status == "effective") if as_of is not None else False
         return StatuteVerification(
             source_id=source_id,
             title="mock-title",
             current_status=status,  # type: ignore[arg-type]
             superseded_by=superseded_by,
+            is_effective_as_of=is_effective_as_of,
             checked_at=datetime(2026, 7, 23, 12, 0, 0, tzinfo=timezone.utc),
         )
 

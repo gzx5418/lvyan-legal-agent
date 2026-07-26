@@ -336,7 +336,9 @@ def create_app(
                                 f"{md}\n"
                                 f"</untrusted_document>"
                             )
-                    except Exception:  # noqa: BLE001
+                    except HTTPException:
+                        raise
+                    except (OSError, json.JSONDecodeError):
                         continue
             if attachment_parts:
                 query_text = (
@@ -352,6 +354,16 @@ def create_app(
             existing_meta = dict(mem.list_threads()).get(req.thread_id)
             if existing_meta is not None:
                 assert_thread_owner(existing_meta, user_id, req.thread_id)
+            elif is_auth_enabled():
+                # sidecar 索引缺失时，从 checkpoint 状态中恢复 owner 校验
+                cs = mem.load(req.thread_id)
+                if cs is not None:
+                    cp_user_id = str(getattr(cs, "user_id", ANONYMOUS_USER) or ANONYMOUS_USER)
+                    if cp_user_id != user_id:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"thread {req.thread_id} 不属于当前用户（owner={cp_user_id}）",
+                        )
 
         ctx = manager.create_run(
             query_text, req.thread_id, complexity, user_id=user_id
@@ -578,6 +590,10 @@ def create_app(
         )
         if status == "not_found":
             raise HTTPException(status_code=404, detail=message)
+        if status == "forbidden":
+            raise HTTPException(status_code=403, detail=message)
+        if status == "error":
+            raise HTTPException(status_code=409, detail=message)
         return HITLResponse(run_id=run_id, status=status, message=message)
 
     # --- 静态文件与前端页面 ---
