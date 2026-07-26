@@ -1,113 +1,282 @@
-# 律言法律智能体 · Agent Runtime
+<div align="center">
+  <img src="docs/assets/lvyan-readme-hero.png" alt="律言法律智能体：法律文书、可验证引用与 Agent 工作流" width="100%" />
+</div>
 
-> 基于 LangGraph 编排的中国法律智能 Agent，证据优先，引用可验证。
+<h1 align="center">律言法律智能体 · Lvyan Legal Agent</h1>
+
+<p align="center">
+  面向中国大陆法律场景的证据优先型 AI Agent。<br />
+  以 LangGraph 编排事实提取、版本感知检索、法律推理、引用审计和安全输出。
+</p>
+
+<p align="center">
+  <a href="https://github.com/gzx5418/lvyan-legal-agent/actions/workflows/ci.yml"><img src="https://github.com/gzx5418/lvyan-legal-agent/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/LangGraph-1.x-1C3C3C" alt="LangGraph 1.x" />
+  <img src="https://img.shields.io/badge/FastAPI-SSE-009688?logo=fastapi&logoColor=white" alt="FastAPI + SSE" />
+  <img src="https://img.shields.io/badge/License-MIT-gold" alt="MIT License" />
+</p>
+
+> [!IMPORTANT]
+> 律言用于学习、研究与辅助分析。生成内容不构成律师出具的正式法律意见，也不能替代对原始证据、有效法源和具体案情的人工核验。
+
+## 为什么是律言
+
+普通问答模型容易忽略证据缺口、混淆法规版本，或在最终答案中生成无法核验的法条。律言把这些风险放进显式工作流：
+
+- **先事实、后结论**：提取当事人、时间、金额、行为和证据，阻断性信息不足时先追问。
+- **版本感知检索**：支持 `law_as_of_date`，区分法规当前状态与案件发生时的有效状态。
+- **最终文本审计**：对用户实际看到的输出执行法条存在性、内容匹配、时点有效性和结论支撑校验。
+- **受控迭代**：Critic、重检索与输出重写均设上限，避免失控循环。
+- **可恢复执行**：PostgreSQL checkpoint 与 run metadata 支持服务重启后的 HITL 恢复。
 
 ## 核心能力
 
-- **12 节点 LangGraph 状态图**：预检 → 管辖分流 → 事实抽取 → 缺失评估 → 规划 → 法条检索 → 权威解析 → 法律推理 → 评审 → 引用校验 → 生成 → 安全护栏
-- **四路混合检索**：BM25 词法 + Dense 向量 + 规则匹配 + 版本感知，85639 条法规chunk
-- **三种输出模式**：简要（日常咨询快答）/ 深度（案件分析报告）/ 文书（法律文书生成）
-- **文件上传与转换**：集成微软 markitdown，支持 PDF/DOCX/PPTX/XLSX 转 Markdown
-- **视觉模型图片识别**：Qwen3-VL-8B-Instruct，支持合同/证据截图 OCR + 法律场景描述
-- **Human-in-the-Loop**：不可逆操作人工审批
-- **完备前端**：对话 / 文件上传 / 历史管理 / 消息操作 / 导出 / 快捷键
-
-## 技术栈
-
-| 层 | 技术 |
+| 能力 | 实现 |
 |---|---|
-| 编排 | LangGraph v1 + PostgreSQL checkpoint |
-| API | FastAPI + SSE（Server-Sent Events）|
-| 前端 | 原生 HTML/CSS/JS（无框架依赖）|
-| LLM | DeepSeek-V4-Flash（硅基流动）|
-| Embedding | BAAI/bge-m3（1024 维）|
-| Reranker | BAAI/bge-reranker-v2-m3 |
-| Vision | Qwen/Qwen3-VL-8B-Instruct |
-| 文档转换 | microsoft/markitdown |
-| 可观测性 | OpenTelemetry + Langfuse |
+| 12 节点 Agent 图 | 预检、管辖、事实提取、缺失评估、规划、检索、权威解析、推理、评审、生成、引用校验、输出护栏 |
+| 混合检索 | BM25、Dense、规则匹配、版本过滤与 Reranker |
+| 历史法规 | 请求级 `law_as_of_date` 贯穿检索与完整引用审计 |
+| 三种输出模式 | `light` 快答、`deep` 深度分析、`document` 文书生成 |
+| 文档处理 | PDF、DOCX、PPTX、XLSX 等格式转 Markdown；图片 OCR/理解 |
+| 引用可信度 | Citation、Authority Status、Grounding 三层校验 |
+| Human-in-the-Loop | 不可逆操作人工审批；PostgreSQL 原子 claim 防止重复恢复 |
+| API 与前端 | FastAPI、SSE、文件上传、历史会话与原生 Web UI |
+| 可观测性 | OpenTelemetry、Langfuse、节点耗时与成本摘要 |
+
+## 工作流
+
+```mermaid
+flowchart LR
+    A[预检] --> B[管辖分流]
+    B --> C[事实提取]
+    C --> D[缺失事实评估]
+    D -->|需要补充| U[向用户追问]
+    D -->|继续| E[规划]
+    E --> F[并行检索]
+    F --> G[权威解析]
+    G --> H[法律推理]
+    H --> I[Critic 评审]
+    I -->|重试| H
+    I -->|通过| J[生成初稿]
+    J --> K[最终文本引用审计]
+    K -->|重检索| F
+    K -->|通过| L[输出安全护栏]
+    L -->|重写| J
+    L -->|完成| M[最终输出]
+```
 
 ## 快速开始
 
-### 1. 安装依赖
+### 环境要求
+
+- Python 3.11+
+- PostgreSQL 16（生产持久化与跨实例 HITL 必需）
+- 可选：OpenSearch、MinIO、Langfuse
+
+### 1. 安装
 
 ```bash
-cd AGENT
+git clone https://github.com/gzx5418/lvyan-legal-agent.git
+cd lvyan-legal-agent
+
+python -m venv .venv
+# Linux / macOS
+source .venv/bin/activate
+# Windows PowerShell
+# .\.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+pip install -e ".[dev,documents]"
+```
+
+仅安装核心运行时：
+
+```bash
 pip install -e .
-pip install python-multipart markitdown
 ```
 
-### 2. 配置环境变量
+### 2. 配置
 
 ```bash
+# Linux / macOS
 cp .env.example .env
-# 编辑 .env 填入你的 SiliconFlow API Key
+
+# Windows PowerShell
+# Copy-Item .env.example .env
 ```
 
-### 3. 启动服务
+至少配置模型网关：
+
+```dotenv
+MODEL_GATEWAY_URL=https://api.siliconflow.cn
+MODEL_GATEWAY_API_KEY=your-api-key
+CHAT_MODEL=deepseek-ai/DeepSeek-V4-Flash
+EMBEDDING_MODEL=BAAI/bge-m3
+RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+VISION_MODEL=Qwen/Qwen3-VL-8B-Instruct
+```
+
+生产环境还应显式配置：
+
+```dotenv
+DATABASE_URL=postgresql+psycopg://lvyan:strong-password@localhost:5432/lvyan
+AUTH_ENABLED=true
+CORS_ALLOWED_ORIGINS=https://your-frontend.example.com
+```
+
+### 3. 启动基础设施
+
+只启动 PostgreSQL：
 
 ```bash
-# 方式一：直接 uvicorn
-PYTHONPATH=src python -m uvicorn lvyan.api.server:app --host 0.0.0.0 --port 8000
-
-# 方式二：开发模式（热重载）
-PYTHONPATH=src python -m uvicorn lvyan.api.server:app --reload --port 8000
+docker compose up -d postgres
 ```
 
-访问 http://localhost:8000 即可使用前端界面。
-
-### 4. 命令行使用
+启动全部本地依赖：
 
 ```bash
-# 简要模式
-PYTHONPATH=src python -m lvyan "劳动合同到期公司不续签，有补偿吗？"
-
-# 深度模式
-PYTHONPATH=src python -m lvyan --mode deep "被网络诽谤如何维权？"
-
-# 文书模式
-PYTHONPATH=src python -m lvyan --mode document "帮我写一份劳动争议起诉状"
+docker compose up -d
 ```
 
-## API 端点
+`docker-compose.yml` 中的密码仅供本地开发，生产部署前必须替换并限制端口暴露。
+
+### 4. 启动服务
+
+```bash
+python -m uvicorn lvyan.api.server:app --host 0.0.0.0 --port 8000
+```
+
+开发热重载：
+
+```bash
+python -m uvicorn lvyan.api.server:app --reload --port 8000
+```
+
+打开 [http://localhost:8000](http://localhost:8000) 使用内置前端。
+
+## 命令行
+
+```bash
+# 日常咨询
+python -m lvyan "劳动合同到期公司不续签，有补偿吗？"
+
+# 深度案件分析
+python -m lvyan --mode deep "被网络诽谤后应如何固定证据并维权？"
+
+# 法律文书
+python -m lvyan --mode document "根据已知事实生成一份劳动争议起诉状"
+```
+
+## API 示例
+
+### 启动一次历史时点分析
+
+```bash
+curl -X POST http://localhost:8000/api/agent/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "2018 年签订的合同发生争议，应适用什么法律？",
+    "complexity": "deep",
+    "law_as_of_date": "2018-06-01"
+  }'
+```
+
+响应：
+
+```json
+{
+  "run_id": "run-...",
+  "thread_id": "thread-...",
+  "status": "started"
+}
+```
+
+### 订阅运行事件
+
+```bash
+curl -N http://localhost:8000/api/agent/stream/run-...
+```
+
+### 主要端点
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/agent/run` | 启动 Agent 运行 |
-| GET | `/api/agent/stream/{run_id}` | SSE 流式获取节点进度 |
-| GET | `/api/agent/state/{thread_id}` | 获取会话状态 |
-| DELETE | `/api/agent/state/{thread_id}` | 删除会话 |
-| GET | `/api/agent/threads` | 列出所有会话 |
-| POST | `/api/agent/hitl/{run_id}` | 人工审批响应 |
-| POST | `/api/upload` | 文件上传（自动转 Markdown）|
-| GET | `/api/health` | 健康检查 |
+| `POST` | `/api/agent/run` | 启动 Agent，可传 `law_as_of_date` |
+| `GET` | `/api/agent/stream/{run_id}` | 获取节点事件与最终输出 |
+| `POST` | `/api/agent/hitl/{run_id}` | 提交人工审批决策 |
+| `GET` | `/api/agent/state/{thread_id}` | 获取会话状态摘要 |
+| `DELETE` | `/api/agent/state/{thread_id}` | 删除会话 |
+| `GET` | `/api/agent/threads` | 列出当前用户会话 |
+| `POST` | `/api/upload` | 上传并转换证据文件 |
+| `GET` | `/livez` | 进程存活检查 |
+| `GET` | `/readyz` | 数据库、元数据表和检索就绪检查 |
+| `GET` | `/api/health` | 综合健康状态 |
+
+完整交互式接口文档：启动服务后访问 [http://localhost:8000/docs](http://localhost:8000/docs)。
+
+## 多实例部署说明
+
+- PostgreSQL 保存 LangGraph checkpoint、thread owner 与 run metadata。
+- HITL 使用原子状态领取，同一审批只有一个实例能够恢复。
+- 已完成 run 的最终输出可从其他实例恢复。
+- **运行中的实时 SSE 仍需要负载均衡器开启 sticky session / session affinity。** 如需任意实例订阅实时事件，应接入 Redis Streams、Pub/Sub 或独立事件表。
+- 生产环境应在 API Gateway / OIDC Proxy 完成身份验证，并可信注入 `X-User-ID`。
 
 ## 项目结构
 
-```
-AGENT/
+```text
+.
 ├── src/lvyan/
-│   ├── api/              # FastAPI + SSE + 前端静态文件
-│   ├── graph/            # LangGraph 状态图定义
-│   ├── nodes/            # 12 个专家节点
-│   ├── retrieval/        # 四路混合检索
-│   ├── schemas/          # Pydantic 数据模型
-│   ├── tools/            # 工具集（文件转换/计算器/导出等）
-│   ├── validators/       # 安全验证器
-│   ├── memory/           # 短期记忆 + 案件库
-│   └── observability/    # 追踪与指标
+│   ├── api/              # FastAPI、SSE、认证与内置前端
+│   ├── graph/            # LangGraph 图与路由策略
+│   ├── nodes/            # 12 个 Agent 节点
+│   ├── retrieval/        # 混合检索、重排与法规版本解析
+│   ├── validators/       # 引用、权威状态、接地与输出验证
+│   ├── memory/           # Checkpoint、run metadata 与案件记忆
+│   ├── schemas/          # Pydantic 状态与领域模型
+│   ├── tools/            # 法规、案例、文档和计算工具
+│   └── observability/    # 指标、追踪与成本记录
+├── migrations/           # PostgreSQL 业务元数据迁移
 ├── knowledge/            # 精编法律知识库
-├── templates/            # 法律文书模板
-├── prompts/              # 提示词标准
-├── tests/                # 539+ 测试
-└── pyproject.toml
+├── templates/            # 分析报告与法律文书模板
+├── prompts/              # 法律推理、证据和输出标准
+├── tests/                # unit / integration / security / retrieval / evals
+└── docker-compose.yml    # 本地基础设施
 ```
 
-## 测试
+## 测试与质量
 
 ```bash
-PYTHONPATH=src python -m pytest tests/ -q
+# 全部测试
+python -m pytest tests/ -q
+
+# 排除依赖完整法律库的慢测试
+python -m pytest tests/ -q -m "not slow"
+
+# 静态检查
+python -m ruff check src/ tests/
 ```
 
-## 许可证
+CI 包含单元与集成测试、金标集回归、Agent Pipeline 回归和 Ruff 检查。
 
-本项目仅用于学习和研究目的。法律分析结果仅供参考，不构成正式法律意见。
+## 安全与隐私
+
+- 上传文档按不可信输入处理，并检测提示注入。
+- thread、run 和附件均执行用户归属校验。
+- 最终输出经过隐私、引用、接地和格式护栏。
+- 请勿把真实生产密钥、当事人敏感信息或未脱敏证据提交到仓库。
+- 本地 `docker-compose.yml` 默认凭据不适用于生产。
+
+## 参与贡献
+
+欢迎提交 Issue 和 Pull Request。涉及法规数据、检索指标或法律结论时，请同时提供：
+
+1. 可复现输入与预期结果；
+2. 法源及适用日期；
+3. 新增或更新的回归测试；
+4. 对安全、隐私和向后兼容性的影响说明。
+
+## License
+
+项目代码按 [MIT License](https://opensource.org/licenses/MIT) 使用。法律数据、官方示范文本和第三方模型分别受其原始许可与使用条款约束。
