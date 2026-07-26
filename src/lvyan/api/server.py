@@ -15,9 +15,16 @@
 --------
 - Agent 运行通过 ``asyncio.create_task`` 异步执行（见 :class:`RunManager`）。
 - SSE 流使用 FastAPI 内置 ``StreamingResponse``（``text/event-stream``）。
-- HITL 通过 ``asyncio.Event`` 唤醒等待中的 Agent。
+- HITL 通过 LangGraph ``interrupt()`` + ``Command(resume=...)`` 恢复执行。
 - ``create_app`` 接受可注入的 ``runner`` 与 ``memory``，便于测试隔离。
 - 文件上传存到 ``settings.data_dir / uploads``，返回 file_id 供 /api/agent/run 引用。
+
+PR1 改进
+--------
+- 状态源统一为 ``CaseMemory``（基于 LangGraph checkpointer），不再使用
+  ``ShortTermMemory`` 的 JSON 文件双轨存储。
+- ``create_app`` 默认调用 ``get_case_memory()`` 获取共享实例；测试可注入
+  兼容 ``CaseMemory`` 协议的桩。
 """
 
 from __future__ import annotations
@@ -35,7 +42,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from lvyan.config import AGENT_DIR, is_official_db_available, settings
-from lvyan.memory.checkpoints import ShortTermMemory
+from lvyan.memory.store import CaseMemory
+from lvyan.runtime import get_case_memory
 from lvyan.tools.file_converter import convert_to_markdown, get_file_category
 
 from .models import (
@@ -118,17 +126,18 @@ def _read_text_preview(file_path: Path, max_chars: int = 500) -> str:
 
 def create_app(
     runner: Any = None,
-    memory: ShortTermMemory | None = None,
+    memory: CaseMemory | None = None,
 ) -> FastAPI:
     """构造 FastAPI 应用。
 
     Args:
         runner: 可注入的异步 runner，用于测试替代真实图执行。
-        memory: 可注入的短期记忆实例，用于测试隔离。
+        memory: 可注入的 CaseMemory 实例；None 时使用共享实例（绑定共享图）。
     """
     app = FastAPI(title="律言法律智能体 API", version="0.2.0")
     manager = RunManager(runner=runner)
-    mem = memory if memory is not None else ShortTermMemory()
+    # 优先使用注入的 memory（测试隔离），否则使用共享 CaseMemory（生产单源）
+    mem = memory if memory is not None else get_case_memory()
 
     app.add_middleware(
         CORSMiddleware,
@@ -202,7 +211,7 @@ def create_app(
 
     @app.delete("/api/agent/state/{thread_id}", response_model=DeleteResponse)
     async def delete_thread(thread_id: str) -> DeleteResponse:
-        """删除指定会话的短期记忆。"""
+        """删除指定会话：从 checkpointer 与索引中移除。"""
         cs = mem.load(thread_id)
         if cs is None:
             raise HTTPException(status_code=404, detail=f"thread {thread_id} 无记录")
@@ -211,21 +220,22 @@ def create_app(
 
     @app.get("/api/agent/threads", response_model=ThreadListResponse)
     async def list_threads() -> ThreadListResponse:
-        """列出所有会话摘要。"""
-        thread_ids = mem.list_threads()
+        """列出所有会话摘要。
+
+        从 CaseMemory 索引读取 thread_id 与元数据（title/complexity/created_at/
+        has_output），避免对每个 thread 都调用 ``load`` 触发 checkpointer 查询。
+        """
+        threads = mem.list_threads()  # list[tuple[str, dict]]
         summaries: list[ThreadSummary] = []
-        for tid in thread_ids:
-            cs = mem.load(tid)
-            if cs is None:
-                continue
-            # 用 user_goal 前 40 字作标题
-            title = (cs.user_goal or "")[:40] or tid
+        for tid, meta in threads:
+            # meta: {"title", "complexity", "created_at", "has_output"}
+            title = (meta.get("title") or tid)[:40]
             summaries.append(ThreadSummary(
                 thread_id=tid,
                 title=title,
-                complexity=cs.complexity or "light",
-                created_at=time.time(),  # 桩：文件 mtime 后续可加
-                has_output=bool(cs.final_output),
+                complexity=meta.get("complexity") or "light",
+                created_at=float(meta.get("created_at") or time.time()),
+                has_output=bool(meta.get("has_output")),
             ))
         return ThreadListResponse(threads=summaries)
 
