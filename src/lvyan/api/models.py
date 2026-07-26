@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from lvyan.observability.tracing import CostSummary
 
@@ -13,18 +13,32 @@ from lvyan.observability.tracing import CostSummary
 class AgentRunRequest(BaseModel):
     """POST /api/agent/run 请求体。"""
 
-    query: str = Field(description="用户法律问题或合同文本")
+    query: str = Field(
+        min_length=1,
+        max_length=50_000,
+        description="用户法律问题或合同文本",
+    )
     thread_id: str | None = Field(default=None, description="会话线程 ID；为空时新生成")
     complexity: Literal["light", "deep", "document"] | None = Field(
         default=None, description="输出复杂度档位；为空时默认 light"
     )
     attachments: list[str] | None = Field(
-        default=None, description="附件 file_id 列表（由 /api/upload 返回）"
+        default=None,
+        max_length=20,
+        description="附件 file_id 列表（由 /api/upload 返回）",
     )
     law_as_of_date: date | None = Field(
         default=None,
         description="案件适用法律的时间点；为空时按系统当前日期检索和校验",
     )
+
+    @field_validator("query")
+    @classmethod
+    def query_must_contain_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("问题内容不能为空")
+        return value
 
 
 class AgentRunResponse(BaseModel):
@@ -89,6 +103,7 @@ class ThreadSummary(BaseModel):
     title: str = ""
     complexity: str = "light"
     created_at: float = 0.0
+    updated_at: float = 0.0
     has_output: bool = False
 
 

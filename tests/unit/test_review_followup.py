@@ -534,6 +534,30 @@ def test_cross_instance_running_stream_requires_affinity():
     assert "session affinity" in response.json()["detail"]
 
 
+def test_cross_instance_cancelled_stream_returns_cancel_event():
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+
+    class Store:
+        def get_run(self, run_id: str):
+            return {
+                "run_id": run_id,
+                "thread_id": "thread-1",
+                "user_id": "anonymous",
+                "status": "cancelled",
+                "error": "用户已停止生成",
+            }
+
+    response = TestClient(create_app(
+        runner=lambda *_args, **_kwargs: None,
+        memory=_ApiMemory(),
+        metadata_store=Store(),
+    )).get("/api/agent/stream/run-cancelled")
+
+    assert response.status_code == 200
+    assert '"event": "cancelled"' in response.text
+
+
 @pytest.mark.asyncio
 async def test_hitl_persistence_failure_does_not_publish_approval(monkeypatch):
     from lvyan.api import sse
@@ -880,3 +904,171 @@ async def test_completion_persistence_failure_sends_warning_before_result():
     event_names = [event.get("event") for event in events]
     assert "completion_not_persisted" in event_codes
     assert event_names.index("warning") < event_names.index("final_output")
+
+
+def test_state_returns_complete_durable_message_history():
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+
+    class Memory(_ApiMemory):
+        def load_strict(self, _thread_id: str):
+            return SimpleNamespace(
+                run_id="run-2",
+                thread_id="thread-1",
+                jurisdiction="中国大陆",
+                case_type="合同纠纷",
+                complexity="light",
+                risk_level="low",
+                confidence="medium",
+                iteration=1,
+                final_output="第二轮回答",
+                facts=[],
+                statutes=[],
+                cases=[],
+            )
+
+    class Store:
+        def get_thread(self, thread_id: str):
+            return {"thread_id": thread_id, "user_id": "anonymous"}
+
+        def list_messages(self, thread_id: str, user_id: str):
+            assert (thread_id, user_id) == ("thread-1", "anonymous")
+            return [
+                {
+                    "run_id": "run-1",
+                    "role": "user",
+                    "content": "第一轮问题",
+                    "attachments": [],
+                    "created_at": 1.0,
+                },
+                {
+                    "run_id": "run-1",
+                    "role": "assistant",
+                    "content": "第一轮回答",
+                    "attachments": [],
+                    "created_at": 2.0,
+                },
+                {
+                    "run_id": "run-2",
+                    "role": "user",
+                    "content": "第二轮追问",
+                    "attachments": ["file-1"],
+                    "created_at": 3.0,
+                },
+            ]
+
+    response = TestClient(create_app(
+        runner=lambda *_args, **_kwargs: None,
+        memory=Memory(),
+        metadata_store=Store(),
+    )).get("/api/agent/state/thread-1")
+
+    assert response.status_code == 200
+    messages = response.json()["messages"]
+    assert [message["content"] for message in messages] == [
+        "第一轮问题",
+        "第一轮回答",
+        "第二轮追问",
+    ]
+    assert messages[-1]["attachments"] == ["file-1"]
+
+
+@pytest.mark.asyncio
+async def test_create_run_persists_user_message_and_attachments():
+    from lvyan.api import sse
+
+    created: dict[str, Any] = {}
+
+    class Store:
+        def create_run(self, *_args: Any, **kwargs: Any) -> None:
+            created.update(kwargs)
+
+        def update_run(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def mark_thread_output(self, _thread_id: str) -> None:
+            return None
+
+        def append_message(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    async def runner(*_args: Any, **_kwargs: Any) -> str:
+        return "answer"
+
+    manager = sse.RunManager(runner=runner, metadata_store=Store())
+    ctx = manager.create_run(
+        "# 待分析证据\n敏感文档全文\n# 用户问题\n用户问题",
+        "thread-1",
+        "light",
+        attachments=["file-1"],
+        display_query="用户问题",
+    )
+    await manager._tasks[ctx.run_id]
+
+    assert created["user_message"] == "用户问题"
+    assert created["title"] == "用户问题"
+    assert created["attachments"] == ["file-1"]
+
+
+@pytest.mark.asyncio
+async def test_completion_persists_assistant_message():
+    from lvyan.api import sse
+
+    messages: list[tuple[str, str]] = []
+
+    class Store:
+        def update_run(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def mark_thread_output(self, _thread_id: str) -> None:
+            return None
+
+        def append_message(
+            self,
+            _run_id: str,
+            _thread_id: str,
+            _user_id: str,
+            role: str,
+            content: str,
+            _attachments: list[str] | None,
+        ) -> None:
+            messages.append((role, content))
+
+    async def runner(*_args: Any, **_kwargs: Any) -> str:
+        return "完整回答"
+
+    manager = sse.RunManager(runner=runner, metadata_store=Store())
+    ctx = sse.RunContext("run-1", "thread-1")
+    manager._runs[ctx.run_id] = ctx
+
+    await manager._drive(ctx, "问题", "light")
+
+    assert messages == [("assistant", "完整回答")]
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_stops_background_task_and_emits_event():
+    from lvyan.api import sse
+
+    started = asyncio.Event()
+
+    async def runner(*_args: Any, **_kwargs: Any) -> str:
+        started.set()
+        await asyncio.sleep(60)
+        return "should not complete"
+
+    manager = sse.RunManager(runner=runner)
+    ctx = manager.create_run("问题", "thread-1", "light")
+    await started.wait()
+
+    status, _message = await manager.cancel_run(ctx.run_id, "anonymous")
+
+    events = []
+    while not ctx.queue.empty():
+        event = ctx.queue.get_nowait()
+        if event is not None:
+            events.append(event)
+    assert status == "cancelled"
+    assert ctx.status == "cancelled"
+    assert any(event.get("event") == "cancelled" for event in events)
+    assert ctx.run_id not in manager._tasks

@@ -9,6 +9,7 @@ PR1 适配
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import date
@@ -142,6 +143,31 @@ def test_run_with_invalid_complexity_returns_422():
             json={"query": "x", "complexity": "invalid"},
         )
     assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("query", ["", "   ", "\n\t"])
+def test_run_rejects_blank_query(query):
+    app = create_app(runner=mock_runner)
+    with TestClient(app) as client:
+        resp = client.post("/api/agent/run", json={"query": query})
+    assert resp.status_code == 422
+
+
+def test_cancel_stops_an_active_run():
+    async def slow_runner(*_args, **_kwargs):
+        await asyncio.sleep(60)
+        return "should not complete"
+
+    app = create_app(runner=slow_runner)
+    with TestClient(app) as client:
+        run = client.post(
+            "/api/agent/run",
+            json={"query": "需要较长时间的分析"},
+        ).json()
+        resp = client.post(f"/api/agent/cancel/{run['run_id']}")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "cancelled"
 
 
 # ---------------------------------------------------------------------------

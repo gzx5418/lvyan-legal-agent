@@ -72,12 +72,25 @@ def test_delete_thread_cascades_to_run_records():
         run_id=run_id,
         thread_id=thread_id,
         user_id=user_id,
+        user_message="第一轮问题",
+        attachments=["file-1"],
     )
     assert store.has_active_runs(thread_id) is True
     assert store.delete_thread(thread_id, user_id) is False
     store.update_run(run_id, status="completed")
+    store.append_message(
+        run_id,
+        thread_id,
+        user_id,
+        "assistant",
+        "第一轮回答",
+    )
+    messages = store.list_messages(thread_id, user_id)
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[0]["attachments"] == ["file-1"]
     assert store.has_active_runs(thread_id) is False
 
     assert store.delete_thread(thread_id, user_id) is True
     assert store.get_thread(thread_id) is None
     assert store.get_run(run_id) is None
+    assert store.list_messages(thread_id, user_id) == []

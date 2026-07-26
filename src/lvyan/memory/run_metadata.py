@@ -19,6 +19,8 @@ class RunMetadataStore(Protocol):
         *,
         title: str = "",
         complexity: str = "light",
+        user_message: str = "",
+        attachments: list[str] | None = None,
     ) -> None: ...
 
     def update_run(self, run_id: str, **values: Any) -> None: ...
@@ -34,6 +36,22 @@ class RunMetadataStore(Protocol):
     def has_active_runs(self, thread_id: str) -> bool: ...
 
     def mark_thread_output(self, thread_id: str) -> None: ...
+
+    def append_message(
+        self,
+        run_id: str,
+        thread_id: str,
+        user_id: str,
+        role: str,
+        content: str,
+        attachments: list[str] | None = None,
+    ) -> None: ...
+
+    def list_messages(
+        self,
+        thread_id: str,
+        user_id: str,
+    ) -> list[dict[str, Any]]: ...
 
     def claim_hitl_run(
         self, run_id: str, user_id: str
@@ -101,40 +119,61 @@ class PostgresRunMetadataStore:
         *,
         title: str = "",
         complexity: str = "light",
+        user_message: str = "",
+        attachments: list[str] | None = None,
     ) -> None:
         with self._connect() as conn:
             self._ensure_schema(conn)
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO agent_threads
-                        (thread_id, user_id, title, complexity)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (thread_id) DO UPDATE SET
-                        title = CASE
-                            WHEN EXCLUDED.title = '' THEN agent_threads.title
-                            ELSE EXCLUDED.title
-                        END,
-                        complexity = EXCLUDED.complexity
-                    WHERE agent_threads.user_id = EXCLUDED.user_id
-                    RETURNING user_id
-                    """,
-                    (thread_id, user_id, title, complexity),
-                )
-                owner_row = cur.fetchone()
-                if owner_row is None:
-                    raise ThreadOwnershipError(
-                        f"thread {thread_id} belongs to another user"
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO agent_threads
+                            (thread_id, user_id, title, complexity)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (thread_id) DO UPDATE SET
+                            title = CASE
+                                WHEN EXCLUDED.title = '' THEN agent_threads.title
+                                ELSE EXCLUDED.title
+                            END,
+                            complexity = EXCLUDED.complexity
+                        WHERE agent_threads.user_id = EXCLUDED.user_id
+                        RETURNING user_id
+                        """,
+                        (thread_id, user_id, title, complexity),
                     )
-                cur.execute(
-                    """
-                    INSERT INTO agent_runs
-                        (run_id, thread_id, user_id, status)
-                    VALUES (%s, %s, %s, 'started')
-                    ON CONFLICT (run_id) DO NOTHING
-                    """,
-                    (run_id, thread_id, user_id),
-                )
+                    owner_row = cur.fetchone()
+                    if owner_row is None:
+                        raise ThreadOwnershipError(
+                            f"thread {thread_id} belongs to another user"
+                        )
+                    cur.execute(
+                        """
+                        INSERT INTO agent_runs
+                            (run_id, thread_id, user_id, status)
+                        VALUES (%s, %s, %s, 'started')
+                        ON CONFLICT (run_id) DO NOTHING
+                        """,
+                        (run_id, thread_id, user_id),
+                    )
+                    if user_message:
+                        from psycopg.types.json import Jsonb
+
+                        cur.execute(
+                            """
+                            INSERT INTO agent_messages
+                                (run_id, thread_id, user_id, role, content, attachments)
+                            VALUES (%s, %s, %s, 'user', %s, %s)
+                            ON CONFLICT (run_id, role) DO NOTHING
+                            """,
+                            (
+                                run_id,
+                                thread_id,
+                                user_id,
+                                user_message,
+                                Jsonb(attachments or []),
+                            ),
+                        )
 
     def update_run(self, run_id: str, **values: Any) -> None:
         clean = {
@@ -206,7 +245,7 @@ class PostgresRunMetadataStore:
                            has_output, created_at, updated_at
                     FROM agent_threads
                     WHERE user_id = %s
-                    ORDER BY created_at DESC
+                    ORDER BY updated_at DESC
                     """,
                     (user_id,),
                 )
@@ -272,6 +311,61 @@ class PostgresRunMetadataStore:
                     raise RunMetadataUnavailable(
                         f"thread {thread_id} does not exist"
                     )
+
+    def append_message(
+        self,
+        run_id: str,
+        thread_id: str,
+        user_id: str,
+        role: str,
+        content: str,
+        attachments: list[str] | None = None,
+    ) -> None:
+        if role not in {"user", "assistant"}:
+            raise ValueError(f"unsupported message role: {role}")
+        from psycopg.types.json import Jsonb
+
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO agent_messages
+                        (run_id, thread_id, user_id, role, content, attachments)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (run_id, role) DO UPDATE SET
+                        content = EXCLUDED.content,
+                        attachments = EXCLUDED.attachments
+                    """,
+                    (
+                        run_id,
+                        thread_id,
+                        user_id,
+                        role,
+                        content,
+                        Jsonb(attachments or []),
+                    ),
+                )
+
+    def list_messages(
+        self,
+        thread_id: str,
+        user_id: str,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT run_id, role, content, attachments, created_at
+                    FROM agent_messages
+                    WHERE thread_id = %s AND user_id = %s
+                    ORDER BY message_id ASC
+                    """,
+                    (thread_id, user_id),
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
 
     def claim_hitl_run(
         self,

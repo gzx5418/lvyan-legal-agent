@@ -1,5 +1,5 @@
 /* =========================================================================
-   律言法律智能体 · 前端应用逻辑 v6
+   律言法律智能体 · 前端应用逻辑 v8
    功能：对话 / 文件上传 / 历史管理 / 消息操作 / 导出 / 快捷键
    ========================================================================= */
 
@@ -9,7 +9,7 @@ const state = {
   runId: null,
   mode: 'light',
   isRunning: false,
-  history: [],        // [{threadId, query, output, mode, ts}]
+  history: [],        // [{threadId, query, mode, ts, messages}]
   completedNodes: new Set(),
   totalNodes: 12,
   runStartTime: 0,
@@ -82,6 +82,11 @@ function init() {
   if (currentEventSource) {
     currentEventSource.close();
     currentEventSource = null;
+  }
+  if (window.matchMedia('(max-width: 768px)').matches) {
+    state.sidebarCollapsed = true;
+    document.body.classList.add('sidebar-collapsed');
+    els.sidebarToggle.setAttribute('aria-expanded', 'false');
   }
 
   // 模式选择
@@ -200,11 +205,15 @@ function handleGlobalShortcut(e) {
     els.input.focus();
     return;
   }
-  // Esc: 关闭菜单/HITL
+  // Esc: 关闭非阻断菜单。HITL 必须显式批准或拒绝，不能静默隐藏。
   if (e.key === 'Escape') {
     els.msgMenu.style.display = 'none';
-    els.hitlPanel.style.display = 'none';
   }
+}
+
+async function responseError(resp, fallback) {
+  const payload = await resp.json().catch(() => ({}));
+  return payload.detail || payload.message || `${fallback}（HTTP ${resp.status}）`;
 }
 
 // =========================================================================
@@ -263,6 +272,7 @@ async function sendQuery() {
   // 禁用发送，显示停止
   state.isRunning = true;
   state.runStartTime = Date.now();
+  els.messages.setAttribute('aria-busy', 'true');
   els.sendBtn.style.display = 'none';
   els.stopBtn.style.display = 'flex';
   els.uploadBtn.disabled = true;
@@ -271,14 +281,13 @@ async function sendQuery() {
   state.completedNodes.clear();
   showProgress(true);
 
-  // 超时保护：60 秒后自动重置
-  const timeoutId = setTimeout(() => {
-    if (state.isRunning && state.runStartTime && (Date.now() - state.runStartTime > 60000)) {
-      console.warn('Agent 运行超时（60s），自动重置状态');
-      stopGeneration();
-      updateLastAgentMessage('运行超时，请重试。');
+  // 深度法律分析可能耗时较长，5 分钟后才主动请求服务端停止。
+  const timeoutId = setTimeout(async () => {
+    if (state.isRunning && state.runStartTime && (Date.now() - state.runStartTime > 300000)) {
+      console.warn('Agent 运行超时（5 分钟），请求服务端停止');
+      await stopGeneration('运行超过 5 分钟，已停止。你可以缩短问题后重试。');
     }
-  }, 61000);
+  }, 301000);
 
   try {
     // 启动 Agent
@@ -298,7 +307,7 @@ async function sendQuery() {
       body: JSON.stringify(body),
     });
 
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (!resp.ok) throw new Error(await responseError(resp, '请求失败'));
     const data = await resp.json();
 
     state.runId = data.run_id;
@@ -311,6 +320,7 @@ async function sendQuery() {
 
     // 添加 Agent 占位消息
     addMessage('agent', '', true);
+    saveHistory(state.threadId);
 
     // 清空已上传附件（已提交给 Agent）
     clearAttachments();
@@ -325,20 +335,29 @@ async function sendQuery() {
   }
 }
 
-// 停止生成
-function stopGeneration() {
-  if (currentEventSource) {
-    currentEventSource.close();
-    currentEventSource = null;
-  }
-  resetRunState();
-  // 如果 Agent 消息还是空的，移除占位
-  const lastMsg = els.messages.lastElementChild;
-  if (lastMsg && lastMsg.classList.contains('msg-agent')) {
-    const content = lastMsg.querySelector('.msg-content');
-    if (!content.textContent.trim() || content.querySelector('.typing-dots')) {
-      content.innerHTML = '<p style="color: var(--text-muted);">已停止生成。</p>';
+// 停止生成：同时通知服务端取消后台任务。
+async function stopGeneration(message = '已停止生成。') {
+  if (!state.isRunning || !state.runId) return;
+  els.stopBtn.disabled = true;
+  try {
+    const resp = await fetch(`/api/agent/cancel/${state.runId}`, { method: 'POST' });
+    if (resp.status === 409) {
+      showToast('任务已结束，正在同步最终结果', 'info');
+      return;
     }
+    if (!resp.ok && resp.status !== 404) {
+      throw new Error(await responseError(resp, '停止失败'));
+    }
+    if (currentEventSource) {
+      currentEventSource.close();
+      currentEventSource = null;
+    }
+    updateLastAgentMessage(message);
+    finalizeRun();
+  } catch (err) {
+    showToast(`${err.message}，任务可能仍在后台运行`, 'error');
+  } finally {
+    els.stopBtn.disabled = false;
   }
 }
 
@@ -385,6 +404,11 @@ function handleSSEEvent(event) {
       updateProgressFill();
       break;
 
+    case 'node_error':
+      updateNodeChip(event.node, 'error');
+      showToast(`${NODE_LABELS[event.node] || event.node}执行失败`, 'error');
+      break;
+
     case 'hitl_required':
       showHitlPanel(event.message || 'Agent 尝试执行不可逆操作，请确认是否批准。');
       break;
@@ -395,6 +419,23 @@ function handleSSEEvent(event) {
         currentEventSource = null;
       }
       updateLastAgentMessage(event.output || '(无输出)');
+      finalizeRun();
+      break;
+
+    case 'warning':
+      showToast(event.message || '部分状态未能持久化，请保存当前内容', 'warning');
+      addConversationNotice(
+        event.message || '部分状态未能持久化，请保存当前内容',
+        'warning',
+      );
+      break;
+
+    case 'cancelled':
+      if (currentEventSource) {
+        currentEventSource.close();
+        currentEventSource = null;
+      }
+      updateLastAgentMessage(event.message || '已停止生成。');
       finalizeRun();
       break;
 
@@ -416,14 +457,14 @@ function resetRunState() {
   els.stopBtn.style.display = 'none';
   els.uploadBtn.disabled = false;
   els.hitlPanel.style.display = 'none';
+  els.messages.setAttribute('aria-busy', 'false');
+  updateCharCount();
 }
 
 function finalizeRun() {
   resetRunState();
   // 保存到历史
-  const lastMsg = els.messages.lastElementChild;
-  const output = lastMsg ? lastMsg.querySelector('.msg-content')?.textContent : '';
-  saveHistory(state.threadId, state.history.length, output);
+  saveHistory(state.threadId);
   checkHealth();
 }
 
@@ -432,6 +473,7 @@ function finalizeRun() {
 // =========================================================================
 function showProgress(show) {
   els.progressBar.style.display = show ? 'block' : 'none';
+  els.progressBar.setAttribute('aria-valuenow', '0');
   if (show) {
     els.progressFill.style.width = '0%';
     els.progressNodes.innerHTML = '';
@@ -453,7 +495,9 @@ function updateNodeChip(node, status) {
 
 function updateProgressFill() {
   const pct = (state.completedNodes.size / state.totalNodes) * 100;
-  els.progressFill.style.width = `${Math.min(pct, 100)}%`;
+  const bounded = Math.min(pct, 100);
+  els.progressFill.style.width = `${bounded}%`;
+  els.progressBar.setAttribute('aria-valuenow', String(Math.round(bounded)));
 }
 
 // =========================================================================
@@ -471,14 +515,16 @@ async function resolveHitl(action, editedOutput = null) {
   if (!state.runId) return;
   els.hitlPanel.style.display = 'none';
   try {
-    await fetch(`/api/agent/hitl/${state.runId}`, {
+    const resp = await fetch(`/api/agent/hitl/${state.runId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, edited_output: editedOutput }),
     });
+    if (!resp.ok) throw new Error(await responseError(resp, '审批提交失败'));
   } catch (err) {
     console.error('HITL resolve failed:', err);
-    showToast('HITL 响应失败');
+    els.hitlPanel.style.display = 'block';
+    showToast(err.message, 'error');
   }
 }
 
@@ -565,8 +611,10 @@ function renderAttachments() {
 
     const remove = document.createElement('button');
     remove.className = 'att-remove';
+    remove.type = 'button';
     remove.textContent = '×';
     remove.title = '移除';
+    remove.setAttribute('aria-label', `移除附件：${att.filename}`);
     remove.addEventListener('click', () => {
       state.attachments.splice(idx, 1);
       renderAttachments();
@@ -596,6 +644,9 @@ function formatSize(bytes) {
 function addMessage(role, content, isTyping = false, attachmentNames = []) {
   const div = document.createElement('div');
   div.className = `msg msg-${role}`;
+  div.dataset.role = role === 'agent' ? 'assistant' : role;
+  div.dataset.content = content || '';
+  div.dataset.attachments = JSON.stringify(attachmentNames || []);
 
   const avatar = document.createElement('div');
   avatar.className = 'msg-avatar';
@@ -672,9 +723,11 @@ function createMsgActions(content) {
 }
 
 function updateLastAgentMessage(content) {
-  const lastMsg = els.messages.lastElementChild;
-  if (!lastMsg || !lastMsg.classList.contains('msg-agent')) return;
+  const agentMessages = els.messages.querySelectorAll('.msg-agent');
+  const lastMsg = agentMessages[agentMessages.length - 1];
+  if (!lastMsg) return;
   const contentDiv = lastMsg.querySelector('.msg-content');
+  lastMsg.dataset.content = content || '';
   contentDiv.innerHTML = renderMarkdown(content);
 
   // 如果还没有操作按钮，添加
@@ -766,22 +819,83 @@ function autoResize() {
 
 function updateCharCount() {
   const len = els.input.value.length;
-  els.charCount.textContent = `${len} 字`;
+  els.charCount.textContent = `${len.toLocaleString('zh-CN')} / 50,000 字`;
+  els.sendBtn.disabled = state.isRunning || !els.input.value.trim();
 }
 
 // =========================================================================
 // 历史记录管理
 // =========================================================================
-function loadHistory() {
+function persistHistory() {
+  try {
+    localStorage.setItem('lvyan_history', JSON.stringify(state.history));
+  } catch {
+    // localStorage 容量不足时，仅保留最近 5 个完整会话，其余保留摘要。
+    state.history = state.history.slice(0, 30).map((item, index) => (
+      index < 5 ? item : { ...item, messages: [] }
+    ));
+    try {
+      localStorage.setItem('lvyan_history', JSON.stringify(state.history));
+    } catch {
+      // 服务端仍是持久化主来源，浏览器缓存失败不阻断对话。
+    }
+    showToast('浏览器空间不足，较早对话将从服务端按需加载', 'warning');
+  }
+}
+
+function captureConversation() {
+  return Array.from(els.messages.querySelectorAll('.msg'))
+    .map(msg => ({
+      role: msg.dataset.role || (
+        msg.classList.contains('msg-user') ? 'user' : 'assistant'
+      ),
+      content: msg.dataset.content || '',
+      attachments: JSON.parse(msg.dataset.attachments || '[]'),
+      created_at: Date.now() / 1000,
+    }))
+    .filter(message => message.content);
+}
+
+async function loadHistory() {
   try {
     const raw = localStorage.getItem('lvyan_history');
     if (raw) state.history = JSON.parse(raw);
   } catch { state.history = []; }
   renderHistory();
+
+  try {
+    const resp = await fetch('/api/agent/threads');
+    if (!resp.ok) throw new Error(await responseError(resp, '历史同步失败'));
+    const data = await resp.json();
+    const localById = new Map(state.history.map(item => [item.threadId, item]));
+    data.threads.forEach(thread => {
+      const local = localById.get(thread.thread_id);
+      localById.set(thread.thread_id, {
+        threadId: thread.thread_id,
+        query: local?.query || thread.title || '未命名会话',
+        fullQuery: local?.fullQuery || thread.title || '',
+        mode: local?.mode || thread.complexity || 'light',
+        ts: local?.ts
+          || Number(thread.updated_at || thread.created_at || 0) * 1000
+          || Date.now(),
+        messages: Array.isArray(local?.messages) ? local.messages : [],
+      });
+    });
+    state.history = Array.from(localById.values())
+      .sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))
+      .slice(0, 100);
+    persistHistory();
+    renderHistory();
+  } catch (err) {
+    console.warn('History sync failed:', err);
+  }
 }
 
-function saveHistory(threadId, idx, output) {
-  const query = state.lastQuery || '';
+function saveHistory(threadId) {
+  if (!threadId) return;
+  const messages = captureConversation();
+  const firstUser = messages.find(message => message.role === 'user');
+  const query = firstUser?.content || state.lastQuery || '';
   const existing = state.history.findIndex(h => h.threadId === threadId);
   const item = {
     threadId,
@@ -789,14 +903,15 @@ function saveHistory(threadId, idx, output) {
     fullQuery: query,
     mode: state.mode,
     ts: Date.now(),
+    messages,
   };
   if (existing >= 0) {
     state.history[existing] = item;
   } else {
     state.history.unshift(item);
   }
-  if (state.history.length > 50) state.history = state.history.slice(0, 50);
-  localStorage.setItem('lvyan_history', JSON.stringify(state.history));
+  if (state.history.length > 100) state.history = state.history.slice(0, 100);
+  persistHistory();
   renderHistory();
 }
 
@@ -815,8 +930,9 @@ function renderHistory() {
     div.className = 'history-item';
     if (item.threadId === state.threadId) div.classList.add('active');
 
-    const text = document.createElement('span');
-    text.className = 'history-text';
+    const text = document.createElement('button');
+    text.type = 'button';
+    text.className = 'history-text history-open';
     text.textContent = item.query || `会话 ${i + 1}`;
     text.title = `${item.fullQuery || item.query}\n${new Date(item.ts).toLocaleString()}`;
     text.addEventListener('click', () => {
@@ -825,11 +941,13 @@ function renderHistory() {
 
     const delBtn = document.createElement('button');
     delBtn.className = 'history-del';
+    delBtn.type = 'button';
     delBtn.title = '删除此对话';
+    delBtn.setAttribute('aria-label', `删除对话：${item.query || `会话 ${i + 1}`}`);
     delBtn.textContent = '×';
     delBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      deleteHistoryItem(i);
+      deleteHistoryItem(item.threadId);
     });
 
     div.appendChild(text);
@@ -847,6 +965,10 @@ function renderHistory() {
 }
 
 async function loadThreadState(threadId, item) {
+  if (state.isRunning) {
+    showToast('请先停止当前生成，再切换会话', 'warning');
+    return;
+  }
   state.threadId = threadId;
   state.mode = item.mode || 'light';
   document.querySelectorAll('.mode-btn').forEach(b => {
@@ -854,37 +976,104 @@ async function loadThreadState(threadId, item) {
   });
   els.threadLabel.textContent = (item.fullQuery || item.query || '').slice(0, 20);
   renderHistory();
+  els.welcome.style.display = 'none';
+  els.messages.style.display = 'flex';
+  els.exportBtn.style.display = 'block';
+  els.messages.innerHTML = '';
+  els.messages.setAttribute('aria-busy', 'true');
+  addConversationNotice('正在加载完整对话…', 'loading');
 
   try {
     const resp = await fetch(`/api/agent/state/${threadId}`);
-    if (resp.ok) {
-      const data = await resp.json();
-      els.welcome.style.display = 'none';
-      els.messages.style.display = 'flex';
-      els.exportBtn.style.display = 'block';
-      els.messages.innerHTML = '';
-      if (data.final_output) {
-        addMessage('user', item.fullQuery || item.query || '(历史会话)');
-        addMessage('agent', data.final_output);
-      } else {
-        addMessage('agent', '该会话暂无最终输出。');
+    const localMessages = Array.isArray(item.messages) ? item.messages : [];
+    if (!resp.ok) {
+      const reason = await responseError(resp, '无法加载会话');
+      if (localMessages.length > 0) {
+        renderConversation(localMessages);
+        addConversationNotice(`${reason}，当前显示浏览器缓存。`, 'warning');
+        return;
       }
+      throw new Error(reason);
     }
-  } catch { /* 忽略 */ }
+    const data = await resp.json();
+    const serverMessages = Array.isArray(data.messages) ? data.messages : [];
+    let messages = serverMessages.length > 0 ? serverMessages : localMessages;
+    if (messages.length === 0 && data.final_output) {
+      messages = [
+        { role: 'user', content: item.fullQuery || item.query || '(历史会话)' },
+        { role: 'assistant', content: data.final_output },
+      ];
+    }
+    renderConversation(messages);
+    if (messages.length === 0) {
+      addConversationNotice('该会话暂无可显示的消息。', 'empty');
+    }
+    const lastUser = [...messages].reverse().find(message => message.role === 'user');
+    state.lastQuery = lastUser?.content || '';
+    item.messages = messages;
+    persistHistory();
+  } catch (err) {
+    els.messages.innerHTML = '';
+    addConversationNotice(err.message || '无法加载会话，请稍后重试。', 'error', () => {
+      loadThreadState(threadId, item);
+    });
+  } finally {
+    els.messages.setAttribute('aria-busy', 'false');
+  }
+  if (window.matchMedia('(max-width: 768px)').matches) {
+    state.sidebarCollapsed = true;
+    document.body.classList.add('sidebar-collapsed');
+    els.sidebarToggle.setAttribute('aria-expanded', 'false');
+  }
 }
 
-function deleteHistoryItem(index) {
+function renderConversation(messages) {
+  els.messages.innerHTML = '';
+  messages.forEach(message => {
+    const role = message.role === 'assistant' ? 'agent' : 'user';
+    addMessage(
+      role,
+      message.content || '',
+      false,
+      Array.isArray(message.attachments) ? message.attachments : [],
+    );
+  });
+}
+
+function addConversationNotice(message, type = 'info', retry = null) {
+  const notice = document.createElement('div');
+  notice.className = `conversation-notice notice-${type}`;
+  notice.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  const text = document.createElement('span');
+  text.textContent = message;
+  notice.appendChild(text);
+  if (retry) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = '重试';
+    button.addEventListener('click', retry);
+    notice.appendChild(button);
+  }
+  els.messages.appendChild(notice);
+}
+
+async function deleteHistoryItem(threadId) {
+  const index = state.history.findIndex(item => item.threadId === threadId);
   const item = state.history[index];
   if (!item) return;
 
-  state.history.splice(index, 1);
-  localStorage.setItem('lvyan_history', JSON.stringify(state.history));
-
-  if (item.threadId) {
-    fetch(`/api/agent/state/${item.threadId}`, { method: 'DELETE' })
-      .catch(() => {});
+  try {
+    const resp = await fetch(`/api/agent/state/${item.threadId}`, { method: 'DELETE' });
+    if (!resp.ok && resp.status !== 404) {
+      throw new Error(await responseError(resp, '删除失败'));
+    }
+  } catch (err) {
+    showToast(err.message || '删除失败，请稍后重试', 'error');
+    return;
   }
 
+  state.history.splice(index, 1);
+  persistHistory();
   if (item.threadId === state.threadId) {
     startNewChat();
   }
@@ -903,22 +1092,38 @@ async function clearAllHistory() {
     return;
   }
 
-  const promises = state.history
-    .filter(h => h.threadId)
-    .map(h => fetch(`/api/agent/state/${h.threadId}`, { method: 'DELETE' }).catch(() => {}));
-  await Promise.all(promises);
-
-  state.history = [];
-  localStorage.removeItem('lvyan_history');
+  const results = await Promise.all(state.history.map(async item => {
+    try {
+      const resp = await fetch(`/api/agent/state/${item.threadId}`, { method: 'DELETE' });
+      if (resp.ok || resp.status === 404) return { item, deleted: true };
+      return {
+        item,
+        deleted: false,
+        reason: await responseError(resp, '删除失败'),
+      };
+    } catch {
+      return { item, deleted: false, reason: '网络不可用' };
+    }
+  }));
+  state.history = results.filter(result => !result.deleted).map(result => result.item);
+  persistHistory();
   renderHistory();
-  startNewChat();
-  showToast('已清空所有历史');
+  if (state.history.length === 0) {
+    startNewChat();
+    showToast('已清空所有历史');
+  } else {
+    showToast(`${state.history.length} 个会话删除失败，已保留在列表中`, 'error');
+  }
 }
 
 // =========================================================================
 // 新对话
 // =========================================================================
 function startNewChat() {
+  if (state.isRunning) {
+    showToast('请先停止当前生成，再开始新对话', 'warning');
+    return;
+  }
   if (currentEventSource) {
     currentEventSource.close();
     currentEventSource = null;
@@ -979,14 +1184,20 @@ function exportConversation() {
 function toggleSidebar() {
   state.sidebarCollapsed = !state.sidebarCollapsed;
   document.body.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
+  els.sidebarToggle.setAttribute(
+    'aria-expanded',
+    String(!state.sidebarCollapsed),
+  );
 }
 
 // =========================================================================
 // Toast 提示
 // =========================================================================
 let toastTimer = null;
-function showToast(message) {
+function showToast(message, type = 'info') {
   els.toast.textContent = message;
+  els.toast.dataset.type = type;
+  els.toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
   els.toast.style.display = 'block';
   els.toast.classList.add('toast-show');
   if (toastTimer) clearTimeout(toastTimer);

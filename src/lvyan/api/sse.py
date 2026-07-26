@@ -49,7 +49,7 @@ class RunContext:
         # P2-13：归属用户；用于 stream / hitl 端点的 ownership 校验
         self.user_id: str = user_id
         self.law_as_of_date = law_as_of_date
-        # 状态：started / running / awaiting_hitl / completed / failed
+        # 状态：started / running / awaiting_hitl / completed / failed / cancelled
         self.status: str = "started"
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
         self.final_output: str | None = None
@@ -88,6 +88,7 @@ class RunManager:
         metadata_store: RunMetadataStore | None = None,
     ) -> None:
         self._runs: dict[str, RunContext] = {}
+        self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._runner: Runner | None = runner
         self._metadata_store = metadata_store
 
@@ -148,6 +149,45 @@ class RunManager:
             )
             return False
 
+    def _append_message(
+        self,
+        ctx: RunContext,
+        role: str,
+        content: str,
+        attachments: list[str] | None = None,
+    ) -> bool:
+        if self._metadata_store is None:
+            return True
+        try:
+            self._metadata_store.append_message(
+                ctx.run_id,
+                ctx.thread_id,
+                ctx.user_id,
+                role,
+                content,
+                attachments,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "thread message persistence failed for run %s: %s",
+                ctx.run_id,
+                exc,
+            )
+            ctx.non_recoverable = True
+            return False
+
+    def _start_task(self, ctx: RunContext, awaitable: Awaitable[None]) -> None:
+        task = asyncio.create_task(awaitable)
+        self._tasks[ctx.run_id] = task
+        task.add_done_callback(
+            lambda completed, run_id=ctx.run_id: (
+                self._tasks.pop(run_id, None)
+                if self._tasks.get(run_id) is completed
+                else None
+            )
+        )
+
     def has_active_thread_runs(self, thread_id: str) -> bool:
         """Return whether this process still owns an active run for a thread."""
         return any(
@@ -166,12 +206,15 @@ class RunManager:
         complexity: str,
         user_id: str = "anonymous",
         law_as_of_date: date | None = None,
+        attachments: list[str] | None = None,
+        display_query: str | None = None,
     ) -> RunContext:
         """创建并异步启动一次 Agent 运行。"""
         import time as _time
 
         run_id = f"run-{uuid.uuid4().hex}"
         resolved_thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"
+        visible_query = display_query if display_query is not None else query
         ctx = self._bind_context(RunContext(
             run_id,
             resolved_thread_id,
@@ -186,8 +229,10 @@ class RunManager:
                     run_id,
                     resolved_thread_id,
                     user_id,
-                    title=query[:40],
+                    title=visible_query[:40],
                     complexity=complexity,
+                    user_message=visible_query,
+                    attachments=attachments,
                 )
             except ThreadOwnershipError:
                 self._runs.pop(run_id, None)
@@ -197,7 +242,7 @@ class RunManager:
                 raise RunMetadataUnavailable(
                     f"无法持久化 run metadata: {exc}"
                 ) from exc
-        asyncio.create_task(self._drive(ctx, query, complexity))
+        self._start_task(ctx, self._drive(ctx, query, complexity))
         # 顺手做一次 TTL 清理
         self.gc_runs()
         return ctx
@@ -254,7 +299,12 @@ class RunManager:
                 completed_at=datetime.now(timezone.utc),
             )
             thread_marked = self._mark_thread_output(ctx.thread_id)
-            if not run_persisted or not thread_marked:
+            message_persisted = self._append_message(
+                ctx,
+                "assistant",
+                ctx.final_output,
+            )
+            if not run_persisted or not thread_marked or not message_persisted:
                 await ctx.publish({
                     "event": "warning",
                     "code": "completion_not_persisted",
@@ -273,8 +323,16 @@ class RunManager:
                 error=ctx.error,
                 completed_at=datetime.now(timezone.utc),
             )
+            self._append_message(ctx, "assistant", f"运行错误：{ctx.error}")
             _logger.exception("Agent run %s failed", ctx.run_id)
             await ctx.publish({"event": "error", "message": str(exc)})
+        except asyncio.CancelledError:
+            ctx.status = "cancelled"
+            ctx.error = "用户已停止生成"
+            self._update_metadata(ctx.run_id, status="cancelled", error=ctx.error)
+            self._append_message(ctx, "assistant", ctx.error)
+            await ctx.publish({"event": "cancelled", "message": ctx.error})
+            raise
         finally:
             # 仅在非中断时关闭 SSE 流；HITL 由 _resume_drive 收尾
             if not interrupted:
@@ -353,8 +411,9 @@ class RunManager:
 
             # 恢复执行并继续流式推送
             ctx.status = "running"
-            asyncio.create_task(
-                self._resume_drive(ctx, Command(resume=resume_payload), config)
+            self._start_task(
+                ctx,
+                self._resume_drive(ctx, Command(resume=resume_payload), config),
             )
             return ("resolved", f"已收到 {request.action} 决策，Agent 正在恢复执行")
         except Exception as exc:  # noqa: BLE001
@@ -452,8 +511,9 @@ class RunManager:
                     return ("unavailable", f"run {run_id} 的审批状态暂时不可用")
 
                 ctx.status = "running"
-                asyncio.create_task(
-                    self._resume_drive(ctx, Command(resume=resume_payload), config)
+                self._start_task(
+                    ctx,
+                    self._resume_drive(ctx, Command(resume=resume_payload), config),
                 )
                 return ("resolved", f"已从 checkpoint 恢复 run {run_id}，正在继续执行")
 
@@ -553,7 +613,12 @@ class RunManager:
                 completed_at=datetime.now(timezone.utc),
             )
             thread_marked = self._mark_thread_output(ctx.thread_id)
-            if not run_persisted or not thread_marked:
+            message_persisted = self._append_message(
+                ctx,
+                "assistant",
+                ctx.final_output,
+            )
+            if not run_persisted or not thread_marked or not message_persisted:
                 await ctx.publish({
                     "event": "warning",
                     "code": "completion_not_persisted",
@@ -580,11 +645,48 @@ class RunManager:
                 error=ctx.error,
                 completed_at=datetime.now(timezone.utc),
             )
+            self._append_message(ctx, "assistant", f"运行错误：{ctx.error}")
             _logger.exception("HITL 恢复执行失败 run %s", ctx.run_id)
             await ctx.publish({"event": "error", "message": str(exc)})
+        except asyncio.CancelledError:
+            ctx.status = "cancelled"
+            ctx.error = "用户已停止生成"
+            self._update_metadata(ctx.run_id, status="cancelled", error=ctx.error)
+            self._append_message(ctx, "assistant", ctx.error)
+            await ctx.publish({"event": "cancelled", "message": ctx.error})
+            raise
         finally:
             if not interrupted:
                 await ctx.queue.put(None)
+
+    async def cancel_run(
+        self,
+        run_id: str,
+        current_user_id: str,
+    ) -> tuple[str, str]:
+        ctx = self._runs.get(run_id)
+        if ctx is None:
+            return ("not_found", f"run {run_id} 不存在")
+        if ctx.user_id != current_user_id:
+            return ("forbidden", f"run {run_id} 不属于当前用户")
+        if ctx.status not in {"started", "running", "awaiting_hitl"}:
+            return ("conflict", f"run {run_id} 已处于 {ctx.status} 状态")
+
+        task = self._tasks.get(run_id)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if ctx.status != "cancelled":
+            ctx.status = "cancelled"
+            ctx.error = "用户已停止生成"
+            self._update_metadata(run_id, status="cancelled", error=ctx.error)
+            self._append_message(ctx, "assistant", ctx.error)
+            await ctx.publish({"event": "cancelled", "message": ctx.error})
+            await ctx.queue.put(None)
+        return ("cancelled", "已停止生成")
 
 
 # ---------------------------------------------------------------------------

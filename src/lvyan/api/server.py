@@ -417,6 +417,8 @@ def create_app(
                 complexity,
                 user_id=user_id,
                 law_as_of_date=req.law_as_of_date,
+                attachments=req.attachments,
+                display_query=req.query,
             )
         except ThreadOwnershipError as exc:
             raise HTTPException(
@@ -475,7 +477,7 @@ def create_app(
                 )
 
             status = str(durable_run.get("status", "unknown"))
-            if status not in ("completed", "failed"):
+            if status not in ("completed", "failed", "cancelled"):
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -489,10 +491,15 @@ def create_app(
                         "event": "final_output",
                         "output": durable_run.get("final_output") or "",
                     })
-                else:
+                elif status == "failed":
                     yield format_sse_event({
                         "event": "error",
                         "message": durable_run.get("error") or "Agent run failed",
+                    })
+                else:
+                    yield format_sse_event({
+                        "event": "cancelled",
+                        "message": durable_run.get("error") or "已停止生成",
                     })
 
             return StreamingResponse(
@@ -521,6 +528,7 @@ def create_app(
         if metadata_store is not None:
             try:
                 meta = metadata_store.get_thread(thread_id)
+                messages = metadata_store.list_messages(thread_id, user_id)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,
@@ -528,6 +536,7 @@ def create_app(
                 ) from exc
         else:
             meta = dict(mem.list_threads()).get(thread_id)
+            messages = []
         assert_thread_owner(meta, user_id, thread_id)
         try:
             cs = mem.load_strict(thread_id)
@@ -538,7 +547,15 @@ def create_app(
             ) from exc
         if cs is None:
             raise HTTPException(status_code=404, detail=f"thread {thread_id} 无记录")
-        return _state_summary(cs)
+        summary = _state_summary(cs)
+        summary["messages"] = [
+            {
+                **message,
+                "created_at": _as_unix_timestamp(message.get("created_at")),
+            }
+            for message in messages
+        ]
+        return summary
 
     @app.delete("/api/agent/state/{thread_id}", response_model=DeleteResponse)
     async def delete_thread(
@@ -637,6 +654,9 @@ def create_app(
                 title=title,
                 complexity=meta.get("complexity") or "light",
                 created_at=_as_unix_timestamp(meta.get("created_at")),
+                updated_at=_as_unix_timestamp(
+                    meta.get("updated_at") or meta.get("created_at")
+                ),
                 has_output=bool(meta.get("has_output")),
             ))
         return ThreadListResponse(threads=summaries)
@@ -776,6 +796,20 @@ def create_app(
         if status == "unavailable":
             raise HTTPException(status_code=503, detail=message)
         if status == "error":
+            raise HTTPException(status_code=409, detail=message)
+        return HITLResponse(run_id=run_id, status=status, message=message)
+
+    @app.post("/api/agent/cancel/{run_id}", response_model=HITLResponse)
+    async def cancel_run(
+        run_id: str,
+        user_id: str = Depends(get_current_user_id),
+    ) -> HITLResponse:
+        status, message = await manager.cancel_run(run_id, user_id)
+        if status == "not_found":
+            raise HTTPException(status_code=404, detail=message)
+        if status == "forbidden":
+            raise HTTPException(status_code=403, detail=message)
+        if status == "conflict":
             raise HTTPException(status_code=409, detail=message)
         return HITLResponse(run_id=run_id, status=status, message=message)
 

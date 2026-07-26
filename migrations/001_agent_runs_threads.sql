@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     thread_id         TEXT NOT NULL REFERENCES agent_threads(thread_id) ON DELETE CASCADE,
     user_id           TEXT NOT NULL DEFAULT 'anonymous',
     status            TEXT NOT NULL DEFAULT 'started',
-    -- started / running / awaiting_hitl / completed / failed
+    -- started / running / awaiting_hitl / completed / failed / cancelled
     interrupt_payload JSONB,
     final_output      TEXT,
     error             TEXT,
@@ -39,6 +39,21 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 CREATE INDEX IF NOT EXISTS idx_agent_runs_thread ON agent_runs (thread_id);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_user_status
     ON agent_runs (user_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_messages (
+    message_id  BIGSERIAL PRIMARY KEY,
+    thread_id   TEXT NOT NULL REFERENCES agent_threads(thread_id) ON DELETE CASCADE,
+    run_id      TEXT NOT NULL REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL DEFAULT 'anonymous',
+    role        TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content     TEXT NOT NULL,
+    attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (run_id, role)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_messages_thread
+    ON agent_messages (thread_id, message_id);
 
 -- updated_at 触发器
 CREATE OR REPLACE FUNCTION trg_agent_threads_set_updated_at()
