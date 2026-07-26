@@ -43,9 +43,14 @@ from fastapi.staticfiles import StaticFiles
 
 from lvyan.config import AGENT_DIR, is_official_db_available, settings
 from lvyan.memory.store import CaseMemory
-from lvyan.memory.run_metadata import PostgresRunMetadataStore, RunMetadataStore
+from lvyan.memory.run_metadata import (
+    PostgresRunMetadataStore,
+    RunMetadataStore,
+    RunMetadataUnavailable,
+    ThreadOwnershipError,
+)
 from lvyan.runtime import get_case_memory
-from lvyan.tools.file_converter import convert_to_markdown, get_file_category
+from lvyan.tools.file_converter import convert_to_markdown
 
 from .auth import (
     ANONYMOUS_USER,
@@ -285,6 +290,14 @@ def create_app(
         - ``object_storage``：保留位（当前未实现）
         """
         db = _check_database_ready()
+        if db == "ok" and metadata_store is not None:
+            healthcheck = getattr(metadata_store, "healthcheck", None)
+            if callable(healthcheck):
+                try:
+                    if not healthcheck():
+                        db = "unavailable"
+                except Exception:  # noqa: BLE001
+                    db = "unavailable"
         ret = _check_retrieval()
         gw = _check_model_gateway_ready()
         ready = db == "ok" and ret == "ok"
@@ -355,6 +368,22 @@ def create_app(
 
         # P0-5：已有 thread 的 ownership 校验（防止用他人 thread_id 继续运行）
         if req.thread_id:
+            if metadata_store is not None:
+                try:
+                    durable_thread = metadata_store.get_thread(req.thread_id)
+                except Exception as exc:  # noqa: BLE001
+                    raise HTTPException(
+                        status_code=503,
+                        detail="run metadata 暂时不可用",
+                    ) from exc
+                if (
+                    durable_thread is not None
+                    and str(durable_thread.get("user_id", "")) != user_id
+                ):
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"thread {req.thread_id} 不属于当前用户",
+                    )
             existing_meta = dict(mem.list_threads()).get(req.thread_id)
             if existing_meta is not None:
                 assert_thread_owner(existing_meta, user_id, req.thread_id)
@@ -369,13 +398,24 @@ def create_app(
                             detail=f"thread {req.thread_id} 不属于当前用户（owner={cp_user_id}）",
                         )
 
-        ctx = manager.create_run(
-            query_text,
-            req.thread_id,
-            complexity,
-            user_id=user_id,
-            law_as_of_date=req.law_as_of_date,
-        )
+        try:
+            ctx = manager.create_run(
+                query_text,
+                req.thread_id,
+                complexity,
+                user_id=user_id,
+                law_as_of_date=req.law_as_of_date,
+            )
+        except ThreadOwnershipError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail=f"thread {req.thread_id} 不属于当前用户",
+            ) from exc
+        except RunMetadataUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="无法创建可恢复的 Agent run",
+            ) from exc
         # P2-13：把 user_id 写入 CaseMemory 索引，便于后续 ownership 过滤
         try:
             mem.register(
@@ -402,7 +442,51 @@ def create_app(
     ) -> StreamingResponse:
         ctx = manager.get(run_id)
         if ctx is None:
-            raise HTTPException(status_code=404, detail=f"run {run_id} 不存在")
+            if metadata_store is None:
+                raise HTTPException(status_code=404, detail=f"run {run_id} 不存在")
+            try:
+                durable_run = metadata_store.get_run(run_id)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail="run metadata 暂时不可用",
+                ) from exc
+            if durable_run is None:
+                raise HTTPException(status_code=404, detail=f"run {run_id} 不存在")
+            if (
+                is_auth_enabled()
+                and str(durable_run.get("user_id", "")) != user_id
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"run {run_id} 不属于当前用户",
+                )
+
+            status = str(durable_run.get("status", "unknown"))
+            if status not in ("completed", "failed"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "该 run 正在另一实例执行；流式事件需要 session affinity"
+                    ),
+                )
+
+            async def durable_event_generator():
+                if status == "completed":
+                    yield format_sse_event({
+                        "event": "final_output",
+                        "output": durable_run.get("final_output") or "",
+                    })
+                else:
+                    yield format_sse_event({
+                        "event": "error",
+                        "message": durable_run.get("error") or "Agent run failed",
+                    })
+
+            return StreamingResponse(
+                durable_event_generator(),
+                media_type="text/event-stream",
+            )
         # P2-13：run ownership 校验
         assert_run_owner(ctx, user_id, run_id)
 

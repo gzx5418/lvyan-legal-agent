@@ -82,6 +82,38 @@ def test_authority_status_passes_validation_date_to_status_lookup(monkeypatch):
     assert report.passed is True
 
 
+def test_repealed_now_but_effective_as_of_passes(monkeypatch):
+    from lvyan.schemas.authority import Authority
+    from lvyan.validators import authority_status as module
+
+    monkeypatch.setattr(
+        module,
+        "verify_statute_status",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            current_status="repealed",
+            is_effective_as_of=True,
+            superseded_by="civil-code",
+        ),
+    )
+    historical_law = Authority(
+        source_id="contract-law",
+        title="中华人民共和国合同法",
+        article_text="依法成立的合同受法律保护。",
+        authority_level="法律",
+        effective_date=date(1999, 10, 1),
+        expiry_date=date(2021, 1, 1),
+        status="repealed",
+        retrieved_at=datetime.now(timezone.utc),
+    )
+
+    report = module.validate_authority_status(
+        [historical_law],
+        current_date=date(2018, 6, 1),
+    )
+
+    assert report.passed is True
+
+
 @pytest.mark.asyncio
 async def test_default_runner_emits_each_task_once_and_no_error_for_none(monkeypatch):
     from lvyan.api import sse
@@ -167,6 +199,8 @@ async def test_checkpoint_hitl_uses_run_metadata_without_sidecar(monkeypatch):
     from lvyan.api.models import HITLRequest
 
     class FakeStore:
+        claimed = False
+
         def get_run(self, run_id: str) -> dict[str, Any] | None:
             assert run_id == "run-db"
             return {
@@ -179,6 +213,21 @@ async def test_checkpoint_hitl_uses_run_metadata_without_sidecar(monkeypatch):
 
         def update_run(self, _run_id: str, **_values: Any) -> None:
             return None
+
+        def claim_hitl_run(
+            self, run_id: str, user_id: str
+        ) -> dict[str, Any] | None:
+            assert run_id == "run-db"
+            assert user_id == "user-a"
+            if self.claimed:
+                return None
+            self.claimed = True
+            return {
+                "run_id": run_id,
+                "thread_id": "thread-db",
+                "user_id": user_id,
+                "status": "running",
+            }
 
     class FakeGraph:
         def get_state(self, config: dict[str, Any]):
@@ -209,3 +258,267 @@ async def test_checkpoint_hitl_uses_run_metadata_without_sidecar(monkeypatch):
 
     assert status == "resolved"
     assert manager.get("run-db").thread_id == "thread-db"
+
+
+@pytest.mark.asyncio
+async def test_in_process_hitl_claims_metadata_before_resume(monkeypatch):
+    from lvyan.api import sse
+    from lvyan.api.models import HITLRequest
+
+    calls: list[tuple[str, str]] = []
+
+    class FakeStore:
+        def claim_hitl_run(self, run_id: str, user_id: str):
+            calls.append((run_id, user_id))
+            return {
+                "run_id": run_id,
+                "thread_id": "thread-1",
+                "user_id": user_id,
+                "status": "running",
+            }
+
+        def get_run(self, _run_id: str):
+            return None
+
+        def update_run(self, _run_id: str, **_values: Any) -> None:
+            return None
+
+    manager = sse.RunManager(metadata_store=FakeStore())
+    ctx = sse.RunContext("run-1", "thread-1", user_id="user-a")
+    ctx.status = "awaiting_hitl"
+    manager._runs[ctx.run_id] = ctx
+
+    async def fake_resume(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(manager, "_resume_drive", fake_resume)
+    status, _message = await manager.resolve_hitl(
+        "run-1",
+        HITLRequest(action="approve"),
+        current_user_id="user-a",
+    )
+    await asyncio.sleep(0)
+
+    assert status == "resolved"
+    assert calls == [("run-1", "user-a")]
+    assert ctx.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_two_instances_only_one_can_claim_hitl(monkeypatch):
+    from lvyan.api import sse
+    from lvyan.api.models import HITLRequest
+
+    class SharedStore:
+        status = "awaiting_hitl"
+
+        def get_run(self, run_id: str):
+            return {
+                "run_id": run_id,
+                "thread_id": "thread-db",
+                "user_id": "user-a",
+                "status": self.status,
+                "created_at": 1.0,
+            }
+
+        def claim_hitl_run(self, run_id: str, user_id: str):
+            if self.status != "awaiting_hitl":
+                return None
+            self.status = "running"
+            return {
+                "run_id": run_id,
+                "thread_id": "thread-db",
+                "user_id": user_id,
+                "status": "running",
+            }
+
+        def update_run(self, _run_id: str, **_values: Any) -> None:
+            return None
+
+    class FakeGraph:
+        def get_state(self, _config: dict[str, Any]):
+            interrupt = SimpleNamespace(value={"message": "approve"})
+            return SimpleNamespace(
+                next=("output_guardrail",),
+                values={"run_id": "run-db", "user_id": "user-a"},
+                tasks=(SimpleNamespace(interrupts=[interrupt]),),
+            )
+
+    shared = SharedStore()
+    managers = [
+        sse.RunManager(metadata_store=shared),
+        sse.RunManager(metadata_store=shared),
+    ]
+
+    async def fake_resume(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    for manager in managers:
+        monkeypatch.setattr(manager, "_resume_drive", fake_resume)
+    monkeypatch.setattr(sse, "_get_graph", lambda: FakeGraph())
+    monkeypatch.setattr("lvyan.api.auth.is_auth_enabled", lambda: True)
+
+    results = await asyncio.gather(*(
+        manager.resolve_hitl(
+            "run-db",
+            HITLRequest(action="approve"),
+            current_user_id="user-a",
+        )
+        for manager in managers
+    ))
+    await asyncio.sleep(0)
+
+    assert sorted(status for status, _message in results) == ["error", "resolved"]
+
+
+class _ApiMemory:
+    def __init__(self) -> None:
+        self.items: dict[str, dict[str, Any]] = {}
+
+    def list_threads(self):
+        return list(self.items.items())
+
+    def load(self, _thread_id: str):
+        return None
+
+    def register(self, thread_id: str, **metadata: Any) -> None:
+        self.items[thread_id] = metadata
+
+    def mark_output(self, _thread_id: str) -> None:
+        return None
+
+
+def test_metadata_creation_failure_returns_503():
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+
+    class FailingStore:
+        def create_run(self, *_args: Any, **_kwargs: Any) -> None:
+            raise OSError("database unavailable")
+
+    async def runner(*_args: Any, **_kwargs: Any) -> str:
+        return "should not run"
+
+    app = create_app(
+        runner=runner,
+        memory=_ApiMemory(),
+        metadata_store=FailingStore(),
+    )
+    response = TestClient(app).post(
+        "/api/agent/run",
+        json={"query": "合同问题"},
+    )
+
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_metadata_update_failure_marks_run_non_recoverable():
+    from lvyan.api import sse
+
+    class Store:
+        def update_run(self, _run_id: str, **_values: Any) -> None:
+            raise OSError("database unavailable")
+
+    async def runner(*_args: Any, **_kwargs: Any) -> str:
+        return "result"
+
+    manager = sse.RunManager(runner=runner, metadata_store=Store())
+    ctx = sse.RunContext("run-1", "thread-1")
+    manager._runs[ctx.run_id] = ctx
+
+    await manager._drive(ctx, "question", "light")
+
+    events = []
+    while not ctx.queue.empty():
+        event = ctx.queue.get_nowait()
+        if event is not None:
+            events.append(event)
+    assert ctx.non_recoverable is True
+    assert any(
+        event.get("code") == "run_non_recoverable"
+        for event in events
+    )
+
+
+def test_durable_thread_owner_cannot_be_overwritten(monkeypatch):
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+
+    class Store:
+        def get_thread(self, thread_id: str):
+            assert thread_id == "thread-owned"
+            return {"thread_id": thread_id, "user_id": "user-a"}
+
+    async def runner(*_args: Any, **_kwargs: Any) -> str:
+        return "should not run"
+
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    app = create_app(
+        runner=runner,
+        memory=_ApiMemory(),
+        metadata_store=Store(),
+    )
+    response = TestClient(app).post(
+        "/api/agent/run",
+        headers={"X-User-ID": "user-b"},
+        json={"query": "合同问题", "thread_id": "thread-owned"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_cross_instance_stream_returns_completed_output():
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+
+    class Store:
+        def get_run(self, run_id: str):
+            return {
+                "run_id": run_id,
+                "thread_id": "thread-1",
+                "user_id": "anonymous",
+                "status": "completed",
+                "final_output": "durable result",
+                "error": None,
+            }
+
+    async def runner(*_args: Any, **_kwargs: Any) -> str:
+        return ""
+
+    app = create_app(
+        runner=runner,
+        memory=_ApiMemory(),
+        metadata_store=Store(),
+    )
+    response = TestClient(app).get("/api/agent/stream/run-other-instance")
+
+    assert response.status_code == 200
+    assert "durable result" in response.text
+
+
+def test_cross_instance_running_stream_requires_affinity():
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+
+    class Store:
+        def get_run(self, run_id: str):
+            return {
+                "run_id": run_id,
+                "thread_id": "thread-1",
+                "user_id": "anonymous",
+                "status": "running",
+            }
+
+    async def runner(*_args: Any, **_kwargs: Any) -> str:
+        return ""
+
+    app = create_app(
+        runner=runner,
+        memory=_ApiMemory(),
+        metadata_store=Store(),
+    )
+    response = TestClient(app).get("/api/agent/stream/run-other-instance")
+
+    assert response.status_code == 409
+    assert "session affinity" in response.json()["detail"]

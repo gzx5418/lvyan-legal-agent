@@ -20,7 +20,11 @@ import uuid
 from datetime import date
 from typing import Any, Awaitable, Callable
 
-from lvyan.memory.run_metadata import RunMetadataStore
+from lvyan.memory.run_metadata import (
+    RunMetadataStore,
+    RunMetadataUnavailable,
+    ThreadOwnershipError,
+)
 
 from .models import HITLRequest
 
@@ -50,6 +54,7 @@ class RunContext:
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
         self.final_output: str | None = None
         self.error: str | None = None
+        self.non_recoverable: bool = False
         # HITL 中断信息（LangGraph interrupt 机制）
         self.hitl_interrupt: dict[str, Any] | None = None
         # P3-24：TTL 摘要（用于 RunManager 自动清理过期运行）
@@ -76,13 +81,40 @@ class RunManager:
         self._runner: Runner | None = runner
         self._metadata_store = metadata_store
 
-    def _update_metadata(self, run_id: str, **values: Any) -> None:
+    def _update_metadata(self, run_id: str, **values: Any) -> bool:
         if self._metadata_store is None:
-            return
+            return True
         try:
             self._metadata_store.update_run(run_id, **values)
+            return True
         except Exception as exc:  # noqa: BLE001
             _logger.warning("run metadata update failed for %s: %s", run_id, exc)
+            ctx = self._runs.get(run_id)
+            if ctx is not None:
+                ctx.non_recoverable = True
+            return False
+
+    def _claim_hitl(
+        self,
+        run_id: str,
+        user_id: str,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Atomically claim a durable HITL run before issuing Command(resume)."""
+        if self._metadata_store is None:
+            return ("claimed", None)
+        try:
+            claimed = self._metadata_store.claim_hitl_run(run_id, user_id)
+            if claimed is not None:
+                return ("claimed", claimed)
+            existing = self._metadata_store.get_run(run_id)
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception("HITL claim failed for run %s", run_id)
+            return ("unavailable", {"error": str(exc)})
+        if existing is None:
+            return ("not_found", None)
+        if str(existing.get("user_id", "")) != user_id:
+            return ("forbidden", existing)
+        return ("conflict", existing)
 
     # ------------------------------------------------------------------
     # 运行生命周期
@@ -117,8 +149,14 @@ class RunManager:
                     title=query[:40],
                     complexity=complexity,
                 )
+            except ThreadOwnershipError:
+                self._runs.pop(run_id, None)
+                raise
             except Exception as exc:  # noqa: BLE001
-                _logger.warning("run metadata creation failed for %s: %s", run_id, exc)
+                self._runs.pop(run_id, None)
+                raise RunMetadataUnavailable(
+                    f"无法持久化 run metadata: {exc}"
+                ) from exc
         asyncio.create_task(self._drive(ctx, query, complexity))
         # 顺手做一次 TTL 清理
         self.gc_runs()
@@ -131,7 +169,12 @@ class RunManager:
         不关闭 SSE 流，由 :meth:`_resume_drive` 在 HITL 决策后负责收尾。
         """
         ctx.status = "running"
-        self._update_metadata(ctx.run_id, status="running")
+        if not self._update_metadata(ctx.run_id, status="running"):
+            await ctx.publish({
+                "event": "warning",
+                "code": "run_non_recoverable",
+                "message": "运行状态无法持久化；服务重启后可能无法恢复",
+            })
         interrupted = False
         try:
             if self._runner is not None:
@@ -241,6 +284,16 @@ class RunManager:
             if request.action == "edit" and request.edited_output:
                 resume_payload["edited_output"] = request.edited_output
 
+            claim_status, _claim = self._claim_hitl(run_id, current_user_id)
+            if claim_status == "forbidden":
+                return ("forbidden", f"run {run_id} 不属于当前用户")
+            if claim_status in ("conflict",):
+                return ("error", f"run {run_id} 的审批已被处理或正在处理")
+            if claim_status == "not_found":
+                return ("not_found", f"run {run_id} 不存在")
+            if claim_status == "unavailable":
+                return ("error", f"run {run_id} 的审批状态暂时不可用")
+
             # 恢复执行并继续流式推送
             ctx.status = "running"
             asyncio.create_task(
@@ -325,8 +378,21 @@ class RunManager:
                 if request.action == "edit" and request.edited_output:
                     resume_payload["edited_output"] = request.edited_output
 
+                claim_status, _claim = self._claim_hitl(run_id, current_user_id)
+                if claim_status == "forbidden":
+                    self._runs.pop(run_id, None)
+                    return ("forbidden", f"run {run_id} 不属于当前用户")
+                if claim_status == "conflict":
+                    self._runs.pop(run_id, None)
+                    return ("error", f"run {run_id} 的审批已被处理或正在处理")
+                if claim_status == "not_found":
+                    self._runs.pop(run_id, None)
+                    return ("not_found", f"run {run_id} 不存在")
+                if claim_status == "unavailable":
+                    self._runs.pop(run_id, None)
+                    return ("error", f"run {run_id} 的审批状态暂时不可用")
+
                 ctx.status = "running"
-                self._update_metadata(run_id, status="running")
                 asyncio.create_task(
                     self._resume_drive(ctx, Command(resume=resume_payload), config)
                 )

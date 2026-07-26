@@ -25,6 +25,20 @@ class RunMetadataStore(Protocol):
 
     def get_run(self, run_id: str) -> dict[str, Any] | None: ...
 
+    def get_thread(self, thread_id: str) -> dict[str, Any] | None: ...
+
+    def claim_hitl_run(
+        self, run_id: str, user_id: str
+    ) -> dict[str, Any] | None: ...
+
+
+class RunMetadataUnavailable(RuntimeError):
+    """The durable run registry could not be written."""
+
+
+class ThreadOwnershipError(PermissionError):
+    """A thread id is already owned by a different user."""
+
 
 def _to_dsn(url: str) -> str:
     prefix = "postgresql+psycopg://"
@@ -89,15 +103,21 @@ class PostgresRunMetadataStore:
                         (thread_id, user_id, title, complexity)
                     VALUES (%s, %s, %s, %s)
                     ON CONFLICT (thread_id) DO UPDATE SET
-                        user_id = EXCLUDED.user_id,
                         title = CASE
                             WHEN EXCLUDED.title = '' THEN agent_threads.title
                             ELSE EXCLUDED.title
                         END,
                         complexity = EXCLUDED.complexity
+                    WHERE agent_threads.user_id = EXCLUDED.user_id
+                    RETURNING user_id
                     """,
                     (thread_id, user_id, title, complexity),
                 )
+                owner_row = cur.fetchone()
+                if owner_row is None:
+                    raise ThreadOwnershipError(
+                        f"thread {thread_id} belongs to another user"
+                    )
                 cur.execute(
                     """
                     INSERT INTO agent_runs
@@ -138,7 +158,8 @@ class PostgresRunMetadataStore:
                 cur.execute(
                     """
                     SELECT run_id, thread_id, user_id, status,
-                           interrupt_payload, created_at
+                           interrupt_payload, final_output, error,
+                           created_at, completed_at
                     FROM agent_runs
                     WHERE run_id = %s
                     """,
@@ -147,5 +168,61 @@ class PostgresRunMetadataStore:
                 row = cur.fetchone()
         return dict(row) if row else None
 
+    def get_thread(self, thread_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT thread_id, user_id, title, complexity,
+                           has_output, created_at, updated_at
+                    FROM agent_threads
+                    WHERE thread_id = %s
+                    """,
+                    (thread_id,),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
 
-__all__ = ["RunMetadataStore", "PostgresRunMetadataStore"]
+    def claim_hitl_run(
+        self,
+        run_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        """Atomically transition one pending HITL run to ``running``."""
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE agent_runs
+                    SET status = 'running'
+                    WHERE run_id = %s
+                      AND user_id = %s
+                      AND status = 'awaiting_hitl'
+                    RETURNING run_id, thread_id, user_id, status, created_at
+                    """,
+                    (run_id, user_id),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+
+    def healthcheck(self) -> bool:
+        """Verify metadata tables are present and writable."""
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM agent_runs LIMIT 1")
+                cur.fetchone()
+                cur.execute(
+                    "UPDATE agent_runs SET status = status WHERE FALSE"
+                )
+        return True
+
+
+__all__ = [
+    "RunMetadataStore",
+    "RunMetadataUnavailable",
+    "ThreadOwnershipError",
+    "PostgresRunMetadataStore",
+]

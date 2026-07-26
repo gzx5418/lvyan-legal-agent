@@ -128,9 +128,18 @@ def _check_authority(
         except Exception:  # noqa: BLE001  查询失败回退到 authority.status
             verification = None
         if verification is not None:
-            verified_status = _get(verification, "current_status", None)
-            if verified_status and verified_status != "unknown":
-                current_status = str(verified_status)
+            effective_as_of = _get(verification, "is_effective_as_of", None)
+            if current_date is not None and effective_as_of is True:
+                current_status = "effective"
+            elif current_date is not None and effective_as_of is False:
+                if effective_date is not None and effective_date > current_date:
+                    current_status = "not_yet_effective"
+                else:
+                    current_status = "repealed"
+            else:
+                verified_status = _get(verification, "current_status", None)
+                if verified_status and verified_status != "unknown":
+                    current_status = str(verified_status)
             superseded_by = _get(verification, "superseded_by", None)
 
     # 规则 4a：status == "repealed" 且未标注「历史适用」→ error；已标注 → warning

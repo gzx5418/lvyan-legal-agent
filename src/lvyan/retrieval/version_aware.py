@@ -49,7 +49,10 @@ class StatuteVerification(BaseModel):
     current_status: AuthorityStatus
     effective_date: date | None = None
     expiry_date: date | None = None
-    is_effective_as_of: bool = False
+    # ``None`` means no target-date determination was made.  This must not
+    # default to False, which would incorrectly turn current-status-only mocks
+    # and degraded lookups into "repealed as of" decisions.
+    is_effective_as_of: bool | None = None
     superseded_by: str | None = None
     official_source: str | None = None
     checked_at: datetime
