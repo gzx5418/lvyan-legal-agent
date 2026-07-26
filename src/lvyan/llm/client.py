@@ -320,15 +320,16 @@ def chat_structured(
     try:
         return response_model.model_validate(result)
     except ValidationError as exc:
+        validation_error = str(exc)
         _logger.warning(
-            "Pydantic 校验失败（一次修复重试）：%s", str(exc)[:300]
+            "Pydantic 校验失败（一次修复重试）：%s", validation_error[:300]
         )
 
     # 修复重试：把错误反馈给模型
     repair_msg = {
         "role": "user",
         "content": (
-            f"上一轮输出未通过 schema 校验：\n{str(exc)[:500]}\n"
+            f"上一轮输出未通过 schema 校验：\n{validation_error[:500]}\n"
             "请仅输出符合 schema 的合法 JSON，不要解释。"
         ),
     }

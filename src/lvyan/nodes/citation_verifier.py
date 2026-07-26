@@ -385,25 +385,22 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
     if final_output:
         output_citations = _extract_citations(final_output)
         if output_citations and statutes:
-            # 对 output 中额外出现的引用做存在性检查
             for oc in output_citations:
                 matched = _find_matching_statute(oc, statutes)
                 if matched is None:
-                    # final_output 中出现了 statutes 里没有的引用 → 标记为未验证
                     from lvyan.validators.citation import (
                         CitationValidationReport,
-                        CitationValidationIssue,
+                        CitationIssue,
                     )
                     existing_issues = list(_get(citation_report, "issues", []) or [])
                     oc_text = f"《{oc.get('law', '')}》第{oc.get('article_str', '')}条"
                     existing_issues.append(
-                        CitationValidationIssue(
+                        CitationIssue(
                             citation_id=oc.get("citation_id", "output-unverified"),
-                            citation_text=oc_text,
                             issue_type="not_found",
+                            expected="最终输出中的引用应存在于 state.statutes",
+                            actual=oc_text,
                             severity="error",
-                            detail=f"最终输出中的引用「{oc_text}」在检索结果中未找到对应法条",
-                            actual=None,
                         )
                     )
                     citation_report = CitationValidationReport(

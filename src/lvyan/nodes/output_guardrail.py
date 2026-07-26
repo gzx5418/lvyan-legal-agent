@@ -290,13 +290,17 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
 
             else:
                 raise ValueError(f"未知 HITL action: {action}")
-        final_output = (
-            final_output
-            + "\n\n---\n⚠ 以下操作需要您确认后才能执行："
-            + "；".join(irreversible_ops)
-            + "。Agent 不会自动执行，请回复确认后再处理。"
-        )
-        notes.append("检测到不可逆操作建议，已写入 pending_human_approval")
+
+        # P1-2 修复：仅在 HITL 未启用（status 仍为 pending）时追加确认提示；
+        # 已批准/拒绝/编辑后不应再要求确认
+        if pending_human_approval.get("status") == "pending":
+            final_output = (
+                final_output
+                + "\n\n---\n⚠ 以下操作需要您确认后才能执行："
+                + "；".join(irreversible_ops)
+                + "。Agent 不会自动执行，请回复确认后再处理。"
+            )
+            notes.append("检测到不可逆操作建议，已写入 pending_human_approval")
 
     # --- 6. 高风险声明兜底 ---
     if risk_level == "high" and "高风险声明" not in final_output:

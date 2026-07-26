@@ -22,34 +22,61 @@ _RRF_K = 60
 
 
 def _filter_chunk(chunk: Any, only_effective: bool, as_of: date | None) -> bool:
-    """根据 status / effective_date 过滤 chunk。
+    """根据 status / effective_date / expiry_date 过滤 chunk。
 
-    - only_effective=True：仅保留 status="effective"
-    - as_of 给定时：额外要求 effective_date <= as_of（None 视为未知，保留）
+    P0-4 修复：当 as_of 给定时，按时间窗口判断，不再要求 status=="effective"，
+    否则会错误排除「现已废止但在 as_of 时间点仍有效」的历史法规。
+
+    规则：
+      - as_of 给定：
+        - effective_date 已知且晚于 as_of → 尚未生效 → 排除
+        - expiry_date 已知且不晚于 as_of → 已失效 → 排除
+        - status=="repealed" 且 expiry_date 未知 → 保守排除
+        - 其余保留（包括 status=="repealed" 但 expiry_date > as_of 的情况）
+      - as_of 为 None 且 only_effective=True：仅保留 status=="effective"
+      - as_of 为 None 且 only_effective=False：不过滤
     """
     if isinstance(chunk, dict):
         status = chunk.get("status", "unknown")
         effective_date = chunk.get("effective_date")
+        expiry_date = chunk.get("expiry_date")
     else:
         status = getattr(chunk, "status", "unknown")
         effective_date = getattr(chunk, "effective_date", None)
+        expiry_date = getattr(chunk, "expiry_date", None)
+
+    if as_of is not None:
+        # 时间点查询：按 effective_date / expiry_date 窗口判断
+        if effective_date is not None:
+            try:
+                if isinstance(effective_date, str):
+                    eff = date.fromisoformat(effective_date[:10])
+                elif isinstance(effective_date, date):
+                    eff = effective_date
+                else:
+                    eff = None
+                if eff is not None and eff > as_of:
+                    return False
+            except (ValueError, TypeError):
+                pass
+        if expiry_date is not None:
+            try:
+                if isinstance(expiry_date, str):
+                    exp = date.fromisoformat(expiry_date[:10])
+                elif isinstance(expiry_date, date):
+                    exp = expiry_date
+                else:
+                    exp = None
+                if exp is not None and exp <= as_of:
+                    return False
+            except (ValueError, TypeError):
+                pass
+        if status == "repealed" and expiry_date is None:
+            return False
+        return True
 
     if only_effective and status != "effective":
         return False
-
-    if as_of is not None and effective_date is not None:
-        # effective_date 可能是 str（来自 dict）/ date 对象
-        try:
-            if isinstance(effective_date, str):
-                eff = date.fromisoformat(effective_date[:10])
-            elif isinstance(effective_date, date):
-                eff = effective_date
-            else:
-                return True  # 未知类型不过滤
-            if eff > as_of:
-                return False
-        except (ValueError, TypeError):
-            return True  # 解析失败不过滤
 
     return True
 

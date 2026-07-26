@@ -84,6 +84,8 @@ class ArticleChunk(BaseModel):
     authority_level: str
     status: AuthorityStatus
     effective_date: date | None = None
+    expiry_date: date | None = None
+    superseded_by: str | None = None
     jurisdiction: str = "中国大陆"
     official_source: str | None = None
     content_hash: str

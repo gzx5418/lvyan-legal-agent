@@ -51,6 +51,7 @@ from .auth import (
     assert_run_owner,
     assert_thread_owner,
     get_current_user_id,
+    is_auth_enabled,
 )
 from .models import (
     AgentRunRequest,
@@ -309,6 +310,14 @@ def create_app(
                 if meta_path.is_file():
                     try:
                         meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                        # P0-5：附件 ownership 校验
+                        if is_auth_enabled():
+                            attachment_owner = meta.get("user_id", ANONYMOUS_USER)
+                            if attachment_owner != user_id:
+                                raise HTTPException(
+                                    status_code=403,
+                                    detail=f"附件 {fid} 不属于当前用户",
+                                )
                         md = meta.get("markdown", "") or meta.get("text_preview", "")
                         if md:
                             # P2-15：检测文档中的提示注入，标记为不可信
@@ -337,6 +346,12 @@ def create_app(
                     + "\n\n# 用户问题\n"
                     + req.query
                 )
+
+        # P0-5：已有 thread 的 ownership 校验（防止用他人 thread_id 继续运行）
+        if req.thread_id:
+            existing_meta = dict(mem.list_threads()).get(req.thread_id)
+            if existing_meta is not None:
+                assert_thread_owner(existing_meta, user_id, req.thread_id)
 
         ctx = manager.create_run(
             query_text, req.thread_id, complexity, user_id=user_id
@@ -434,7 +449,10 @@ def create_app(
         return ThreadListResponse(threads=summaries)
 
     @app.post("/api/upload", response_model=UploadResponse)
-    async def upload_file(file: UploadFile = File(...)) -> UploadResponse:
+    async def upload_file(
+        file: UploadFile = File(...),
+        user_id: str = Depends(get_current_user_id),
+    ) -> UploadResponse:
         """上传文件，自动转为 Markdown，返回 file_id 供 /api/agent/run 引用。
 
         支持类型：
@@ -521,6 +539,7 @@ def create_app(
             "markdown": markdown_text,
             "char_count": char_count,
             "uploaded_at": time.time(),
+            "user_id": user_id,
         }
         meta_path = _UPLOAD_DIR / f"{file_id}.json"
         meta_path.write_text(
@@ -554,7 +573,9 @@ def create_app(
         if ctx is not None:
             # P2-13：HITL 决策必须由发起 run 的同一用户做出
             assert_run_owner(ctx, user_id, run_id)
-        status, message = await manager.resolve_hitl(run_id, req)
+        status, message = await manager.resolve_hitl(
+            run_id, req, current_user_id=user_id
+        )
         if status == "not_found":
             raise HTTPException(status_code=404, detail=message)
         return HITLResponse(run_id=run_id, status=status, message=message)
