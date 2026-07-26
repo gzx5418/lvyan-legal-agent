@@ -2,7 +2,7 @@
 name = "lvyan"
 version = "0.1.0"
 description = "律言法律智能体 Agent Runtime（LangGraph 编排的中国法律 Agent）"
-readme = { content = "律言法律智能体 Agent Runtime。", content-type = "text/plain" }
+readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "律言项目组" }]
