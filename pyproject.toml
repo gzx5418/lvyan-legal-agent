@@ -13,6 +13,7 @@ dependencies = [
     "fastapi>=0.110",                  # API 入口
     "uvicorn",                         # ASGI 服务器
     "sse-starlette",                   # SSE 流式响应（可选，未安装时降级为 StreamingResponse）
+    "python-multipart>=0.0.20",        # FastAPI 文件上传必需（UploadFile）
     "sqlalchemy>=2.0",                 # ORM，配合 PostgreSQL
     "psycopg[binary]",                 # PostgreSQL 驱动
     "langgraph-checkpoint-postgres",   # LangGraph PostgreSQL checkpoint
@@ -30,6 +31,10 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "ruff",
+]
+# P2-17：文档转换作为可选依赖，避免核心安装强依赖 markitdown 全家桶
+documents = [
+    "markitdown[pdf,docx,pptx,xlsx]>=0.0.1a2",
 ]
 
 [build-system]

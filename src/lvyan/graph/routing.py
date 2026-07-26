@@ -58,10 +58,13 @@ def route_after_missing_fact(state: Any) -> str:
 def route_after_citation(state: Any) -> str:
     """引用校验后的路由。
 
+    P1-9b 修复：引用校验通过后进入 ``output_guardrail``（而非 composer，
+    因为 composer 已在 citation_verifier 之前执行）。
+
     - 若 ``state.citation_audit.passed`` 为 False 且
       ``state.iteration <`` 内部重检索上限 → 返回 ``"reretrieve"``，
       回到 ``parallel_retrieval`` 重检索。
-    - 否则（通过 / 已达迭代上限）→ 返回 ``"compose"``，进入 ``composer``。
+    - 否则（通过 / 已达迭代上限）→ 返回 ``"output_guardrail"``，进入输出守卫。
 
     内部重检索上限与 ``citation_verifier`` 节点保持一致，取
     ``min(settings.max_retrieval_iterations, 2)``，避免节点已强制通过但
@@ -69,21 +72,24 @@ def route_after_citation(state: Any) -> str:
     """
     audit = _get(state, "citation_audit", None)
     if audit is None:
-        return "compose"
+        return "output_guardrail"
     passed = _get(audit, "passed", True)
     iteration = _get(state, "iteration", 0)
     # 与 citation_verifier 节点内部限制保持一致：min(settings.max_retrieval_iterations, 2)
     max_iterations = min(settings.max_retrieval_iterations, 2)
     if not passed and iteration < max_iterations:
         return "reretrieve"
-    return "compose"
+    return "output_guardrail"
 
 
 def route_after_critic(state: Any) -> str:
     """Critic 评审后的路由。
 
-    - 若 ``state.critic_report.passed`` 为 True → 返回 ``"citation_verifier"``，
-      进入引用校验节点。
+    P1-9b 修复：评审通过后进入 ``composer`` 组装初稿（而非直接进
+    citation_verifier），确保引用校验作用于最终输出文本。
+
+    - 若 ``state.critic_report.passed`` 为 True → 返回 ``"composer"``，
+      进入文书组装节点。
     - 若 ``state.critic_report.passed`` 为 False → 返回 ``"legal_reasoner"``，
       回退法律推理节点重试（iteration 已在 critic 节点中 +1）。
 
@@ -94,10 +100,10 @@ def route_after_critic(state: Any) -> str:
     report = _get(state, "critic_report", None)
     if report is None:
         # 无 critic_report 时默认通过（首次运行或 critic 未执行）
-        return "citation_verifier"
+        return "composer"
     passed = _get(report, "passed", True)
     if passed:
-        return "citation_verifier"
+        return "composer"
     return "legal_reasoner"
 
 

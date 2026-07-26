@@ -188,15 +188,83 @@ def _rerank_authorities(
 # ---------------------------------------------------------------------------
 # 节点函数
 # ---------------------------------------------------------------------------
+
+# P3-22 / P1-22：线程池并行检索
+_CONCURRENT_EXECUTOR: Any = None
+
+
+def _parallel_search_statutes(queries: list[Any]) -> list[Authority]:
+    """并行执行 search_statutes。
+
+    P1-22 修复：用 ``concurrent.futures.ThreadPoolExecutor`` 实现真正的并行检索，
+    替代旧版有缺陷的 asyncio 路径（在已有 running loop 中调
+    ``loop.run_until_complete()`` 会报错）。
+
+    线程池方案：
+      - 不依赖 asyncio 事件循环状态（同步节点函数的最佳选择）；
+      - 每个 query 在独立线程中执行同步 ``search_statutes``；
+      - 默认线程数 = min(len(queries), 4)，避免过度并发压垮检索后端。
+    """
+    global _CONCURRENT_EXECUTOR
+
+    valid_queries: list[str] = []
+    for q in queries:
+        qt = _get(q, "query_text", "") or ""
+        if qt.strip():
+            valid_queries.append(qt)
+
+    if not valid_queries:
+        return []
+
+    def _safe_search(qt: str) -> list[Authority]:
+        try:
+            return search_statutes(qt, top_k=10) or []
+        except Exception:  # noqa: BLE001
+            return []
+
+    if len(valid_queries) == 1:
+        return _safe_search(valid_queries[0])
+
+    # 多个查询：用线程池并行
+    if _CONCURRENT_EXECUTOR is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _CONCURRENT_EXECUTOR = ThreadPoolExecutor(
+            max_workers=min(len(valid_queries), 4),
+            thread_name_prefix="lvyan-search",
+        )
+
+    try:
+        futures = [
+            _CONCURRENT_EXECUTOR.submit(_safe_search, qt)
+            for qt in valid_queries
+        ]
+        results_nested: list[list[Authority]] = []
+        for fut in futures:
+            try:
+                results_nested.append(fut.result(timeout=30.0))
+            except Exception:  # noqa: BLE001 单个超时不影响其他
+                results_nested.append([])
+    except Exception:  # noqa: BLE001 线程池失败回退顺序
+        results_nested = [_safe_search(qt) for qt in valid_queries]
+
+    flattened: list[Authority] = []
+    for sub in results_nested:
+        flattened.extend(sub)
+    return flattened
+
+
 def parallel_retrieval(state: CaseState) -> dict[str, Any]:
     """并行检索节点：法规检索 + 类案检索。
 
     PR2 升级：RRF 融合去重后接入 Qwen3-Reranker 重排序。
+    P1-22 升级：用 ``concurrent.futures.ThreadPoolExecutor`` 真正并行执行
+    同步检索调用（替代旧版有缺陷的 asyncio 路径），多查询场景下延迟
+    从累加降为最慢单次。
 
     职责
     ----
     - 读取 ``retrieval_queries``（planner 生成）。
-    - 对每个 query 调用 ``search_statutes(query_text, top_k=10)``。
+    - 对每个 query 并行调用 ``search_statutes(query_text, top_k=10)``。
     - 合并去重结果（按 ``source_id + article_number``，保留最高分）。
     - **PR2**：用 user_goal 作为查询，对去重后的法规结果调用 reranker 重排序。
     - 调用 ``search_cases`` 检索类案，转换为 ``CaseAuthority``，追加写入
@@ -216,17 +284,8 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
     """
     queries = _get(state, "retrieval_queries", []) or []
 
-    # --- 法规检索（RRF 融合已在 search_statutes 内部完成）---
-    raw_statutes: list[Authority] = []
-    for q in queries:
-        query_text = _get(q, "query_text", "") or ""
-        if not query_text.strip():
-            continue
-        try:
-            results = search_statutes(query_text, top_k=10)
-        except Exception:  # noqa: BLE001  检索失败不中断流程
-            results = []
-        raw_statutes.extend(results or [])
+    # --- 法规检索（P3-22：真正的并行）---
+    raw_statutes = _parallel_search_statutes(queries)
 
     statutes = _dedup_authorities(raw_statutes)
 

@@ -9,13 +9,19 @@
                               → legal_reasoner → critic
         → (route_after_critic)
             ├─ "legal_reasoner"    → legal_reasoner（回退重试，iteration+1）
-            └─ "citation_verifier" → citation_verifier
+            └─ "composer"         → composer（先组装初稿）
+        → citation_verifier（对最终文本做引用校验）
         → (route_after_citation)
             ├─ "reretrieve" → parallel_retrieval（重检索，受策略守卫约束）
-            └─ "compose"    → composer → output_guardrail
+            └─ "output_guardrail" → output_guardrail
         → (route_after_output_guardrail)
             ├─ "composer" → composer（回退重写，受 MAX_OUTPUT_ITERATIONS 约束）
             └─ "end"      → END
+
+P1-9b 修复：composer 移到 citation_verifier 之前。
+旧流程 ``reasoner → critic → citation_verifier → composer`` 验证的是中间
+reasoning_result 而非用户看到的最终文本。新流程先让 composer 组装初稿，
+再对完整输出做引用校验，确保验证的是用户实际看到的内容。
 
 ``route_by_complexity`` 不作为主链条件边，而由 ``composer`` 内部读取
 ``state.complexity`` 选择输出模板（light / deep / document）；该函数亦可用于
@@ -106,7 +112,20 @@ def _register_nodes(graph: StateGraph) -> None:
 
 
 def _wire_edges(graph: StateGraph) -> None:
-    """连接主链与两条条件边。"""
+    """连接主链与两条条件边。
+
+    P1-9b 修复后节点顺序：
+      critic → (route_after_critic)
+        ├─ legal_reasoner（回退重试）
+        └─ composer（先组装初稿）
+      → citation_verifier（对最终文本做引用校验）
+      → (route_after_citation)
+        ├─ reretrieve → parallel_retrieval
+        └─ output_guardrail
+      → (route_after_output_guardrail)
+        ├─ composer（回退重写）
+        └─ end → END
+    """
     # 主链：START → preflight → jurisdiction_triage → fact_extractor → missing_fact_assessor
     graph.add_edge(START, "preflight")
     graph.add_edge("preflight", "jurisdiction_triage")
@@ -126,24 +145,26 @@ def _wire_edges(graph: StateGraph) -> None:
     graph.add_edge("authority_resolver", "legal_reasoner")
     graph.add_edge("legal_reasoner", "critic")
 
-    # Critic 评审后：回退 legal_reasoner（重试）或进入 citation_verifier
+    # P1-9b：Critic 评审后 → composer（先组装初稿）或回退 legal_reasoner
     graph.add_conditional_edges(
         "critic",
         route_after_critic,
-        {"legal_reasoner": "legal_reasoner", "citation_verifier": "citation_verifier"},
+        {"legal_reasoner": "legal_reasoner", "composer": "composer"},
     )
 
-    # 引用校验后：重检索（→ parallel_retrieval）或组装（→ composer）
+    # P1-9b：composer → citation_verifier（对最终文本做引用校验）
+    graph.add_edge("composer", "citation_verifier")
+
+    # 引用校验后：重检索（→ parallel_retrieval）或输出守卫（→ output_guardrail）
     graph.add_conditional_edges(
         "citation_verifier",
         route_after_citation,
-        {"reretrieve": "parallel_retrieval", "compose": "composer"},
+        {"reretrieve": "parallel_retrieval", "output_guardrail": "output_guardrail"},
     )
 
-    # composer → output_guardrail → (route_after_output_guardrail)
+    # output_guardrail → (route_after_output_guardrail)
     #   ├─ "composer" → 回退 composer 重新生成（受 MAX_OUTPUT_ITERATIONS 约束）
     #   └─ "end"      → END
-    graph.add_edge("composer", "output_guardrail")
     graph.add_conditional_edges(
         "output_guardrail",
         route_after_output_guardrail,
@@ -198,7 +219,16 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
         return build_graph()
 
     try:
-        conn = psycopg.connect(resolved_dsn, autocommit=True)
+        # P2-18：对齐 LangGraph 官方 PostgresSaver.from_conn_string() 的连接参数
+        # autocommit=True / prepare_threshold=0 / row_factory=dict_row
+        from psycopg.rows import dict_row
+
+        conn = psycopg.connect(
+            resolved_dsn,
+            autocommit=True,
+            prepare_threshold=0,
+            row_factory=dict_row,
+        )
     except Exception as exc:  # noqa: BLE001 连接失败需宽口径捕获
         print(
             f"[lvyan.graph] PostgreSQL 不可达（{exc}），回退到 MemorySaver"

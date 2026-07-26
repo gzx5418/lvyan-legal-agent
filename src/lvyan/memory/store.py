@@ -96,21 +96,22 @@ class CaseMemory:
         thread_id: str,
         title: str = "",
         complexity: str = "light",
+        user_id: str = "anonymous",
     ) -> None:
         """注册新会话到索引；已存在时仅更新可变字段，不覆盖创建时间。
 
-        P1 修复：原实现无条件覆盖 ``created_at`` / ``has_output``，导致用户
-        「继续」会话后标题被截短、创建时间被刷新、``has_output`` 被重置。
-        现区分新建 vs 更新：
-          - 新建：写入完整元数据。
-          - 已存在：只更新 ``complexity`` / ``updated_at``；仅当旧标题为空或
-            等于 thread_id（占位符）时才用新标题覆盖；``has_output`` 保持不变。
+        P1-6 / P2-13 修复：
+          - 原 register 无条件覆盖 ``created_at`` / ``has_output``，导致用户
+            「继续」会话后标题被截短、创建时间被刷新、``has_output`` 被重置。
+          - 现区分新建 vs 更新；并记录 ``user_id`` 字段供 ownership 过滤。
         """
         with self._lock:
             existing = self._index.get(thread_id)
             if existing is not None:
                 existing["complexity"] = complexity
                 existing["updated_at"] = time.time()
+                # user_id 不覆盖（防止恶意篡改归属）
+                existing.setdefault("user_id", user_id)
                 old_title = existing.get("title", "")
                 if title and (not old_title or old_title == thread_id):
                     existing["title"] = title
@@ -118,6 +119,7 @@ class CaseMemory:
                 self._index[thread_id] = {
                     "title": title or thread_id,
                     "complexity": complexity,
+                    "user_id": user_id,
                     "created_at": time.time(),
                     "updated_at": time.time(),
                     "has_output": False,

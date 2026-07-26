@@ -268,12 +268,12 @@ def test_citation_verifier_repealed_statute(
 # 5. route_after_citation 路由逻辑
 # ---------------------------------------------------------------------------
 def test_route_after_citation_pass():
-    """citation_audit.passed=True → compose。"""
+    """citation_audit.passed=True → output_guardrail（P1-9b 修复后路由目标）。"""
     state = {
         "citation_audit": {"passed": True},
         "iteration": 0,
     }
-    assert route_after_citation(state) == "compose"
+    assert route_after_citation(state) == "output_guardrail"
 
 
 def test_route_after_citation_reretrieve():
@@ -286,18 +286,18 @@ def test_route_after_citation_reretrieve():
 
 
 def test_route_after_citation_max_reached():
-    """citation_audit.passed=False 且 iteration >= max → compose。"""
+    """citation_audit.passed=False 且 iteration >= max → output_guardrail（P1-9b）。"""
     state = {
         "citation_audit": {"passed": False},
         "iteration": settings.max_retrieval_iterations,
     }
-    assert route_after_citation(state) == "compose"
+    assert route_after_citation(state) == "output_guardrail"
 
 
 def test_route_after_citation_no_audit():
-    """citation_audit=None → compose。"""
+    """citation_audit=None → output_guardrail（P1-9b）。"""
     state = {"citation_audit": None, "iteration": 0}
-    assert route_after_citation(state) == "compose"
+    assert route_after_citation(state) == "output_guardrail"
 
 
 # ---------------------------------------------------------------------------
@@ -414,17 +414,17 @@ def test_citation_verifier_internal_cap_is_two(
 
 
 def test_route_after_citation_internal_cap_is_two():
-    """route_after_citation 与 citation_verifier 内部上限一致：iteration=2 → compose。
+    """route_after_citation 与 citation_verifier 内部上限一致：iteration=2 → output_guardrail。
 
     当 settings.max_retrieval_iterations=3（默认）时，iteration=2 已达内部上限
-    min(3, 2)=2，路由应返回 compose 而非 reretrieve。
+    min(3, 2)=2，路由应返回 output_guardrail 而非 reretrieve。
     """
     assert settings.max_retrieval_iterations >= 2
     state = {
         "citation_audit": {"passed": False},
         "iteration": 2,  # 等于内部上限
     }
-    assert route_after_citation(state) == "compose"
+    assert route_after_citation(state) == "output_guardrail"
 
     # iteration=1 仍可重检索
     state_below = {

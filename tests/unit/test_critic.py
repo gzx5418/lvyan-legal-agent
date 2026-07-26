@@ -418,10 +418,10 @@ def test_critic_max_iterations_is_positive():
 # 6. route_after_critic 路由测试
 # ---------------------------------------------------------------------------
 def test_route_after_critic_passed_returns_citation_verifier():
-    """critic_report.passed=True → citation_verifier。"""
+    """critic_report.passed=True → composer（P1-9b：先组装初稿）。"""
     state = _make_state()
     state["critic_report"] = {"passed": True, "issues": [], "forced_pass": False}
-    assert route_after_critic(state) == "citation_verifier"
+    assert route_after_critic(state) == "composer"
 
 
 def test_route_after_critic_failed_returns_legal_reasoner():
@@ -436,14 +436,14 @@ def test_route_after_critic_failed_returns_legal_reasoner():
 
 
 def test_route_after_critic_no_report_returns_citation_verifier():
-    """critic_report=None → citation_verifier（默认通过）。"""
+    """critic_report=None → composer（P1-9b：默认通过，先组装初稿）。"""
     state = _make_state()
     state["critic_report"] = None
-    assert route_after_critic(state) == "citation_verifier"
+    assert route_after_critic(state) == "composer"
 
 
 def test_route_after_critic_forced_pass_returns_citation_verifier():
-    """critic_report.passed=True（强制通过）→ citation_verifier。"""
+    """critic_report.passed=True（强制通过）→ composer（P1-9b）。"""
     state = _make_state()
     state["critic_report"] = {
         "passed": True,
@@ -451,7 +451,7 @@ def test_route_after_critic_forced_pass_returns_citation_verifier():
         "forced_pass": True,
         "warning": "自动 critic 未通过，需人工复核",
     }
-    assert route_after_critic(state) == "citation_verifier"
+    assert route_after_critic(state) == "composer"
 
 
 # ---------------------------------------------------------------------------

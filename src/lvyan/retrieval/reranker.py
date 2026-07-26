@@ -15,8 +15,11 @@ from typing import Any
 from lvyan.config import settings
 from lvyan.retrieval.lexical import ScoredChunk, _bm25_tokenize, log
 
-# Reranker 模型缓存（真实接入时复用 httpx client / sentence-transformers 模型）
-_RERANK_MODEL_CACHE: Any = None
+# P3-20：拆分 HTTP client 与 CrossEncoder 的缓存，避免互相覆盖。
+# 旧实现共用 _RERANK_MODEL_CACHE，网关失败后切到 CrossEncoder 时缓存被覆盖，
+# 下次又把 CrossEncoder 当 httpx client 调 .post()。
+_HTTP_CLIENT: Any = None
+_CROSS_ENCODER: Any = None
 
 
 def _jaccard_similarity(a: set[str], b: set[str]) -> float:
@@ -40,7 +43,7 @@ def _try_real_rerank_score(query: str, candidate_texts: list[str]) -> list[float
 
     返回 None 时由调用方降级到 Jaccard 桩。
     """
-    global _RERANK_MODEL_CACHE
+    global _HTTP_CLIENT, _CROSS_ENCODER
     gateway = settings.model_gateway_url
 
     # 1) 模型网关 HTTP API
@@ -48,14 +51,14 @@ def _try_real_rerank_score(query: str, candidate_texts: list[str]) -> list[float
         try:
             import httpx  # type: ignore[import-untyped]
 
-            if _RERANK_MODEL_CACHE is None:
-                _RERANK_MODEL_CACHE = httpx.Client(timeout=15.0)
+            if _HTTP_CLIENT is None:
+                _HTTP_CLIENT = httpx.Client(timeout=15.0)
 
             headers: dict[str, str] = {}
             if settings.model_gateway_api_key:
                 headers["Authorization"] = f"Bearer {settings.model_gateway_api_key}"
 
-            resp = _RERANK_MODEL_CACHE.post(
+            resp = _HTTP_CLIENT.post(
                 f"{gateway.rstrip('/')}/v1/rerank",
                 json={
                     "model": settings.reranker_model,
@@ -78,14 +81,14 @@ def _try_real_rerank_score(query: str, candidate_texts: list[str]) -> list[float
         except Exception as exc:  # noqa: BLE001
             log(f"[Rerank] 模型网关调用失败 ({exc})，降级到 Jaccard 桩")
 
-    # 2) sentence-transformers CrossEncoder
+    # 2) sentence-transformers CrossEncoder（独立缓存，不会被 HTTP 失败污染）
     try:
         from sentence_transformers import CrossEncoder  # type: ignore[import-untyped]
 
-        if _RERANK_MODEL_CACHE is None or not isinstance(_RERANK_MODEL_CACHE, CrossEncoder):
-            _RERANK_MODEL_CACHE = CrossEncoder(settings.reranker_model)
+        if _CROSS_ENCODER is None or not isinstance(_CROSS_ENCODER, CrossEncoder):
+            _CROSS_ENCODER = CrossEncoder(settings.reranker_model)
         pairs = [(query, t) for t in candidate_texts]
-        scores = _RERANK_MODEL_CACHE.predict(pairs).tolist()
+        scores = _CROSS_ENCODER.predict(pairs).tolist()
         return [float(s) for s in scores]
     except Exception as exc:  # noqa: BLE001
         log(f"[Rerank] CrossEncoder 不可用 ({exc})，降级到 Jaccard 桩")

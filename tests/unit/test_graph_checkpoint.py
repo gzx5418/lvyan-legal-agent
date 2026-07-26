@@ -144,8 +144,9 @@ def test_route_after_citation_failed_at_budget_cap_returns_compose():
         details=[],
     )
     # iteration 达到 MAX_RETRIEVAL_ITERATIONS(=3)，不再重检索
+    # P1-9b：路由目标改为 output_guardrail
     state = _state(citation_audit=audit, iteration=3)
-    assert route_after_citation(state) == "compose"
+    assert route_after_citation(state) == "output_guardrail"
 
 
 def test_route_after_citation_passed_returns_compose():
@@ -160,11 +161,13 @@ def test_route_after_citation_passed_returns_compose():
             CitationDetail(citation_text="《民法典》第六百八十条", status="verified"),
         ],
     )
-    assert route_after_citation(_state(citation_audit=audit, iteration=0)) == "compose"
+    # P1-9b：路由目标改为 output_guardrail
+    assert route_after_citation(_state(citation_audit=audit, iteration=0)) == "output_guardrail"
 
 
 def test_route_after_citation_no_audit_returns_compose():
-    assert route_after_citation(_state()) == "compose"
+    # P1-9b：路由目标改为 output_guardrail
+    assert route_after_citation(_state()) == "output_guardrail"
 
 
 def test_route_by_complexity_returns_expected_mode():
@@ -297,7 +300,7 @@ def test_checkpoint_writes_use_memory_saver_by_default():
     from lvyan.nodes.citation_verifier import citation_verifier
     from lvyan.nodes.composer import composer
     from lvyan.nodes.output_guardrail import output_guardrail
-    from lvyan.graph.routing import route_after_missing_fact, route_after_citation
+    from lvyan.graph.routing import route_after_missing_fact, route_after_citation, route_after_critic
 
     g = StateGraph(GraphState)
     g.add_node("preflight", preflight)
@@ -325,12 +328,16 @@ def test_checkpoint_writes_use_memory_saver_by_default():
     g.add_edge("parallel_retrieval", "authority_resolver")
     g.add_edge("authority_resolver", "legal_reasoner")
     g.add_edge("legal_reasoner", "critic")
-    g.add_edge("critic", "citation_verifier")
+    # P1-9b：critic → composer → citation_verifier → output_guardrail
+    g.add_conditional_edges(
+        "critic", route_after_critic,
+        {"legal_reasoner": "legal_reasoner", "composer": "composer"},
+    )
+    g.add_edge("composer", "citation_verifier")
     g.add_conditional_edges(
         "citation_verifier", route_after_citation,
-        {"reretrieve": "parallel_retrieval", "compose": "composer"},
+        {"reretrieve": "parallel_retrieval", "output_guardrail": "output_guardrail"},
     )
-    g.add_edge("composer", "output_guardrail")
     g.add_edge("output_guardrail", END)
 
     app = g.compile(checkpointer=MemorySaver())

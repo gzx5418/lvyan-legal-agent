@@ -16,8 +16,11 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 from lvyan.config import settings
 from lvyan.retrieval.query_rewriter import rewrite_for_reretrieval
@@ -268,21 +271,29 @@ def _select_query_for_rewrite(
 # 节点函数
 # ---------------------------------------------------------------------------
 def citation_verifier(state: CaseState) -> dict[str, Any]:
-    """引用校验节点：集成三个验证器，不通过时触发重检索。
+    """引用校验节点：对最终输出文本做引用校验（P1-9b 修复后）。
+
+    P1-9b 修复：
+    旧流程 ``reasoner → critic → citation_verifier → composer`` 验证的是
+    reasoning_result（中间推理），而非用户看到的最终文本。新流程中
+    composer 在 citation_verifier 之前执行，因此本节点同时校验
+    ``reasoning_result`` 和 ``final_output``，确保最终用户看到的文本中
+    的引用也经过验证。
 
     职责
     ----
     1. 调用 :func:`validate_citations` / :func:`validate_authority_status` /
        :func:`validate_grounding` 三个验证器。
-    2. 汇总结果为 :class:`CitationAudit`，写入 ``state.citation_audit``。
-    3. 若 ``passed=False`` 且 ``iteration < settings.max_retrieval_iterations``：
+    2. 对 ``reasoning_result`` 和 ``final_output`` 分别提取引用并合并校验。
+    3. 汇总结果为 :class:`CitationAudit`，写入 ``state.citation_audit``。
+    4. 若 ``passed=False`` 且 ``iteration < settings.max_retrieval_iterations``：
        - 调用 :func:`rewrite_for_reretrieval` 改写最后一条查询
        - 追加新的 :class:`RetrievalQuery` 到 ``retrieval_queries``
        - ``iteration += 1``
        - 由 ``route_after_citation`` 路由回 ``parallel_retrieval``
-    4. 若 ``passed=False`` 且已达迭代上限：
+    5. 若 ``passed=False`` 且已达迭代上限：
        - 标记 ``risk_level="high"`` / ``confidence="insufficient"``
-       - 由 ``route_after_citation`` 路由到 ``composer``（强制通过）
+       - 由 ``route_after_citation`` 路由到 ``output_guardrail``（强制通过）
 
     返回更新字典（覆盖语义）：
         - ``citation_audit``: dict（CitationAudit 序列化）
@@ -292,50 +303,115 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
         - ``confidence``: str（达到上限时设为 "insufficient"）
     """
     reasoning_result = _get(state, "reasoning_result", None)
+    final_output = str(_get(state, "final_output", "") or "")
     statutes = _get(state, "statutes", []) or []
     current_date = _to_date(_get(state, "current_date", None))
     iteration = int(_get(state, "iteration", 0) or 0)
     retrieval_queries = list(_get(state, "retrieval_queries", []) or [])
     user_goal = str(_get(state, "user_goal", "") or "")
 
-    # --- 1. 调用三个验证器 ---
+    # --- 1. 调用三个验证器（P1-1：异常 fail-closed，不再默认 passed=True）---
+    verification_error = False
+    citation_report: Any = None
+    authority_report: Any = None
+    grounding_report: Any = None
+
+    # P1-9b：先对 reasoning_result 做基础校验
     try:
         citation_report = validate_citations(
             reasoning_result, statutes, current_date
         )
-    except Exception:  # noqa: BLE001  验证器异常不中断流程
-        from lvyan.validators.citation import CitationValidationReport
-
-        citation_report = CitationValidationReport(
-            total_citations=0,
-            valid_citations=0,
-            issues=[],
-            passed=True,
-        )
+    except Exception as exc:  # noqa: BLE001 验证器异常 → fail-closed
+        _logger.exception("citation 验证器异常: %s", exc)
+        verification_error = True
 
     try:
         authority_report = validate_authority_status(statutes, current_date)
-    except Exception:  # noqa: BLE001  验证器异常不中断流程
-        from lvyan.validators.authority_status import AuthorityStatusReport
-
-        authority_report = AuthorityStatusReport(
-            total_authorities=0,
-            effective_count=0,
-            issues=[],
-            passed=True,
-        )
+    except Exception as exc:  # noqa: BLE001 验证器异常 → fail-closed
+        _logger.exception("authority_status 验证器异常: %s", exc)
+        verification_error = True
 
     try:
         grounding_report = validate_grounding(reasoning_result, statutes)
-    except Exception:  # noqa: BLE001  验证器异常不中断流程
+    except Exception as exc:  # noqa: BLE001 验证器异常 → fail-closed
+        _logger.exception("grounding 验证器异常: %s", exc)
+        verification_error = True
+
+    # 任一验证器异常时构造 fail-closed 占位报告（passed=False）
+    if verification_error:
+        from lvyan.validators.citation import CitationValidationReport
+        from lvyan.validators.authority_status import AuthorityStatusReport
         from lvyan.validators.grounding import GroundingReport
 
-        grounding_report = GroundingReport(
-            total_citations=0,
-            grounded_citations=0,
-            issues=[],
-            passed=True,
+        if citation_report is None:
+            citation_report = CitationValidationReport(
+                total_citations=0, valid_citations=0, issues=[], passed=False,
+            )
+        if authority_report is None:
+            authority_report = AuthorityStatusReport(
+                total_authorities=0, effective_count=0, issues=[], passed=False,
+            )
+        if grounding_report is None:
+            grounding_report = GroundingReport(
+                total_citations=0, grounded_citations=0, issues=[], passed=False,
+            )
+
+    # P1-1：有 statutes 但 0 引用 → fail-closed（推理结果没有绑定任何法规引用）
+    total_citations_in_report = int(_get(citation_report, "total_citations", 0) or 0)
+    if statutes and total_citations_in_report == 0:
+        from lvyan.validators.citation import (
+            CitationValidationReport,
+            CitationIssue,
         )
+        existing_issues: list[Any] = list(_get(citation_report, "issues", []) or [])
+        existing_issues.append(
+            CitationIssue(
+                citation_id="missing_all",
+                issue_type="not_found",
+                expected="至少一条法规引用",
+                actual="0 引用",
+                severity="error",
+            )
+        )
+        citation_report = CitationValidationReport(
+            total_citations=total_citations_in_report,
+            valid_citations=int(_get(citation_report, "valid_citations", 0) or 0),
+            issues=existing_issues,
+            passed=False,
+        )
+
+    # P1-9b：对 final_output（composer 输出）做额外引用提取与校验
+    # 检查最终输出中是否存在 reasoning_result 未覆盖的引用（如 composer 自行添加的）
+    if final_output:
+        output_citations = _extract_citations(final_output)
+        if output_citations and statutes:
+            # 对 output 中额外出现的引用做存在性检查
+            for oc in output_citations:
+                matched = _find_matching_statute(oc, statutes)
+                if matched is None:
+                    # final_output 中出现了 statutes 里没有的引用 → 标记为未验证
+                    from lvyan.validators.citation import (
+                        CitationValidationReport,
+                        CitationValidationIssue,
+                    )
+                    existing_issues = list(_get(citation_report, "issues", []) or [])
+                    oc_text = f"《{oc.get('law', '')}》第{oc.get('article_str', '')}条"
+                    existing_issues.append(
+                        CitationValidationIssue(
+                            citation_id=oc.get("citation_id", "output-unverified"),
+                            citation_text=oc_text,
+                            issue_type="not_found",
+                            severity="error",
+                            detail=f"最终输出中的引用「{oc_text}」在检索结果中未找到对应法条",
+                            actual=None,
+                        )
+                    )
+                    citation_report = CitationValidationReport(
+                        total_citations=int(_get(citation_report, "total_citations", 0) or 0) + 1,
+                        valid_citations=int(_get(citation_report, "valid_citations", 0) or 0),
+                        issues=existing_issues,
+                        passed=False,
+                    )
 
     # --- 2. 汇总为 CitationAudit ---
     details = _build_citation_details(

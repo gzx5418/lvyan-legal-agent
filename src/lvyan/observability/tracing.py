@@ -9,11 +9,21 @@
   同时存在且 ``langfuse`` 包可导入时启用；否则 ``record_llm_call`` /
   ``record_evaluation`` 降级为 no-op，仅写 debug 日志。
 - 成本追踪（``CostTracker``）为纯内存实现，不依赖任何外部服务。
+
+P2-16 隐私脱敏
+--------------
+- 默认 ``TRACE_CONTENT=false``：``record_llm_call`` 仅记录 token / latency /
+  model / success / error_type / content_hash，**不**上传 prompt / response 原文。
+- 显式设置 ``TRACE_CONTENT=true`` 时上传脱敏后的内容（先调
+  :func:`lvyan.validators.privacy.redact_privacy`，再截断）。
+- 法律案件内容极易含 PII（姓名 / 身份证 / 医疗 / 公司内部信息），内容遥测
+  必须显式 opt-in。
 """
 
 from __future__ import annotations
 
 import functools
+import hashlib
 import inspect
 import logging
 import os
@@ -36,6 +46,9 @@ __all__ = [
     "CostSummary",
     "CostTracker",
     "get_cost_summary",
+    "is_trace_content_enabled",
+    "redact_for_telemetry",
+    "content_hash",
 ]
 
 _logger = logging.getLogger("lvyan.observability.tracing")
@@ -45,6 +58,48 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 # 摘要截断上限
 _SUMMARY_MAX_LEN = 200
+
+
+# ---------------------------------------------------------------------------
+# 内容遥测开关与脱敏
+# ---------------------------------------------------------------------------
+def is_trace_content_enabled() -> bool:
+    """是否启用内容遥测（默认 false，需显式 opt-in）。
+
+    通过环境变量 ``TRACE_CONTENT`` 控制：``true`` / ``1`` / ``yes`` / ``on``
+    视为启用。生产环境建议保持默认 false，仅记录 token / latency / hash。
+    """
+    raw = os.getenv("TRACE_CONTENT", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _redact_privacy_safe(text: str) -> str:
+    """安全调用隐私脱敏（ validators 未就绪时返回原文）。"""
+    if not text:
+        return ""
+    try:
+        from lvyan.validators.privacy import redact_privacy
+
+        return redact_privacy(text).redacted_text
+    except Exception:  # noqa: BLE001
+        return text
+
+
+def redact_for_telemetry(text: str) -> str:
+    """对要进入遥测的内容做脱敏 + 截断。
+
+    即使 ``TRACE_CONTENT=true``，上传到 Langfuse / OTel 的内容也必须先脱敏。
+    """
+    if not text:
+        return ""
+    return _redact_privacy_safe(text)[:_SUMMARY_MAX_LEN]
+
+
+def content_hash(text: str) -> str:
+    """计算内容的短哈希（sha256 前 12 位），用于在不存原文时关联 trace。"""
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -347,9 +402,11 @@ def record_llm_call(
 ) -> None:
     """记录一次模型调用到 Langfuse，并计入成本追踪。
 
-    Langfuse 未启用时仅计成本、不报错。
+    P2-16：默认 ``TRACE_CONTENT=false`` 时，Langfuse 仅记录 token / model /
+    content_hash，**不**上传 prompt / response 原文；显式 opt-in 时上传
+    脱敏后的内容。成本追踪始终执行（不涉及内容）。
     """
-    # 1) 成本追踪（始终执行）
+    # 1) 成本追踪（始终执行，不涉及内容）
     thread_id = _cost_thread_var.get()
     if thread_id:
         _global_cost_tracker.add(thread_id, tokens_in, tokens_out, cost)
@@ -360,14 +417,38 @@ def record_llm_call(
         return
     try:
         trace_obj = client.trace(id=thread_id) if thread_id else client.trace()
-        trace_obj.generation(
-            name=model,
-            model=model,
-            input=prompt,
-            output=response,
-            usage={"prompt_tokens": tokens_in, "completion_tokens": tokens_out},
-            metadata={"cost": cost},
-        )
+
+        # P2-16：根据 TRACE_CONTENT 开关决定是否上传内容
+        if is_trace_content_enabled():
+            # opt-in：上传脱敏后的内容
+            safe_prompt = redact_for_telemetry(prompt)
+            safe_response = redact_for_telemetry(response)
+            trace_obj.generation(
+                name=model,
+                model=model,
+                input=safe_prompt,
+                output=safe_response,
+                usage={"prompt_tokens": tokens_in, "completion_tokens": tokens_out},
+                metadata={
+                    "cost": cost,
+                    "prompt_hash": content_hash(prompt),
+                    "response_hash": content_hash(response),
+                },
+            )
+        else:
+            # 默认：只记录 hash + token + model，不传原文
+            trace_obj.generation(
+                name=model,
+                model=model,
+                input=None,
+                output=None,
+                usage={"prompt_tokens": tokens_in, "completion_tokens": tokens_out},
+                metadata={
+                    "cost": cost,
+                    "prompt_hash": content_hash(prompt),
+                    "response_hash": content_hash(response),
+                },
+            )
     except Exception as exc:  # noqa: BLE001 上报失败不阻断业务
         _logger.debug("Langfuse record_llm_call 失败：%s", exc)
 

@@ -30,9 +30,11 @@ Runner = Callable[[str, str, str, "RunContext"], Awaitable[str]]
 class RunContext:
     """单次 Agent 运行的上下文。"""
 
-    def __init__(self, run_id: str, thread_id: str) -> None:
+    def __init__(self, run_id: str, thread_id: str, user_id: str = "anonymous") -> None:
         self.run_id = run_id
         self.thread_id = thread_id
+        # P2-13：归属用户；用于 stream / hitl 端点的 ownership 校验
+        self.user_id: str = user_id
         # 状态：started / running / awaiting_hitl / completed / failed
         self.status: str = "started"
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -40,6 +42,9 @@ class RunContext:
         self.error: str | None = None
         # HITL 中断信息（LangGraph interrupt 机制）
         self.hitl_interrupt: dict[str, Any] | None = None
+        # P3-24：TTL 摘要（用于 RunManager 自动清理过期运行）
+        self.created_at: float = 0.0
+        self.completed_at: float | None = None
 
     async def publish(self, event: dict[str, Any]) -> None:
         """发布一个 SSE 事件到队列，供流式消费者读取。"""
@@ -49,6 +54,9 @@ class RunContext:
 class RunManager:
     """Agent 运行注册表与驱动器。"""
 
+    # P3-24：完成的运行在 _runs 中保留 1 小时后清理（可被 gc_runs 显式调用）
+    _RUN_TTL_SECONDS: float = 3600.0
+
     def __init__(self, runner: Runner | None = None) -> None:
         self._runs: dict[str, RunContext] = {}
         self._runner: Runner | None = runner
@@ -57,14 +65,23 @@ class RunManager:
     # 运行生命周期
     # ------------------------------------------------------------------
     def create_run(
-        self, query: str, thread_id: str | None, complexity: str
+        self,
+        query: str,
+        thread_id: str | None,
+        complexity: str,
+        user_id: str = "anonymous",
     ) -> RunContext:
         """创建并异步启动一次 Agent 运行。"""
+        import time as _time
+
         run_id = f"run-{uuid.uuid4().hex}"
         resolved_thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"
-        ctx = RunContext(run_id, resolved_thread_id)
+        ctx = RunContext(run_id, resolved_thread_id, user_id=user_id)
+        ctx.created_at = _time.time()
         self._runs[run_id] = ctx
         asyncio.create_task(self._drive(ctx, query, complexity))
+        # 顺手做一次 TTL 清理
+        self.gc_runs()
         return ctx
 
     async def _drive(self, ctx: RunContext, query: str, complexity: str) -> None:
@@ -88,10 +105,14 @@ class RunManager:
 
             ctx.final_output = output or ""
             ctx.status = "completed"
+            import time as _time
+            ctx.completed_at = _time.time()
             await ctx.publish({"event": "final_output", "output": ctx.final_output})
         except Exception as exc:  # noqa: BLE001 入口层需宽口径捕获
             ctx.status = "failed"
             ctx.error = str(exc)
+            import time as _time
+            ctx.completed_at = _time.time()
             _logger.exception("Agent run %s failed", ctx.run_id)
             await ctx.publish({"event": "error", "message": str(exc)})
         finally:
@@ -105,17 +126,45 @@ class RunManager:
     def get(self, run_id: str) -> RunContext | None:
         return self._runs.get(run_id)
 
+    def gc_runs(self, ttl_seconds: float | None = None) -> int:
+        """清理已完成且超过 TTL 的运行记录，返回清理数量。
+
+        P3-24：长时间运行的服务会持续累积 RunContext；本方法在
+        ``create_run`` 时自动调用一次，亦可由外部定时器周期调用。
+        """
+        import time as _time
+
+        ttl = ttl_seconds if ttl_seconds is not None else self._RUN_TTL_SECONDS
+        now = _time.time()
+        stale: list[str] = []
+        for rid, ctx in self._runs.items():
+            if ctx.status in ("completed", "failed"):
+                completed = ctx.completed_at or ctx.created_at
+                if completed and (now - completed) > ttl:
+                    stale.append(rid)
+        for rid in stale:
+            self._runs.pop(rid, None)
+        return len(stale)
+
     # ------------------------------------------------------------------
     # HITL：基于 LangGraph Command(resume=...)
     # ------------------------------------------------------------------
     async def resolve_hitl(self, run_id: str, request: HITLRequest) -> tuple[str, str]:
         """处理人工审批决策，通过 LangGraph Command(resume=...) 恢复图执行。
 
+        P1-7 修复：支持从 PostgreSQL checkpoint 恢复 HITL。
+        当 run_id 不在进程内 ``_runs`` 时，尝试从共享 CaseMemory 的
+        LangGraph checkpoint 中查找有 interrupt 的 thread，恢复执行。
+
         返回 ``(status, message)``：``("resolved", ...)`` 或 ``("not_found", ...)``。
         """
         ctx = self._runs.get(run_id)
+
+        # P1-7：进程内无 run → 尝试从 checkpoint 恢复（服务重启 / 多实例场景）
         if ctx is None:
-            return ("not_found", f"run {run_id} 不存在")
+            return await self._resolve_hitl_from_checkpoint(
+                run_id, request
+            )
 
         if ctx.status != "awaiting_hitl":
             return ("error", f"run {run_id} 不在等待 HITL 状态（当前: {ctx.status}）")
@@ -142,6 +191,61 @@ class RunManager:
             _logger.exception("HITL 恢复失败 run %s", ctx.run_id)
             return ("error", f"恢复失败: {exc}")
 
+    async def _resolve_hitl_from_checkpoint(
+        self, run_id: str, request: HITLRequest
+    ) -> tuple[str, str]:
+        """P1-7：从 PostgreSQL checkpoint 恢复 HITL 审批（跨实例/重启场景）。
+
+        流程：
+          1. 遍历 CaseMemory 索引中的 thread，查找有 interrupt 的 thread；
+          2. 检查 interrupt payload 中是否包含该 run_id；
+          3. 找到后创建新的 RunContext 并恢复执行；
+          4. 找不到则返回 not_found。
+        """
+        try:
+            from langgraph.types import Command
+
+            graph = _get_graph()
+            mem = _get_case_memory()
+
+            for thread_id, meta in mem.list_threads():
+                config = {"configurable": {"thread_id": thread_id}}
+                interrupt_info = _check_interrupt(graph, config)
+                if interrupt_info is None:
+                    continue
+
+                snapshot = graph.get_state(config)
+                if snapshot is None:
+                    continue
+
+                state_values = snapshot.values if hasattr(snapshot, "values") else {}
+                state_run_id = state_values.get("run_id", "") if isinstance(state_values, dict) else ""
+                if state_run_id != run_id:
+                    continue
+
+                # 找到匹配 thread → 创建新 RunContext 并恢复
+                user_id = meta.get("user_id", "anonymous")
+                ctx = RunContext(run_id, thread_id, user_id=user_id)
+                ctx.status = "awaiting_hitl"
+                ctx.hitl_interrupt = interrupt_info
+                ctx.created_at = meta.get("created_at", 0.0)
+                self._runs[run_id] = ctx
+
+                resume_payload: dict[str, Any] = {"action": request.action}
+                if request.action == "edit" and request.edited_output:
+                    resume_payload["edited_output"] = request.edited_output
+
+                ctx.status = "running"
+                asyncio.create_task(
+                    self._resume_drive(ctx, Command(resume=resume_payload), config)
+                )
+                return ("resolved", f"已从 checkpoint 恢复 run {run_id}，正在继续执行")
+
+            return ("not_found", f"run {run_id} 不存在（进程内和 checkpoint 均未找到）")
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception("HITL checkpoint 恢复失败 run %s", run_id)
+            return ("error", f"checkpoint 恢复失败: {exc}")
+
     async def _resume_drive(
         self, ctx: RunContext, command: Any, config: dict[str, Any]
     ) -> None:
@@ -149,6 +253,9 @@ class RunManager:
         try:
             graph = _get_graph()
             final_output = ctx.final_output or ""
+
+            import time as _time
+            pending_starts: dict[str, float] = {}
 
             async for chunk in graph.astream(
                 command, config, stream_mode="updates"
@@ -158,8 +265,20 @@ class RunManager:
                 for node_name, update in chunk.items():
                     if node_name in (None, ""):
                         continue
-                    await ctx.publish({"event": "node_start", "node": node_name})
-                    await ctx.publish({"event": "node_end", "node": node_name})
+                    now = _time.time()
+                    start_ts = pending_starts.pop(node_name, now)
+                    duration_ms = max(0.0, (now - start_ts) * 1000.0)
+                    await ctx.publish({
+                        "event": "node_start",
+                        "node": node_name,
+                        "timestamp": start_ts,
+                    })
+                    await ctx.publish({
+                        "event": "node_end",
+                        "node": node_name,
+                        "timestamp": now,
+                        "duration_ms": round(duration_ms, 2),
+                    })
                     if isinstance(update, dict):
                         out = update.get("final_output")
                         if out:
@@ -177,10 +296,14 @@ class RunManager:
 
             ctx.final_output = final_output or ""
             ctx.status = "completed"
+            import time as _time
+            ctx.completed_at = _time.time()
             await ctx.publish({"event": "final_output", "output": ctx.final_output})
         except Exception as exc:  # noqa: BLE001
             ctx.status = "failed"
             ctx.error = str(exc)
+            import time as _time
+            ctx.completed_at = _time.time()
             _logger.exception("HITL 恢复执行失败 run %s", ctx.run_id)
             await ctx.publish({"event": "error", "message": str(exc)})
         finally:
@@ -199,6 +322,12 @@ def _get_graph() -> Any:
     """获取共享图实例。"""
     from lvyan.runtime import get_shared_graph
     return get_shared_graph()
+
+
+def _get_case_memory() -> Any:
+    """获取共享 CaseMemory 实例。"""
+    from lvyan.runtime import get_case_memory
+    return get_case_memory()
 
 
 def _check_interrupt(graph: Any, config: dict[str, Any]) -> dict[str, Any] | None:
@@ -320,21 +449,106 @@ async def default_runner(
         final_output = ""
         last_state: dict[str, Any] = {}
 
-        async for chunk in graph.astream(
-            initial.model_dump(), config, stream_mode="updates"
-        ):
-            if not isinstance(chunk, dict):
-                continue
-            for node_name, update in chunk.items():
-                if node_name in (None, ""):
+        # P1-23：使用 LangGraph 的 stream_mode=["updates", "debug"] 获取
+        # 真正的 task 派发（start）和完成（end）事件。debug 流提供
+        # task 级别的 enter/exit 时间，updates 流提供节点输出。
+        import time as _time
+
+        pending_starts: dict[str, float] = {}
+
+        # 尝试双流模式（updates + debug），获取真实节点耗时
+        try:
+            async for chunk in graph.astream(
+                initial.model_dump(), config,
+                stream_mode=["updates", "debug"],
+            ):
+                if not isinstance(chunk, dict):
                     continue
-                await ctx.publish({"event": "node_start", "node": node_name})
-                await ctx.publish({"event": "node_end", "node": node_name})
-                if isinstance(update, dict):
-                    last_state.update(update)
-                    out = update.get("final_output")
-                    if out:
-                        final_output = out
+                mode = chunk.get("mode", "")
+                payload = chunk.get("payload", chunk)
+
+                if mode == "debug" and isinstance(payload, dict):
+                    # debug 事件：type=task / task_enter / task_exit
+                    debug_type = payload.get("type", "")
+                    node_name = payload.get("node", "") or payload.get("name", "")
+                    if not node_name:
+                        continue
+
+                    if debug_type in ("task", "task_enter"):
+                        pending_starts[node_name] = _time.time()
+                        await ctx.publish({
+                            "event": "node_start",
+                            "node": node_name,
+                            "timestamp": pending_starts[node_name],
+                        })
+                    elif debug_type in ("task_exit",):
+                        start_ts = pending_starts.pop(node_name, None)
+                        now = _time.time()
+                        duration_ms = max(0.0, (now - (start_ts or now)) * 1000.0)
+                        await ctx.publish({
+                            "event": "node_end",
+                            "node": node_name,
+                            "timestamp": now,
+                            "duration_ms": round(duration_ms, 2),
+                        })
+
+                elif mode == "updates" and isinstance(payload, dict):
+                    for node_name, update in payload.items():
+                        if node_name in (None, ""):
+                            continue
+                        now = _time.time()
+                        # 若 debug 流未提供 start，在 updates 中补充
+                        if node_name not in pending_starts:
+                            start_ts = now
+                        else:
+                            start_ts = pending_starts.pop(node_name, now)
+                        duration_ms = max(0.0, (now - start_ts) * 1000.0)
+                        await ctx.publish({
+                            "event": "node_start",
+                            "node": node_name,
+                            "timestamp": start_ts,
+                        })
+                        await ctx.publish({
+                            "event": "node_end",
+                            "node": node_name,
+                            "timestamp": now,
+                            "duration_ms": round(duration_ms, 2),
+                        })
+                        if isinstance(update, dict):
+                            last_state.update(update)
+                            out = update.get("final_output")
+                            if out:
+                                final_output = out
+
+        except Exception:  # noqa: BLE001 双流模式失败 → 回退到纯 updates 流
+            pending_starts = {}
+            async for chunk in graph.astream(
+                initial.model_dump(), config, stream_mode="updates"
+            ):
+                if not isinstance(chunk, dict):
+                    continue
+                for node_name, update in chunk.items():
+                    if node_name in (None, ""):
+                        continue
+                    now = _time.time()
+                    start_ts = pending_starts.pop(node_name, now)
+                    duration_ms = max(0.0, (now - start_ts) * 1000.0)
+                    await ctx.publish({
+                        "event": "node_start",
+                        "node": node_name,
+                        "timestamp": start_ts,
+                    })
+                    await ctx.publish({
+                        "event": "node_end",
+                        "node": node_name,
+                        "timestamp": now,
+                        "duration_ms": round(duration_ms, 2),
+                    })
+                    if isinstance(update, dict):
+                        last_state.update(update)
+                        out = update.get("final_output")
+                        if out:
+                            final_output = out
 
         # 检查是否有 LangGraph interrupt（HITL）
         interrupt_info = _check_interrupt(graph, config)

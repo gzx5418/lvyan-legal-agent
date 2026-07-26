@@ -4,8 +4,9 @@
 --------
 - 模块级 ``httpx.Client`` 缓存，避免每次调用重建连接。
 - ``chat``：普通对话补全，返回 ``str | None``（失败返回 None）。
-- ``chat_json``：启用 ``response_format=json_object``，解析后用 Pydantic 模型校验；
-  解析失败时尝试修复（去 markdown 围栏、截取 JSON 片段）并重试一次。
+- ``chat_json``：启用 ``response_format=json_object``，解析后返回 dict。
+- ``chat_structured``：在 ``chat_json`` 之上加 Pydantic schema 校验 +
+  一次修复重试，返回 ``BaseModel`` 实例（P3-21）。
 - 自动调用 :func:`lvyan.observability.tracing.record_llm_call` 上报成本与 Langfuse。
 - ``llm_available``：快速判断网关是否配置，供调用方决定是否走 LLM 路径。
 
@@ -21,9 +22,14 @@ import json
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, TypeVar
+
+from pydantic import BaseModel, ValidationError
 
 _logger = logging.getLogger("lvyan.llm.client")
+
+# 装饰器返回的函数类型变量
+T = TypeVar("T", bound=BaseModel)
 
 # 模块级 httpx client 缓存
 _HTTP_CLIENT: Any = None
@@ -262,4 +268,102 @@ def chat_json(
         return None
 
 
-__all__ = ["chat", "chat_json", "llm_available"]
+def chat_structured(
+    messages: list[dict[str, str]],
+    response_model: type[T],
+    *,
+    model: str | None = None,
+    temperature: float = 0.2,
+    max_tokens: int = 1500,
+    timeout: float = 60.0,
+) -> T | None:
+    """Pydantic schema 校验的 JSON 模式调用，返回结构化模型实例（P3-21）。
+
+    流程：
+      1. 在 system prompt 末尾追加 JSON schema 指引（基于 ``response_model``
+         的字段名与类型注释）。
+      2. 调 :func:`chat_json` 拿到 dict。
+      3. 用 ``response_model.model_validate`` 校验。
+      4. 校验失败时构造修复 prompt（附 ValidationError 错误）重试一次。
+      5. 仍失败则返回 None，调用方降级到规则路径。
+
+    Args:
+        messages: 消息列表（system prompt 应指示输出 JSON）。
+        response_model: 期望的 Pydantic 模型类。
+        model/temperature/max_tokens/timeout: 见 :func:`chat_json`。
+
+    Returns:
+        ``response_model`` 的实例；任何环节失败返回 ``None``。
+    """
+    schema_hint = _build_schema_hint(response_model)
+
+    # 把 schema 指引追加到 system prompt
+    enriched = list(messages)
+    if enriched and enriched[0].get("role") == "system":
+        enriched[0] = {
+            "role": "system",
+            "content": enriched[0]["content"] + "\n\n" + schema_hint,
+        }
+    else:
+        enriched.insert(0, {"role": "system", "content": schema_hint})
+
+    result = chat_json(
+        enriched,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
+    if result is None:
+        return None
+
+    try:
+        return response_model.model_validate(result)
+    except ValidationError as exc:
+        _logger.warning(
+            "Pydantic 校验失败（一次修复重试）：%s", str(exc)[:300]
+        )
+
+    # 修复重试：把错误反馈给模型
+    repair_msg = {
+        "role": "user",
+        "content": (
+            f"上一轮输出未通过 schema 校验：\n{str(exc)[:500]}\n"
+            "请仅输出符合 schema 的合法 JSON，不要解释。"
+        ),
+    }
+    enriched.append(repair_msg)
+    result = chat_json(
+        enriched,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
+    if result is None:
+        return None
+    try:
+        return response_model.model_validate(result)
+    except ValidationError as exc:
+        _logger.warning("修复重试后仍校验失败：%s", str(exc)[:300])
+        return None
+
+
+def _build_schema_hint(model_cls: type[BaseModel]) -> str:
+    """根据 Pydantic 模型类构造 JSON schema 文本指引。"""
+    try:
+        schema = model_cls.model_json_schema()
+        # 仅保留 properties 的 key + type，避免 prompt 过长
+        props = schema.get("properties", {})
+        lines = ["请输出符合以下 JSON schema 的对象（仅 JSON，不要解释）：", "{"]
+        for name, prop in props.items():
+            ptype = prop.get("type", "any")
+            desc = prop.get("description", "")
+            lines.append(f'  "{name}" ({ptype}): {desc}')
+        lines.append("}")
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return "请输出 JSON 对象。"
+
+
+__all__ = ["chat", "chat_json", "chat_structured", "llm_available"]

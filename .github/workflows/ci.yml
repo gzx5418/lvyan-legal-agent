@@ -98,6 +98,42 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
+  # Job 2.5: Agent pipeline 端到端回归（P1-4 新增）
+  # ---------------------------------------------------------------------------
+  pipeline:
+    name: Agent Pipeline Regression
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: src
+      MODEL_GATEWAY_URL: ""
+      HITL_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run pipeline evaluation (前 3 条用例)
+        run: |
+          python tests/evals/pipeline_eval.py --limit 3 --json pipeline-report.json
+
+      - name: Upload pipeline report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-report
+          path: pipeline-report.json
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
   # Job 3: 代码风格检查（ruff）
   # ---------------------------------------------------------------------------
   lint:
