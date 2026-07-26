@@ -14,7 +14,7 @@
 11. 返回值结构
 12. HITL 开启时 interrupt 被调用（mock）
 13. HITL approve → status=approved
-14. HITL reject → 「操作已取消。」
+14. HITL reject → 保留分析正文，但拒绝不可逆操作
 15. HITL edit → final_output 被替换
 16. 最终校验未通过 → risk_level 上调为 high
 """
@@ -412,12 +412,8 @@ def test_hitl_reject_response(monkeypatch):
     assert result["pending_human_approval"]["status"] == "rejected"
 
 
-def test_hitl_none_response_treated_as_approve(monkeypatch):
-    """P0-2 修复：用户响应为 None（异常情况）→ 默认视为 approve，不擦正文。
-
-    旧实现 None 触发 reject 擦除正文；新实现 None 走 fallback approve，
-    保留分析正文，避免在异常路径下丢失用户可见的法律分析。
-    """
+def test_hitl_none_response_treated_as_reject(monkeypatch):
+    """用户响应为 None（异常情况）→ fail-closed，同时保留分析正文。"""
     monkeypatch.setattr(settings, "hitl_enabled", True)
     state = _make_irreversible_state()
     original = state["final_output"]
@@ -429,8 +425,9 @@ def test_hitl_none_response_treated_as_approve(monkeypatch):
     # 原文保留
     assert original in result["final_output"]
     assert result["final_output"] != "操作已取消。"
-    # None 走 fallback：approve
-    assert result["pending_human_approval"]["status"] == "approved"
+    # None 不构成明确批准，必须拒绝不可逆操作
+    assert "拒绝执行" in result["final_output"]
+    assert result["pending_human_approval"]["status"] == "rejected"
 
 
 # ---------------------------------------------------------------------------

@@ -263,7 +263,9 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
                     edited_output = action
                     action = "edit"
             else:
-                action = "approve"
+                # 中断无响应或返回异常类型时必须 fail-closed，不能把未确认
+                # 的不可逆操作默认为已批准。
+                action = "reject"
                 edited_output = None
 
             # 拒绝：保留原分析正文，仅追加拒绝提示与状态标记

@@ -13,7 +13,7 @@
 7. HITL_ENABLED=false → 跳过 interrupt，但仍记录 pending_human_approval + warning 标注
 8. HITL_ENABLED=true → interrupt 被调用（mock）
 9. HITL approve → status=approved
-10. HITL reject → 「操作已取消。」
+10. HITL reject → 保留分析正文，但拒绝不可逆操作
 11. 多个不可逆操作同时出现 → 全部入 pending_human_approval
 12. render_docx 导出前 HITL 已标记（流程约束：guardrail 先于导出）
 """
@@ -230,34 +230,38 @@ def test_hitl_approve_response(monkeypatch: pytest.MonkeyPatch):
 
 
 # ---------------------------------------------------------------------------
-# 10. HITL reject → 「操作已取消。」
+# 10. HITL reject → 保留分析正文，但拒绝不可逆操作
 # ---------------------------------------------------------------------------
 def test_hitl_reject_response(monkeypatch: pytest.MonkeyPatch):
-    """用户拒绝 → final_output 为「操作已取消。」，status=rejected。"""
+    """用户拒绝 → 保留分析正文并明确拒绝执行，status=rejected。"""
     monkeypatch.setattr(settings, "hitl_enabled", True)
     state = _make_state(_output_with_action("向法院提起诉讼。"))
+    original = state["final_output"]
 
     with patch(
         "lvyan.nodes.output_guardrail.interrupt", return_value="reject"
     ):
         result = output_guardrail(state)
 
-    assert result["final_output"] == "操作已取消。"
+    assert original in result["final_output"]
+    assert "拒绝执行" in result["final_output"]
     assert result["pending_human_approval"]["status"] == "rejected"
     assert result["output_retry_needed"] is False
 
 
 def test_hitl_none_response_treated_as_reject(monkeypatch: pytest.MonkeyPatch):
-    """用户无响应（None）→ 视为拒绝。"""
+    """用户无响应（None）→ fail-closed，保留正文但拒绝执行。"""
     monkeypatch.setattr(settings, "hitl_enabled", True)
     state = _make_state(_output_with_action("向法院提起诉讼。"))
+    original = state["final_output"]
 
     with patch(
         "lvyan.nodes.output_guardrail.interrupt", return_value=None
     ):
         result = output_guardrail(state)
 
-    assert result["final_output"] == "操作已取消。"
+    assert original in result["final_output"]
+    assert "拒绝执行" in result["final_output"]
     assert result["pending_human_approval"]["status"] == "rejected"
 
 

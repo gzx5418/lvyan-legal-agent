@@ -8,7 +8,7 @@
 - 识别 ``case_type``（劳动争议 / 合同纠纷 / 侵权纠纷 / 婚姻家庭 / 知识产权）。
 - 分级 ``complexity``（light / deep / document）。
 - 检测紧急期限与人身安全风险，设置 ``risk_level``。
-- 对涉外案件追加 blocking ``MissingFact`` 提示用户咨询涉外律师。
+- 对涉外案件追加非阻断 ``MissingFact``，提示用户咨询涉外律师。
 """
 
 from __future__ import annotations
@@ -113,7 +113,7 @@ def jurisdiction_triage(state: CaseState) -> dict[str, Any]:
         - ``case_type``: 案由（劳动争议 / 合同纠纷 / ...），未匹配为 None
         - ``complexity``: light / deep / document
         - ``risk_level``: low / medium / high
-        - ``missing_facts``: 涉外案件追加 blocking 提示
+        - ``missing_facts``: 涉外案件追加非阻断风险提示
     """
     # TODO: 接入 LLM 增强抽取/判断
     user_goal = _get(state, "user_goal", "") or ""

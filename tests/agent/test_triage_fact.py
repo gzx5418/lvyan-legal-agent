@@ -27,9 +27,10 @@ def test_jurisdiction_foreign():
     result = jurisdiction_triage(state)
     assert result["jurisdiction"] == "港澳台/涉外"
     assert result["risk_level"] == "high"
-    # 涉外案件应追加 blocking MissingFact 提示用户
+    # 涉外案件应追加风险提示，但不应阻断基于现有信息的分析
     missing = result.get("missing_facts", [])
-    assert any(getattr(m, "is_blocking", False) for m in missing)
+    assert missing
+    assert all(not getattr(m, "is_blocking", False) for m in missing)
 
 
 # ---------------------------------------------------------------------------
