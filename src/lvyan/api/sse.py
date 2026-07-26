@@ -148,6 +148,14 @@ class RunManager:
             )
             return False
 
+    def has_active_thread_runs(self, thread_id: str) -> bool:
+        """Return whether this process still owns an active run for a thread."""
+        return any(
+            ctx.thread_id == thread_id
+            and ctx.status in {"started", "running", "awaiting_hitl"}
+            for ctx in self._runs.values()
+        )
+
     # ------------------------------------------------------------------
     # 运行生命周期
     # ------------------------------------------------------------------
@@ -239,13 +247,19 @@ class RunManager:
             import time as _time
             ctx.completed_at = _time.time()
             from datetime import datetime, timezone
-            self._update_metadata(
+            run_persisted = self._update_metadata(
                 ctx.run_id,
                 status="completed",
                 final_output=ctx.final_output,
                 completed_at=datetime.now(timezone.utc),
             )
-            self._mark_thread_output(ctx.thread_id)
+            thread_marked = self._mark_thread_output(ctx.thread_id)
+            if not run_persisted or not thread_marked:
+                await ctx.publish({
+                    "event": "warning",
+                    "code": "completion_not_persisted",
+                    "message": "结果已生成，但持久化失败，请保存当前内容",
+                })
             await ctx.publish({"event": "final_output", "output": ctx.final_output})
         except Exception as exc:  # noqa: BLE001 入口层需宽口径捕获
             ctx.status = "failed"
@@ -532,13 +546,19 @@ class RunManager:
             import time as _time
             ctx.completed_at = _time.time()
             from datetime import datetime, timezone
-            self._update_metadata(
+            run_persisted = self._update_metadata(
                 ctx.run_id,
                 status="completed",
                 final_output=ctx.final_output,
                 completed_at=datetime.now(timezone.utc),
             )
-            self._mark_thread_output(ctx.thread_id)
+            thread_marked = self._mark_thread_output(ctx.thread_id)
+            if not run_persisted or not thread_marked:
+                await ctx.publish({
+                    "event": "warning",
+                    "code": "completion_not_persisted",
+                    "message": "结果已生成，但持久化失败，请保存当前内容",
+                })
 
             # 标记会话已有输出
             try:

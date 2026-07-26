@@ -54,11 +54,17 @@ class FakeCaseMemory:
     def load(self, thread_id: str) -> CaseState | None:
         return self._store.get(thread_id)
 
+    def load_strict(self, thread_id: str) -> CaseState | None:
+        return self.load(thread_id)
+
     def delete(self, thread_id: str) -> bool:
         existed = thread_id in self._store
         self._store.pop(thread_id, None)
         self._index.pop(thread_id, None)
         return existed
+
+    def delete_strict(self, thread_id: str) -> bool:
+        return self.delete(thread_id)
 
     def list_threads(self) -> list[tuple[str, dict[str, Any]]]:
         return list(self._index.items())

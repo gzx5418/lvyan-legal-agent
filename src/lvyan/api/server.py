@@ -529,7 +529,13 @@ def create_app(
         else:
             meta = dict(mem.list_threads()).get(thread_id)
         assert_thread_owner(meta, user_id, thread_id)
-        cs = mem.load(thread_id)
+        try:
+            cs = mem.load_strict(thread_id)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=503,
+                detail="checkpoint 暂时不可用",
+            ) from exc
         if cs is None:
             raise HTTPException(status_code=404, detail=f"thread {thread_id} 无记录")
         return _state_summary(cs)
@@ -540,11 +546,20 @@ def create_app(
         user_id: str = Depends(get_current_user_id),
     ) -> DeleteResponse:
         """删除指定会话：从 checkpointer 与索引中移除。"""
+        if manager.has_active_thread_runs(thread_id):
+            raise HTTPException(
+                status_code=409,
+                detail="该会话仍在运行，请先终止运行",
+            )
         if metadata_store is not None:
             try:
                 meta = metadata_store.get_thread(thread_id)
                 assert_thread_owner(meta, user_id, thread_id)
-                deleted = metadata_store.delete_thread(thread_id, user_id)
+                if metadata_store.has_active_runs(thread_id):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="该会话仍在运行，请先终止运行",
+                    )
             except HTTPException:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -552,24 +567,42 @@ def create_app(
                     status_code=503,
                     detail="thread metadata 暂时不可用",
                 ) from exc
+            try:
+                mem.delete_strict(thread_id)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail="checkpoint 删除失败",
+                ) from exc
+            try:
+                deleted = metadata_store.delete_thread(thread_id, user_id)
+                if not deleted and metadata_store.has_active_runs(thread_id):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="该会话仍在运行，请先终止运行",
+                    )
+            except HTTPException:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail="thread metadata 删除失败",
+                ) from exc
             if not deleted:
                 raise HTTPException(
                     status_code=404,
                     detail=f"thread {thread_id} 无记录",
                 )
-            try:
-                mem.delete(thread_id)
-            except Exception as exc:  # noqa: BLE001
-                _logger.warning(
-                    "durable thread deleted but local checkpoint cleanup failed "
-                    "for %s: %s",
-                    thread_id,
-                    exc,
-                )
         else:
             meta = dict(mem.list_threads()).get(thread_id)
             assert_thread_owner(meta, user_id, thread_id)
-            mem.delete(thread_id)
+            try:
+                mem.delete_strict(thread_id)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail="checkpoint 删除失败",
+                ) from exc
         return DeleteResponse(deleted=True, thread_id=thread_id)
 
     @app.get("/api/agent/threads", response_model=ThreadListResponse)

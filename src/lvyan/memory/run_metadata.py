@@ -31,6 +31,8 @@ class RunMetadataStore(Protocol):
 
     def delete_thread(self, thread_id: str, user_id: str) -> bool: ...
 
+    def has_active_runs(self, thread_id: str) -> bool: ...
+
     def mark_thread_output(self, thread_id: str) -> None: ...
 
     def claim_hitl_run(
@@ -156,6 +158,10 @@ class PostgresRunMetadataStore:
                     f"UPDATE agent_runs SET {assignments} WHERE run_id = %s",
                     params,
                 )
+                if cur.rowcount != 1:
+                    raise RunMetadataUnavailable(
+                        f"run {run_id} does not exist"
+                    )
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -211,7 +217,7 @@ class PostgresRunMetadataStore:
         ]
 
     def delete_thread(self, thread_id: str, user_id: str) -> bool:
-        """Delete a user-owned thread and cascade-delete its run records."""
+        """Delete an inactive user-owned thread and cascade-delete its runs."""
         with self._connect() as conn:
             self._ensure_schema(conn)
             with conn.cursor() as cur:
@@ -219,12 +225,36 @@ class PostgresRunMetadataStore:
                     """
                     DELETE FROM agent_threads
                     WHERE thread_id = %s AND user_id = %s
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM agent_runs
+                          WHERE agent_runs.thread_id = agent_threads.thread_id
+                            AND status IN ('started', 'running', 'awaiting_hitl')
+                      )
                     RETURNING thread_id
                     """,
                     (thread_id, user_id),
                 )
                 row = cur.fetchone()
         return row is not None
+
+    def has_active_runs(self, thread_id: str) -> bool:
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM agent_runs
+                        WHERE thread_id = %s
+                          AND status IN ('started', 'running', 'awaiting_hitl')
+                    ) AS has_active_runs
+                    """,
+                    (thread_id,),
+                )
+                row = cur.fetchone()
+        return bool(row and row["has_active_runs"])
 
     def mark_thread_output(self, thread_id: str) -> None:
         with self._connect() as conn:
@@ -238,6 +268,10 @@ class PostgresRunMetadataStore:
                     """,
                     (thread_id,),
                 )
+                if cur.rowcount != 1:
+                    raise RunMetadataUnavailable(
+                        f"thread {thread_id} does not exist"
+                    )
 
     def claim_hitl_run(
         self,

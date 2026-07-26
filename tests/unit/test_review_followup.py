@@ -381,6 +381,9 @@ class _ApiMemory:
     def load(self, _thread_id: str):
         return None
 
+    def load_strict(self, thread_id: str):
+        return self.load(thread_id)
+
     def register(self, thread_id: str, **metadata: Any) -> None:
         self.items[thread_id] = metadata
 
@@ -389,6 +392,10 @@ class _ApiMemory:
 
     def delete(self, thread_id: str) -> None:
         self.items.pop(thread_id, None)
+
+    def delete_strict(self, thread_id: str) -> bool:
+        self.delete(thread_id)
+        return True
 
 
 def test_metadata_creation_failure_returns_503():
@@ -634,6 +641,9 @@ def test_delete_thread_uses_durable_store_and_local_cleanup():
         def get_thread(self, thread_id: str):
             return {"thread_id": thread_id, "user_id": "anonymous"}
 
+        def has_active_runs(self, _thread_id: str) -> bool:
+            return False
+
         def delete_thread(self, thread_id: str, user_id: str) -> bool:
             calls.append((thread_id, user_id))
             return True
@@ -721,3 +731,152 @@ def test_readyz_returns_503_when_dependency_not_ready(monkeypatch):
 
     assert response.status_code == 503
     assert response.json()["status"] == "not-ready"
+
+
+def test_checkpoint_delete_failure_returns_503_without_deleting_metadata():
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+
+    metadata_deleted = False
+
+    class Memory(_ApiMemory):
+        def delete_strict(self, _thread_id: str) -> bool:
+            raise OSError("checkpoint unavailable")
+
+    class Store:
+        def get_thread(self, thread_id: str):
+            return {"thread_id": thread_id, "user_id": "anonymous"}
+
+        def has_active_runs(self, _thread_id: str) -> bool:
+            return False
+
+        def delete_thread(self, _thread_id: str, _user_id: str) -> bool:
+            nonlocal metadata_deleted
+            metadata_deleted = True
+            return True
+
+    response = TestClient(create_app(
+        runner=lambda *_args, **_kwargs: None,
+        memory=Memory(),
+        metadata_store=Store(),
+    )).delete("/api/agent/state/thread-1")
+
+    assert response.status_code == 503
+    assert metadata_deleted is False
+
+
+def test_active_durable_run_blocks_thread_deletion():
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+
+    class Memory(_ApiMemory):
+        def delete_strict(self, _thread_id: str) -> bool:
+            raise AssertionError("active thread checkpoint must not be deleted")
+
+    class Store:
+        def get_thread(self, thread_id: str):
+            return {"thread_id": thread_id, "user_id": "anonymous"}
+
+        def has_active_runs(self, _thread_id: str) -> bool:
+            return True
+
+    response = TestClient(create_app(
+        runner=lambda *_args, **_kwargs: None,
+        memory=Memory(),
+        metadata_store=Store(),
+    )).delete("/api/agent/state/thread-1")
+
+    assert response.status_code == 409
+
+
+def test_checkpoint_read_failure_returns_503():
+    from fastapi.testclient import TestClient
+    from lvyan.api.server import create_app
+
+    class Memory(_ApiMemory):
+        def load_strict(self, _thread_id: str):
+            raise OSError("checkpoint unavailable")
+
+    class Store:
+        def get_thread(self, thread_id: str):
+            return {"thread_id": thread_id, "user_id": "anonymous"}
+
+    response = TestClient(create_app(
+        runner=lambda *_args, **_kwargs: None,
+        memory=Memory(),
+        metadata_store=Store(),
+    )).get("/api/agent/state/thread-1")
+
+    assert response.status_code == 503
+
+
+@pytest.mark.parametrize("operation", ["update_run", "mark_thread_output"])
+def test_metadata_zero_row_update_fails(operation, monkeypatch):
+    from lvyan.memory.run_metadata import (
+        PostgresRunMetadataStore,
+        RunMetadataUnavailable,
+    )
+
+    class Cursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def execute(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+    store = PostgresRunMetadataStore("postgresql://unused")
+    store._schema_ready = True
+    monkeypatch.setattr(store, "_connect", lambda: Connection())
+
+    with pytest.raises(RunMetadataUnavailable):
+        if operation == "update_run":
+            store.update_run("missing-run", status="running")
+        else:
+            store.mark_thread_output("missing-thread")
+
+
+@pytest.mark.asyncio
+async def test_completion_persistence_failure_sends_warning_before_result():
+    from lvyan.api import sse
+
+    class Store:
+        def update_run(self, _run_id: str, **values: Any) -> None:
+            if values.get("status") == "completed":
+                raise OSError("database unavailable")
+
+        def mark_thread_output(self, _thread_id: str) -> None:
+            return None
+
+    async def runner(*_args: Any, **_kwargs: Any) -> str:
+        return "generated result"
+
+    manager = sse.RunManager(runner=runner, metadata_store=Store())
+    ctx = sse.RunContext("run-1", "thread-1")
+    manager._runs[ctx.run_id] = ctx
+
+    await manager._drive(ctx, "question", "light")
+
+    events = []
+    while not ctx.queue.empty():
+        event = ctx.queue.get_nowait()
+        if event is not None:
+            events.append(event)
+    event_codes = [event.get("code") for event in events]
+    event_names = [event.get("event") for event in events]
+    assert "completion_not_persisted" in event_codes
+    assert event_names.index("warning") < event_names.index("final_output")

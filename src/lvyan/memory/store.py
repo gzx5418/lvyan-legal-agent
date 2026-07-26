@@ -138,38 +138,45 @@ class CaseMemory:
 
         替代旧 ``ShortTermMemory.load`` 的 JSON 文件读取。
         """
-        config = {"configurable": {"thread_id": thread_id}}
         try:
-            snapshot = self._graph.get_state(config)
-            if snapshot is None or not snapshot.values:
-                return None
-            # 从 checkpoint values 重建 CaseState
-            values = snapshot.values
-            # 过滤掉 CaseState 不支持的字段
-            case_fields = set(CaseState.model_fields.keys())
-            filtered = {k: v for k, v in values.items() if k in case_fields}
-            return CaseState.model_validate(filtered)
+            return self.load_strict(thread_id)
         except Exception as exc:  # noqa: BLE001
             _logger.debug("加载 thread %s 状态失败: %s", thread_id, exc)
             return None
 
+    def load_strict(self, thread_id: str) -> CaseState | None:
+        """加载会话状态，并将 checkpointer 故障传播给调用方。"""
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = self._graph.get_state(config)
+        if snapshot is None or not snapshot.values:
+            return None
+        # 从 checkpoint values 重建 CaseState
+        values = snapshot.values
+        # 过滤掉 CaseState 不支持的字段
+        case_fields = set(CaseState.model_fields.keys())
+        filtered = {k: v for k, v in values.items() if k in case_fields}
+        return CaseState.model_validate(filtered)
+
     def delete(self, thread_id: str) -> bool:
         """删除会话：从 checkpointer 和索引中移除。"""
-        existed = False
-        # 从 checkpointer 删除
         try:
-            checkpointer = getattr(self._graph, "checkpointer", None)
-            if checkpointer is not None:
-                if hasattr(checkpointer, "delete_thread"):
-                    checkpointer.delete_thread(thread_id)
-                existed = True
+            return self.delete_strict(thread_id)
         except Exception as exc:  # noqa: BLE001
             _logger.debug("从 checkpointer 删除 thread %s 失败: %s", thread_id, exc)
+            return False
+
+    def delete_strict(self, thread_id: str) -> bool:
+        """严格删除 checkpoint 与索引，任何存储故障均向调用方传播。"""
+        checkpointer = getattr(self._graph, "checkpointer", None)
+        if checkpointer is None or not hasattr(checkpointer, "delete_thread"):
+            raise RuntimeError("checkpointer delete_thread unavailable")
+
+        checkpointer.delete_thread(thread_id)
+        existed = True
 
         # 从索引删除
         with self._lock:
             if thread_id in self._index:
-                existed = True
                 del self._index[thread_id]
                 self._save_index()
 

@@ -50,7 +50,10 @@ def test_only_one_instance_can_claim_the_same_hitl_run():
 
         assert sum(claim is not None for claim in claims) == 1
         assert first.get_run(run_id)["status"] == "running"
+        assert first.has_active_runs(thread_id) is True
+        assert first.delete_thread(thread_id, user_id) is False
     finally:
+        first.update_run(run_id, status="completed")
         first.delete_thread(thread_id, user_id)
 
 
@@ -70,6 +73,10 @@ def test_delete_thread_cascades_to_run_records():
         thread_id=thread_id,
         user_id=user_id,
     )
+    assert store.has_active_runs(thread_id) is True
+    assert store.delete_thread(thread_id, user_id) is False
+    store.update_run(run_id, status="completed")
+    assert store.has_active_runs(thread_id) is False
 
     assert store.delete_thread(thread_id, user_id) is True
     assert store.get_thread(thread_id) is None
