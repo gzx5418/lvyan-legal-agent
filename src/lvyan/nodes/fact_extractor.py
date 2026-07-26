@@ -1,6 +1,6 @@
 """事实抽取节点：从用户输入与上传文档中抽取结构化事实与时间线。
 
-基于规则+模板的事实抽取实现，后续接入 LLM 增强抽取。
+PR2 升级：双层 Agent —— LLM 抽取（JSON 模式 + 规则校验）+ 规则降级。
 
 抽取维度
 --------
@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from typing import Any
@@ -21,6 +22,11 @@ from typing import Any
 from lvyan.schemas import CaseState, Fact, MissingFact, TimelineEvent
 
 __all__ = ["fact_extractor"]
+
+_logger = logging.getLogger("lvyan.nodes.fact_extractor")
+
+# LLM 抽取允许的 category 值
+_ALLOWED_CATEGORIES = {"金额", "时间", "当事人", "行为", "其他"}
 
 
 # ---------------------------------------------------------------------------
@@ -339,45 +345,151 @@ def _assess_missing_facts(
 
 
 # ---------------------------------------------------------------------------
+# LLM 增强抽取（PR2）
+# ---------------------------------------------------------------------------
+def _try_llm_extract_facts(
+    user_goal: str, case_type: str | None
+) -> tuple[list[Fact], list[TimelineEvent]] | None:
+    """尝试用 LLM 抽取结构化事实与时间线。
+
+    Returns:
+        ``(facts, timeline)`` 或 ``None``（LLM 不可用/输出无效时）。
+    """
+    from lvyan.llm import chat_json, llm_available
+
+    if not llm_available() or not user_goal.strip():
+        return None
+
+    case_hint = f"案由：{case_type}" if case_type else "案由待定"
+    system_prompt = (
+        "你是法律事实抽取助手。从用户描述中抽取结构化事实与时间线。"
+        "只输出 JSON，不要解释。"
+    )
+    user_prompt = (
+        f"{case_hint}\n用户描述：{user_goal}\n\n"
+        "请抽取事实并输出 JSON，格式：\n"
+        '{"facts": [{"category": "金额|时间|当事人|行为|其他", '
+        '"content": "具体内容", "confidence": 0.0-1.0}], '
+        '"timeline": [{"date": "时间描述", "description": "事件描述"}]}\n\n'
+        "要求：\n"
+        "1. category 必须是上述五种之一\n"
+        "2. content 简洁准确，不超过 50 字\n"
+        "3. confidence 反映抽取确信度\n"
+        "4. 不要编造未提及的事实\n"
+        "5. 时间线按时间顺序排列"
+    )
+
+    result = chat_json(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.1,
+        max_tokens=1200,
+    )
+    if result is None:
+        return None
+
+    # 规则校验 + 转换
+    raw_facts = result.get("facts", [])
+    if not isinstance(raw_facts, list):
+        return None
+
+    facts: list[Fact] = []
+    seen_contents: set[str] = set()
+    for rf in raw_facts:
+        if not isinstance(rf, dict):
+            continue
+        category = str(rf.get("category", "其他")).strip()
+        content = str(rf.get("content", "")).strip()
+        if not content or content in seen_contents:
+            continue
+        # category 校验：不在允许集合中则归为"其他"
+        if category not in _ALLOWED_CATEGORIES:
+            category = "其他"
+        try:
+            confidence = float(rf.get("confidence", 0.7))
+            confidence = max(0.0, min(1.0, confidence))
+        except (TypeError, ValueError):
+            confidence = 0.7
+        seen_contents.add(content)
+        facts.append(
+            Fact(
+                fact_id=_short_id(),
+                category=category,
+                content=content,
+                source="llm",
+                confidence=confidence,
+            )
+        )
+
+    # 时间线转换
+    timeline: list[TimelineEvent] = []
+    raw_timeline = result.get("timeline", [])
+    if isinstance(raw_timeline, list):
+        for rt in raw_timeline:
+            if not isinstance(rt, dict):
+                continue
+            date_str = str(rt.get("date", "")).strip()
+            desc = str(rt.get("description", "")).strip()
+            if not date_str and not desc:
+                continue
+            timeline.append(
+                TimelineEvent(
+                    event_id=_short_id(),
+                    date=date_str,
+                    description=desc or date_str,
+                    involved_parties=[],
+                )
+            )
+
+    if not facts and not timeline:
+        return None
+
+    _logger.info("LLM 事实抽取成功: %d facts, %d timeline", len(facts), len(timeline))
+    return facts, timeline
+
+
+# ---------------------------------------------------------------------------
 # 节点函数
 # ---------------------------------------------------------------------------
 def fact_extractor(state: CaseState) -> dict[str, Any]:
     """事实抽取节点。
 
-    规则+模板实现，后续接入 LLM 增强抽取。
+    PR2：优先用 LLM 抽取（JSON 模式 + 规则校验），失败时降级到规则+模板。
 
     返回更新字典（追加语义）：
         - ``facts``: 抽取出的结构化事实列表
         - ``timeline``: 时间线事件列表
         - ``missing_facts``: 按案由推断的缺失关键事实
     """
-    # TODO: 接入 LLM 增强抽取/判断
     user_goal = _get(state, "user_goal", "") or ""
     case_type = _get(state, "case_type", None)
     existing_facts = _get(state, "facts", []) or []
 
-    # --- 抽取结构化事实 ---
-    facts: list[Fact] = []
-    facts.extend(_extract_amounts(user_goal))
-    facts.extend(_extract_parties(user_goal))
-    facts.extend(_extract_actions(user_goal))
-    # 时间也作为一条 Fact
-    for time_str, _ in _extract_times(user_goal):
-        facts.append(
-            Fact(
-                fact_id=_short_id(),
-                category="时间",
-                content=time_str,
-                source="extracted",
-                confidence=0.6,
+    # --- 优先 LLM 抽取 ---
+    llm_result = _try_llm_extract_facts(user_goal, case_type)
+    if llm_result is not None:
+        facts, timeline = llm_result
+    else:
+        # --- 降级：规则+模板抽取 ---
+        facts: list[Fact] = []
+        facts.extend(_extract_amounts(user_goal))
+        facts.extend(_extract_parties(user_goal))
+        facts.extend(_extract_actions(user_goal))
+        for time_str, _ in _extract_times(user_goal):
+            facts.append(
+                Fact(
+                    fact_id=_short_id(),
+                    category="时间",
+                    content=time_str,
+                    source="extracted",
+                    confidence=0.6,
+                )
             )
-        )
-
-    # --- 构建时间线 ---
-    timeline = _build_timeline(user_goal)
+        timeline = _build_timeline(user_goal)
 
     # --- 缺失事实评估 ---
-    # 综合已有 facts 与新抽取 facts 判断哪些关键事实仍缺失
     all_facts = list(existing_facts) + facts
     missing_facts = _assess_missing_facts(case_type, all_facts)
 

@@ -1,6 +1,6 @@
 """法律推理节点：要件分析、争议焦点与裁判倾向推断。
 
-基于规则+模板的法律推理实现，后续接入 LLM 增强判断。
+PR2 升级：双层 Agent —— LLM 推理（JSON 模式 + 规则校验）+ 规则降级。
 
 职责
 ----
@@ -22,12 +22,19 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from lvyan.schemas import CaseState, ReasoningResult
 
 __all__ = ["legal_reasoner"]
+
+_logger = logging.getLogger("lvyan.nodes.legal_reasoner")
+
+# LLM 推理允许的枚举值
+_ALLOWED_TENDENCIES = {"favorable", "somewhat_favorable", "even", "somewhat_unfavorable", "insufficient"}
+_ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 
 
 # ---------------------------------------------------------------------------
@@ -572,25 +579,162 @@ def _assert_no_numeric_probability(result: ReasoningResult) -> None:
 
 
 # ---------------------------------------------------------------------------
+# LLM 增强推理（PR2）
+# ---------------------------------------------------------------------------
+def _try_llm_reasoning(state: CaseState) -> ReasoningResult | None:
+    """尝试用 LLM 生成法律推理结果。
+
+    Returns:
+        ``ReasoningResult`` 或 ``None``（LLM 不可用/输出无效时）。
+    """
+    from lvyan.llm import chat_json, llm_available
+
+    if not llm_available():
+        return None
+
+    user_goal = _get(state, "user_goal", "") or ""
+    if not user_goal.strip():
+        return None
+
+    case_type = _get(state, "case_type", None) or "待定"
+    facts = _get(state, "facts", []) or []
+    statutes = _get(state, "statutes", []) or []
+    cases = _get(state, "cases", []) or []
+    evidence_requirements = _get(state, "evidence_requirements", []) or []
+    missing_facts = _get(state, "missing_facts", []) or []
+    critic_feedback = _get(state, "critic_feedback", []) or []
+
+    # 构造上下文摘要（控制 token 量）
+    facts_summary = "; ".join(
+        str(_get(f, "content", "")) for f in facts[:10]
+    ) or "暂无"
+    statutes_summary = "; ".join(
+        f"{_get(s, 'title', '')}{_get(s, 'article_number', '')}: {str(_get(s, 'article_text', ''))[:80]}"
+        for s in statutes[:5]
+    ) or "暂无"
+    cases_summary = "; ".join(
+        str(_get(c, "title", _get(c, "case_title", ""))) for c in cases[:3]
+    ) or "暂无"
+    er_summary = f"共{len(evidence_requirements)}项，已满足{sum(1 for er in evidence_requirements if _get(er, 'current_status', '') == 'met')}项"
+    missing_summary = "; ".join(
+        str(_get(mf, "question", "")) for mf in missing_facts[:3]
+    ) or "无"
+    critic_summary = "; ".join(critic_feedback[:2]) or "无"
+
+    system_prompt = (
+        "你是法律推理助手。根据案情事实与检索到的法规，进行法律推理分析。"
+        "只输出 JSON，不要解释。"
+        "严禁输出任何数字概率、百分比或胜诉率，只输出定性判断。"
+    )
+    user_prompt = (
+        f"案由：{case_type}\n"
+        f"用户目标：{user_goal}\n"
+        f"已知事实：{facts_summary}\n"
+        f"检索法规：{statutes_summary}\n"
+        f"类案参考：{cases_summary}\n"
+        f"证据情况：{er_summary}\n"
+        f"缺失事实：{missing_summary}\n"
+        f"评审反馈：{critic_summary}\n\n"
+        "请进行法律推理，输出 JSON：\n"
+        '{"legal_relationship": "法律关系定性", '
+        '"elements": ["要件1（已满足/未满足）"], '
+        '"disputed_focus": ["争议焦点1"], '
+        '"plaintiff_arguments": ["原告主张1"], '
+        '"defendant_arguments": ["被告抗辩1"], '
+        '"evidence_mapping": ["争议焦点 → 证据"], '
+        '"judicial_tendency": "favorable|somewhat_favorable|even|somewhat_unfavorable|insufficient", '
+        '"evidence_confidence": "high|medium|low", '
+        '"key_factors": ["关键因素1"]}\n\n'
+        "要求：\n"
+        "1. judicial_tendency 必须是上述五种之一\n"
+        "2. evidence_confidence 必须是 high/medium/low 之一\n"
+        "3. 禁止输出任何百分比或概率数字\n"
+        "4. 构成要件标注（已满足）或（未满足）\n"
+        "5. 基于事实和法律客观分析，不要编造"
+    )
+
+    result = chat_json(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.2,
+        max_tokens=2000,
+    )
+    if result is None:
+        return None
+
+    # 规则校验
+    tendency = str(result.get("judicial_tendency", "")).strip()
+    if tendency not in _ALLOWED_TENDENCIES:
+        return None
+    confidence_val = str(result.get("evidence_confidence", "")).strip()
+    if confidence_val not in _ALLOWED_CONFIDENCE:
+        confidence_val = "medium"
+
+    # 列表字段校验
+    def _str_list(key: str) -> list[str]:
+        val = result.get(key, [])
+        if not isinstance(val, list):
+            return []
+        return [str(v).strip() for v in val if v and str(v).strip()]
+
+    reasoning = ReasoningResult(
+        legal_relationship=str(result.get("legal_relationship", "")).strip() or None,
+        elements=_str_list("elements"),
+        disputed_focus=_str_list("disputed_focus"),
+        plaintiff_arguments=_str_list("plaintiff_arguments"),
+        defendant_arguments=_str_list("defendant_arguments"),
+        evidence_mapping=_str_list("evidence_mapping"),
+        judicial_tendency=tendency,  # type: ignore[arg-type]
+        evidence_confidence=confidence_val,  # type: ignore[arg-type]
+        key_factors=_str_list("key_factors"),
+    )
+
+    # 自检：禁止数字概率
+    try:
+        _assert_no_numeric_probability(reasoning)
+    except AssertionError as exc:
+        _logger.warning("LLM 推理输出含数字概率，丢弃: %s", exc)
+        return None
+
+    _logger.info("LLM 法律推理成功: tendency=%s", tendency)
+    return reasoning
+
+
+# ---------------------------------------------------------------------------
 # 节点函数
 # ---------------------------------------------------------------------------
 def legal_reasoner(state: CaseState) -> dict[str, Any]:
     """法律推理节点。
 
-    规则+模板实现，后续接入 LLM 增强判断。
+    PR2：优先用 LLM 推理（JSON 模式 + 规则校验 + 概率守卫），
+    失败时降级到规则+模板。
 
     返回更新字典（覆盖语义）：
         - ``reasoning_result``: ReasoningResult
         - ``confidence``: high / medium / low / insufficient（与证据置信度对齐）
     """
-    # 注意：未完成裁判数据校准前不输出数字胜诉概率，仅输出定性标签
-    # TODO: 接入 LLM 增强推理
+    statutes = _get(state, "statutes", []) or []
 
+    # --- 优先 LLM 推理 ---
+    llm_result = _try_llm_reasoning(state)
+    if llm_result is not None:
+        confidence: str
+        if not statutes:
+            confidence = "insufficient"
+        else:
+            confidence = llm_result.evidence_confidence
+        return {
+            "reasoning_result": llm_result,
+            "confidence": confidence,
+        }
+
+    # --- 降级：规则+模板 ---
     user_goal = _get(state, "user_goal", "") or ""
     case_type = _get(state, "case_type", None)
     facts = _get(state, "facts", []) or []
     disputed_facts = _get(state, "disputed_facts", []) or []
-    statutes = _get(state, "statutes", []) or []
     cases = _get(state, "cases", []) or []
     evidence_requirements = _get(state, "evidence_requirements", []) or []
     conflicts = _get(state, "conflicts", []) or []
@@ -600,50 +744,17 @@ def legal_reasoner(state: CaseState) -> dict[str, Any]:
     facts_text = _facts_text(facts)
     statutes_text = _statutes_text(statutes)
 
-    # --- 1. 法律关系 ---
-    legal_relationship = _identify_legal_relationship(
-        case_type, user_goal, statutes_text
-    )
-
-    # --- 2. 构成要件 ---
-    elements = _extract_elements(
-        case_type, facts_text, statutes_text, evidence_requirements
-    )
-
-    # --- 3. 争议焦点 ---
+    legal_relationship = _identify_legal_relationship(case_type, user_goal, statutes_text)
+    elements = _extract_elements(case_type, facts_text, statutes_text, evidence_requirements)
     disputed_focus = _generate_disputed_focus(disputed_facts, case_type)
-
-    # --- 4. 原告主张 ---
     plaintiff_arguments = _build_plaintiff_arguments(case_type, facts_text, user_goal)
-
-    # --- 5. 被告主张 ---
-    defendant_arguments = _build_defendant_arguments(
-        case_type, statutes_text, critic_feedback
-    )
-
-    # --- 6. 证据对应 ---
+    defendant_arguments = _build_defendant_arguments(case_type, statutes_text, critic_feedback)
     evidence_mapping = _build_evidence_mapping(disputed_focus, evidence_requirements)
+    evidence_confidence = _compute_evidence_confidence(evidence_requirements, missing_facts)
+    judicial_tendency = _compute_judicial_tendency(elements, evidence_confidence, statutes, cases, missing_facts)
+    judicial_tendency = _adjust_for_critic_feedback(judicial_tendency, critic_feedback)
+    key_factors = _identify_key_factors(elements, evidence_confidence, conflicts, missing_facts, statutes, cases)
 
-    # --- 7. 证据置信度 ---
-    evidence_confidence = _compute_evidence_confidence(
-        evidence_requirements, missing_facts
-    )
-
-    # --- 8. 裁判倾向 ---
-    judicial_tendency = _compute_judicial_tendency(
-        elements, evidence_confidence, statutes, cases, missing_facts
-    )
-    # 根据 critic 反馈调整（防止过度推断）
-    judicial_tendency = _adjust_for_critic_feedback(
-        judicial_tendency, critic_feedback
-    )
-
-    # --- 9. 关键影响因素 ---
-    key_factors = _identify_key_factors(
-        elements, evidence_confidence, conflicts, missing_facts, statutes, cases
-    )
-
-    # --- 构建 ReasoningResult ---
     result = ReasoningResult(
         legal_relationship=legal_relationship,
         elements=elements,
@@ -656,12 +767,8 @@ def legal_reasoner(state: CaseState) -> dict[str, Any]:
         key_factors=key_factors,
     )
 
-    # --- 自检：禁止数字概率 ---
     _assert_no_numeric_probability(result)
 
-    # confidence 字段与 evidence_confidence 对齐
-    # （evidence_confidence 为 high/medium/low；statutes 为空时为 insufficient）
-    confidence: str
     if not statutes:
         confidence = "insufficient"
     else:

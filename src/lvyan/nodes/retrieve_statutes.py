@@ -1,26 +1,33 @@
 """并行检索节点：法规与类案检索。
 
-当前实现为顺序执行的法规检索 + 类案检索，后续可改为 LangGraph 并行 fan-out /
-fan-in 子图，进一步提升吞吐。
+PR2 升级：RRF 融合后接入 Qwen3-Reranker 重排序，提升检索精度。
 
 职责
 ----
 - 根据 ``retrieval_queries`` 调用 ``search_statutes``（version_aware）检索法规。
 - 调用 ``search_cases`` 检索类案。
 - 合并去重法规结果（按 ``source_id + article_number``），保留最高分。
+- **PR2**：去重后调用 ``rerank`` 对法规结果重排序（RRF → Reranker → Authority）。
 - 更新 ``plan`` 中对应步骤的 ``status`` 为 ``"done"``。
 - 异常不中断流程，失败时返回空列表。
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from lvyan.retrieval.reranker import rerank
 from lvyan.retrieval.version_aware import search_statutes
 from lvyan.schemas import Authority, CaseAuthority, CaseState
 from lvyan.tools.cases import search_cases
 
 __all__ = ["parallel_retrieval"]
+
+_logger = logging.getLogger("lvyan.nodes.retrieve_statutes")
+
+# Reranker 候选池倍数：先召回 top_k * RERANK_POOL_MULTIPLIER 条，再 rerank 到 top_k
+_RERANK_POOL_MULTIPLIER = 2
 
 
 # ---------------------------------------------------------------------------
@@ -113,20 +120,85 @@ def _to_case_authority(hit: Any) -> CaseAuthority:
     )
 
 
+def _rerank_authorities(
+    query: str,
+    authorities: list[Authority],
+    top_k: int = 10,
+) -> list[Authority]:
+    """对 Authority 列表调用 reranker 重排序（PR2）。
+
+    将 Authority 包装为 ScoredChunk（chunk 字段为 dict），调用 ``rerank``，
+    然后按 rerank 结果顺序返回原 Authority 对象，并更新 ``rerank_score``。
+
+    Args:
+        query: 重排序查询文本（通常为 user_goal）。
+        authorities: RRF 融合后去重的 Authority 列表。
+        top_k: 返回前 K 条。
+
+    Returns:
+        重排序后的 Authority 列表；reranker 不可用时返回原列表前 top_k 条。
+    """
+    if not authorities:
+        return []
+
+    from lvyan.retrieval.lexical import ScoredChunk
+
+    # 构造 ScoredChunk 包装（chunk 为 dict，reranker 从中提取 title/article_text）
+    scored_chunks: list[ScoredChunk] = []
+    auth_by_idx: list[Authority] = []
+    for i, auth in enumerate(authorities):
+        chunk_dict = {
+            "title": _get(auth, "title", "") or "",
+            "article_number": _get(auth, "article_number", "") or "",
+            "article_text": _get(auth, "article_text", "") or "",
+        }
+        scored_chunks.append(
+            ScoredChunk(
+                chunk_id=str(i),
+                score=float(_get(auth, "lexical_score", 0.0) or 0.0),
+                chunk=chunk_dict,
+            )
+        )
+        auth_by_idx.append(auth)
+
+    try:
+        reranked = rerank(query=query, candidates=scored_chunks, top_k=top_k)
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug("reranker 调用失败，返回原序: %s", exc)
+        return authorities[:top_k]
+
+    if not reranked:
+        return authorities[:top_k]
+
+    # 按 rerank 结果顺序返回原 Authority，并更新 rerank_score
+    result: list[Authority] = []
+    for sc in reranked:
+        idx = int(sc.chunk_id)
+        if 0 <= idx < len(auth_by_idx):
+            auth = auth_by_idx[idx]
+            # 更新 rerank_score 字段
+            try:
+                auth.rerank_score = sc.score  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                pass
+            result.append(auth)
+    return result if result else authorities[:top_k]
+
+
 # ---------------------------------------------------------------------------
 # 节点函数
 # ---------------------------------------------------------------------------
 def parallel_retrieval(state: CaseState) -> dict[str, Any]:
     """并行检索节点：法规检索 + 类案检索。
 
-    规则+模板实现，后续接入 LLM 增强查询理解。
+    PR2 升级：RRF 融合去重后接入 Qwen3-Reranker 重排序。
 
     职责
     ----
     - 读取 ``retrieval_queries``（planner 生成）。
     - 对每个 query 调用 ``search_statutes(query_text, top_k=10)``。
-    - 合并去重结果（按 ``source_id + article_number``，保留最高分），
-      追加写入 ``statutes``。
+    - 合并去重结果（按 ``source_id + article_number``，保留最高分）。
+    - **PR2**：用 user_goal 作为查询，对去重后的法规结果调用 reranker 重排序。
     - 调用 ``search_cases`` 检索类案，转换为 ``CaseAuthority``，追加写入
       ``cases``。
     - 更新 ``plan`` 中 ``statute_retrieval`` / ``case_retrieval`` 步骤的
@@ -142,10 +214,9 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
         - ``cases``: list[CaseAuthority]
         - ``plan``: list[PlanStep]（含状态更新）
     """
-    # TODO: 接入 LLM 增强查询理解
     queries = _get(state, "retrieval_queries", []) or []
 
-    # --- 法规检索 ---
+    # --- 法规检索（RRF 融合已在 search_statutes 内部完成）---
     raw_statutes: list[Authority] = []
     for q in queries:
         query_text = _get(q, "query_text", "") or ""
@@ -159,8 +230,19 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
 
     statutes = _dedup_authorities(raw_statutes)
 
+    # --- PR2: Reranker 重排序（RRF → Reranker）---
+    # 用 user_goal 作为 rerank 查询（最能反映用户真实意图）
+    rerank_query = _get(state, "user_goal", "") or ""
+    if rerank_query.strip() and statutes:
+        # 先召回更大候选池，再 rerank 到 top_k
+        pool_k = min(len(statutes), 10 * _RERANK_POOL_MULTIPLIER)
+        statutes = _rerank_authorities(
+            query=rerank_query,
+            authorities=statutes[:pool_k],
+            top_k=10,
+        )
+
     # --- 类案检索 ---
-    # 用第一个非空 query 或 user_goal 作为类案查询文本
     case_query_text = ""
     for q in queries:
         qt = _get(q, "query_text", "") or ""
