@@ -255,6 +255,12 @@ def search_statutes(
         # 二次校验：hybrid_search 已做过滤，这里防止任何边角情况漏过
         if not _passes_version_filter(authority, as_of_date, only_effective):
             continue
+        if as_of_date is not None and only_effective:
+            # ``status`` on the source record describes its present-day state.
+            # A historical effective-only query must expose the state at the
+            # requested time, otherwise downstream validators see a contradictory
+            # ``unknown``/``repealed`` result that already passed the time window.
+            authority = authority.model_copy(update={"status": "effective"})
 
         results.append(authority)
 

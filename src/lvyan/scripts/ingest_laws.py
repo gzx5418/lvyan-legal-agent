@@ -38,6 +38,8 @@ from lvyan.retrieval.version_resolver import (
     scan_all_laws,
 )
 
+ARTICLE_INDEX_SCHEMA_VERSION = 3
+
 # ---------------------------------------------------------------------------
 # 正则与常量
 # ---------------------------------------------------------------------------
@@ -323,7 +325,10 @@ def save_index_json(chunks: list[ArticleChunk], output_path: Path) -> None:
     """序列化 chunks 为 JSON 文件（用于离线测试和降级，暂不依赖 OpenSearch）。"""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    data = [chunk.model_dump(mode="json") for chunk in chunks]
+    data = {
+        "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
+        "chunks": [chunk.model_dump(mode="json") for chunk in chunks],
+    }
     output_path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",

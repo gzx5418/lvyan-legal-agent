@@ -124,7 +124,7 @@ def _check_authority(
     superseded_by: str | None = None
     if source_id:
         try:
-            verification = verify_statute_status(source_id)
+            verification = verify_statute_status(source_id, as_of=current_date)
         except Exception:  # noqa: BLE001  查询失败回退到 authority.status
             verification = None
         if verification is not None:

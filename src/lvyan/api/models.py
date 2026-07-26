@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -19,6 +20,10 @@ class AgentRunRequest(BaseModel):
     )
     attachments: list[str] | None = Field(
         default=None, description="附件 file_id 列表（由 /api/upload 返回）"
+    )
+    law_as_of_date: date | None = Field(
+        default=None,
+        description="案件适用法律的时间点；为空时按系统当前日期检索和校验",
     )
 
 

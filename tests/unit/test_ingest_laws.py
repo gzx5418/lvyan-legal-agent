@@ -128,11 +128,11 @@ def test_save_index_json(tmp_path: Path):
 
     assert out.exists()
     data = json.loads(out.read_text(encoding="utf-8"))
-    assert isinstance(data, list)
-    assert len(data) == 100
+    assert data["schema_version"] == 3
+    assert len(data["chunks"]) == 100
 
     # 验证每条记录的结构
-    first = data[0]
+    first = data["chunks"][0]
     assert "chunk_id" in first
     assert "source_id" in first
     assert "title" in first
@@ -143,7 +143,7 @@ def test_save_index_json(tmp_path: Path):
     assert first["jurisdiction"] == "中国大陆"
 
     # chunk_id 应在 JSON 中唯一
-    chunk_ids = [item["chunk_id"] for item in data]
+    chunk_ids = [item["chunk_id"] for item in data["chunks"]]
     assert len(set(chunk_ids)) == len(chunk_ids), "chunk_id 应唯一"
 
 

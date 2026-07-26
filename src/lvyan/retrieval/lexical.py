@@ -182,6 +182,7 @@ _ARTICLE_INDEX_FILE: Path = AGENT_DIR / "knowledge" / "manifests" / "article_ind
 _ARTICLE_INDEX_PKL: Path = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.pkl"
 _BM25_INDEX_FILE: Path = AGENT_DIR / "knowledge" / "manifests" / "bm25_index.json"
 _BM25_INDEX_PKL: Path = AGENT_DIR / "knowledge" / "manifests" / "bm25_index.pkl"
+ARTICLE_INDEX_SCHEMA_VERSION = 3
 
 # 模块级缓存（仅全局 chunks 路径使用，显式传 chunks 时不污染缓存）
 _GLOBAL_CHUNKS_CACHE: list[Any] | None = None
@@ -213,8 +214,13 @@ def _load_article_chunks() -> list[Any]:
         try:
             import pickle
             with open(_ARTICLE_INDEX_PKL, "rb") as f:
-                chunks = pickle.load(f)
-            if chunks and isinstance(chunks, list):
+                cached = pickle.load(f)
+            if (
+                isinstance(cached, dict)
+                and cached.get("schema_version") == ARTICLE_INDEX_SCHEMA_VERSION
+                and isinstance(cached.get("chunks"), list)
+            ):
+                chunks = cached["chunks"]
                 _GLOBAL_CHUNKS_CACHE = chunks
                 log(f"[BM25] 命中 pickle chunks：{_ARTICLE_INDEX_PKL} (n={len(chunks)})")
                 return chunks
@@ -226,14 +232,26 @@ def _load_article_chunks() -> list[Any]:
         try:
             with open(_ARTICLE_INDEX_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            chunks = [ArticleChunk.model_validate(item) for item in raw]
+            if (
+                not isinstance(raw, dict)
+                or raw.get("schema_version") != ARTICLE_INDEX_SCHEMA_VERSION
+                or not isinstance(raw.get("chunks"), list)
+            ):
+                raise ValueError("article index schema version mismatch")
+            chunks = [ArticleChunk.model_validate(item) for item in raw["chunks"]]
             if chunks:
                 _GLOBAL_CHUNKS_CACHE = chunks
                 # 顺手写一份 pickle 加速后续
                 try:
                     import pickle
                     with open(_ARTICLE_INDEX_PKL, "wb") as f:
-                        pickle.dump(chunks, f)
+                        pickle.dump(
+                            {
+                                "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
+                                "chunks": chunks,
+                            },
+                            f,
+                        )
                     log(f"[BM25] 已写入 pickle chunks -> {_ARTICLE_INDEX_PKL}")
                 except Exception:
                     pass
@@ -252,7 +270,13 @@ def _load_article_chunks() -> list[Any]:
         try:
             import pickle
             with open(_ARTICLE_INDEX_PKL, "wb") as f:
-                pickle.dump(chunks, f)
+                pickle.dump(
+                    {
+                        "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
+                        "chunks": chunks,
+                    },
+                    f,
+                )
             log(f"[BM25] 已写入 pickle chunks -> {_ARTICLE_INDEX_PKL}")
         except Exception:
             pass
@@ -381,6 +405,7 @@ def _serialize_bm25_index(index: dict[str, Any]) -> dict[str, Any]:
     """把内存中的 BM25 索引转为可 JSON 序列化的结构。"""
     return {
         "version": 1,
+        "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
         "signature": index["signature"],
         "n_docs": index["n_docs"],
         "avgdl": index["avgdl"],
@@ -430,7 +455,11 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
             import pickle
             with open(_BM25_INDEX_PKL, "rb") as f:
                 raw = pickle.load(f)
-            if raw.get("signature") == expected_sig and int(raw.get("n_docs", 0)) == len(chunks):
+            if (
+                raw.get("schema_version") == ARTICLE_INDEX_SCHEMA_VERSION
+                and raw.get("signature") == expected_sig
+                and int(raw.get("n_docs", 0)) == len(chunks)
+            ):
                 _GLOBAL_BM25_INDEX = _deserialize_bm25_index(raw)
                 log(f"[BM25] 命中 pickle 缓存：{_BM25_INDEX_PKL} (n_docs={_GLOBAL_BM25_INDEX['n_docs']})")
                 return _GLOBAL_BM25_INDEX
@@ -444,7 +473,11 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
         try:
             with open(_BM25_INDEX_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            if raw.get("signature") == expected_sig and int(raw.get("n_docs", 0)) == len(chunks):
+            if (
+                raw.get("schema_version") == ARTICLE_INDEX_SCHEMA_VERSION
+                and raw.get("signature") == expected_sig
+                and int(raw.get("n_docs", 0)) == len(chunks)
+            ):
                 _GLOBAL_BM25_INDEX = _deserialize_bm25_index(raw)
                 log(f"[BM25] 命中 JSON 缓存：{_BM25_INDEX_FILE} (n_docs={_GLOBAL_BM25_INDEX['n_docs']})")
                 # 顺手写一份 pickle 加速后续

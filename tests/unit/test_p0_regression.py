@@ -45,9 +45,9 @@ class TestHistoricalLawEndToEnd:
         assert meta.expiry_date == date(2021, 1, 1)
         assert meta.superseded_by == "minfadian"
 
-    def test_article_chunk_copies_expiry_date_from_metadata(self):
+    def test_article_chunk_copies_expiry_date_from_metadata(self, tmp_path):
         from lvyan.retrieval.version_resolver import LawMetadata
-        from lvyan.scripts.ingest_laws import ArticleChunk, chunk_law_articles
+        from lvyan.scripts.ingest_laws import chunk_law_articles
 
         meta = LawMetadata(
             source_id="test-law",
@@ -56,13 +56,17 @@ class TestHistoricalLawEndToEnd:
             effective_date=date(1999, 10, 1),
             expiry_date=date(2021, 1, 1),
             superseded_by="new-law",
-            raw_filepath="nonexistent.md",
+            raw_filepath=str(tmp_path / "test-law.md"),
             content_hash="abc",
         )
+        (tmp_path / "test-law.md").write_text(
+            "# 测试法\n\n第一条 本法用于测试历史有效期传播。",
+            encoding="utf-8",
+        )
         chunks = chunk_law_articles(meta)
-        if chunks:
-            assert chunks[0].expiry_date == date(2021, 1, 1)
-            assert chunks[0].superseded_by == "new-law"
+        assert chunks
+        assert chunks[0].expiry_date == date(2021, 1, 1)
+        assert chunks[0].superseded_by == "new-law"
 
     def test_authority_expiry_date_from_chunk(self):
         from lvyan.schemas.authority import Authority
@@ -253,7 +257,7 @@ class TestCheckpointHITLAuth:
 
         import asyncio
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             manager.resolve_hitl(
                 "run-unknown",
                 HITLRequest(action="approve"),

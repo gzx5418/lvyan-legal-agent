@@ -43,6 +43,7 @@ from fastapi.staticfiles import StaticFiles
 
 from lvyan.config import AGENT_DIR, is_official_db_available, settings
 from lvyan.memory.store import CaseMemory
+from lvyan.memory.run_metadata import PostgresRunMetadataStore, RunMetadataStore
 from lvyan.runtime import get_case_memory
 from lvyan.tools.file_converter import convert_to_markdown, get_file_category
 
@@ -232,6 +233,7 @@ def _read_text_preview(file_path: Path, max_chars: int = 500) -> str:
 def create_app(
     runner: Any = None,
     memory: CaseMemory | None = None,
+    metadata_store: RunMetadataStore | None = None,
 ) -> FastAPI:
     """构造 FastAPI 应用。
 
@@ -240,7 +242,9 @@ def create_app(
         memory: 可注入的 CaseMemory 实例；None 时使用共享实例（绑定共享图）。
     """
     app = FastAPI(title="律言法律智能体 API", version="0.2.0")
-    manager = RunManager(runner=runner)
+    if metadata_store is None and runner is None and memory is None:
+        metadata_store = PostgresRunMetadataStore()
+    manager = RunManager(runner=runner, metadata_store=metadata_store)
     # 优先使用注入的 memory（测试隔离），否则使用共享 CaseMemory（生产单源）
     mem = memory if memory is not None else get_case_memory()
 
@@ -366,7 +370,11 @@ def create_app(
                         )
 
         ctx = manager.create_run(
-            query_text, req.thread_id, complexity, user_id=user_id
+            query_text,
+            req.thread_id,
+            complexity,
+            user_id=user_id,
+            law_as_of_date=req.law_as_of_date,
         )
         # P2-13：把 user_id 写入 CaseMemory 索引，便于后续 ownership 过滤
         try:

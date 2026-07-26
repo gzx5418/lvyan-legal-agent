@@ -177,6 +177,8 @@ def _reasoning_text(reasoning_result: Any) -> str:
     """将 ReasoningResult 各字段拼接为单一文本，供引用提取使用。"""
     if reasoning_result is None:
         return ""
+    if isinstance(reasoning_result, str):
+        return reasoning_result
     parts: list[str] = []
     # 字符串字段
     legal_relationship = _get(reasoning_result, "legal_relationship", None)

@@ -108,6 +108,7 @@ class CaseState(BaseModel):
     current_date: date
     user_goal: str
     user_id: str = "anonymous"
+    law_as_of_date: date | None = None
 
     # --- 案件元信息 ---
     jurisdiction: str | None = None  # 中国大陆/港澳台/涉外

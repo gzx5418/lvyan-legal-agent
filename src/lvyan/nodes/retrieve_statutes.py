@@ -193,7 +193,10 @@ def _rerank_authorities(
 _CONCURRENT_EXECUTOR: Any = None
 
 
-def _parallel_search_statutes(queries: list[Any]) -> list[Authority]:
+def _parallel_search_statutes(
+    queries: list[Any],
+    as_of: Any = None,
+) -> list[Authority]:
     """并行执行 search_statutes。
 
     P1-22 修复：用 ``concurrent.futures.ThreadPoolExecutor`` 实现真正的并行检索，
@@ -218,7 +221,7 @@ def _parallel_search_statutes(queries: list[Any]) -> list[Authority]:
 
     def _safe_search(qt: str) -> list[Authority]:
         try:
-            return search_statutes(qt, top_k=10) or []
+            return search_statutes(qt, as_of=as_of, top_k=10) or []
         except Exception:  # noqa: BLE001
             return []
 
@@ -283,9 +286,10 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
         - ``plan``: list[PlanStep]（含状态更新）
     """
     queries = _get(state, "retrieval_queries", []) or []
+    law_as_of_date = _get(state, "law_as_of_date", None)
 
     # --- 法规检索（P3-22：真正的并行）---
-    raw_statutes = _parallel_search_statutes(queries)
+    raw_statutes = _parallel_search_statutes(queries, as_of=law_as_of_date)
 
     statutes = _dedup_authorities(raw_statutes)
 

@@ -150,7 +150,7 @@ def test_sse_publish_node_events_have_timestamp_and_duration():
             events.append(await ctx.queue.get())
         return events
 
-    events = asyncio.get_event_loop().run_until_complete(_run())
+    events = asyncio.run(_run())
     assert events[0]["event"] == "node_start"
     assert "timestamp" in events[0]
     assert events[1]["event"] == "node_end"

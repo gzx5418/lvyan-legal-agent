@@ -17,7 +17,10 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import date
 from typing import Any, Awaitable, Callable
+
+from lvyan.memory.run_metadata import RunMetadataStore
 
 from .models import HITLRequest
 
@@ -30,11 +33,18 @@ Runner = Callable[[str, str, str, "RunContext"], Awaitable[str]]
 class RunContext:
     """单次 Agent 运行的上下文。"""
 
-    def __init__(self, run_id: str, thread_id: str, user_id: str = "anonymous") -> None:
+    def __init__(
+        self,
+        run_id: str,
+        thread_id: str,
+        user_id: str = "anonymous",
+        law_as_of_date: date | None = None,
+    ) -> None:
         self.run_id = run_id
         self.thread_id = thread_id
         # P2-13：归属用户；用于 stream / hitl 端点的 ownership 校验
         self.user_id: str = user_id
+        self.law_as_of_date = law_as_of_date
         # 状态：started / running / awaiting_hitl / completed / failed
         self.status: str = "started"
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -57,9 +67,22 @@ class RunManager:
     # P3-24：完成的运行在 _runs 中保留 1 小时后清理（可被 gc_runs 显式调用）
     _RUN_TTL_SECONDS: float = 3600.0
 
-    def __init__(self, runner: Runner | None = None) -> None:
+    def __init__(
+        self,
+        runner: Runner | None = None,
+        metadata_store: RunMetadataStore | None = None,
+    ) -> None:
         self._runs: dict[str, RunContext] = {}
         self._runner: Runner | None = runner
+        self._metadata_store = metadata_store
+
+    def _update_metadata(self, run_id: str, **values: Any) -> None:
+        if self._metadata_store is None:
+            return
+        try:
+            self._metadata_store.update_run(run_id, **values)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("run metadata update failed for %s: %s", run_id, exc)
 
     # ------------------------------------------------------------------
     # 运行生命周期
@@ -70,15 +93,32 @@ class RunManager:
         thread_id: str | None,
         complexity: str,
         user_id: str = "anonymous",
+        law_as_of_date: date | None = None,
     ) -> RunContext:
         """创建并异步启动一次 Agent 运行。"""
         import time as _time
 
         run_id = f"run-{uuid.uuid4().hex}"
         resolved_thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"
-        ctx = RunContext(run_id, resolved_thread_id, user_id=user_id)
+        ctx = RunContext(
+            run_id,
+            resolved_thread_id,
+            user_id=user_id,
+            law_as_of_date=law_as_of_date,
+        )
         ctx.created_at = _time.time()
         self._runs[run_id] = ctx
+        if self._metadata_store is not None:
+            try:
+                self._metadata_store.create_run(
+                    run_id,
+                    resolved_thread_id,
+                    user_id,
+                    title=query[:40],
+                    complexity=complexity,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("run metadata creation failed for %s: %s", run_id, exc)
         asyncio.create_task(self._drive(ctx, query, complexity))
         # 顺手做一次 TTL 清理
         self.gc_runs()
@@ -91,6 +131,7 @@ class RunManager:
         不关闭 SSE 流，由 :meth:`_resume_drive` 在 HITL 决策后负责收尾。
         """
         ctx.status = "running"
+        self._update_metadata(ctx.run_id, status="running")
         interrupted = False
         try:
             if self._runner is not None:
@@ -101,18 +142,37 @@ class RunManager:
             # P0-1 修复：runner 主动进入 awaiting_hitl 时不覆盖状态
             if ctx.status == "awaiting_hitl":
                 interrupted = True
+                self._update_metadata(
+                    ctx.run_id,
+                    status="awaiting_hitl",
+                    interrupt_payload=ctx.hitl_interrupt,
+                )
                 return
 
             ctx.final_output = output or ""
             ctx.status = "completed"
             import time as _time
             ctx.completed_at = _time.time()
+            from datetime import datetime, timezone
+            self._update_metadata(
+                ctx.run_id,
+                status="completed",
+                final_output=ctx.final_output,
+                completed_at=datetime.now(timezone.utc),
+            )
             await ctx.publish({"event": "final_output", "output": ctx.final_output})
         except Exception as exc:  # noqa: BLE001 入口层需宽口径捕获
             ctx.status = "failed"
             ctx.error = str(exc)
             import time as _time
             ctx.completed_at = _time.time()
+            from datetime import datetime, timezone
+            self._update_metadata(
+                ctx.run_id,
+                status="failed",
+                error=ctx.error,
+                completed_at=datetime.now(timezone.utc),
+            )
             _logger.exception("Agent run %s failed", ctx.run_id)
             await ctx.publish({"event": "error", "message": str(exc)})
         finally:
@@ -175,7 +235,6 @@ class RunManager:
             # 通过 LangGraph Command(resume=...) 恢复执行
             from langgraph.types import Command
 
-            graph = _get_graph()
             config = {"configurable": {"thread_id": ctx.thread_id}}
 
             resume_payload: dict[str, Any] = {"action": request.action}
@@ -200,19 +259,42 @@ class RunManager:
 
         P0-5：恢复后执行 ownership 校验，防止跨租户审批。
 
-        流程：
-          1. 遍历 CaseMemory 索引中的 thread，查找有 interrupt 的 thread；
-          2. 检查 interrupt payload 中是否包含该 run_id；
-          3. 找到后创建新的 RunContext 并恢复执行；
+        生产流程：
+          1. 按 run_id 查询 agent_runs，直接取得 thread_id / user_id；
+          2. 校验该 thread checkpoint 的 interrupt 与 state.run_id；
+          3. 创建新的 RunContext 并恢复执行；
           4. 找不到则返回 not_found。
+        未注入 metadata store 时仅保留本地开发兼容路径。
         """
         try:
             from langgraph.types import Command
 
             graph = _get_graph()
-            mem = _get_case_memory()
+            run_meta: dict[str, Any] | None = None
+            if self._metadata_store is not None:
+                run_meta = self._metadata_store.get_run(run_id)
+                if run_meta is None:
+                    return ("not_found", f"run {run_id} 不存在")
+                if run_meta.get("status") != "awaiting_hitl":
+                    return (
+                        "error",
+                        f"run {run_id} 不在等待 HITL 状态"
+                        f"（当前: {run_meta.get('status', 'unknown')}）",
+                    )
+                thread_candidates = [
+                    (
+                        str(run_meta["thread_id"]),
+                        {
+                            "user_id": str(run_meta["user_id"]),
+                            "created_at": run_meta.get("created_at", 0.0),
+                        },
+                    )
+                ]
+            else:
+                # 本地开发兼容路径；生产实例必须注入 PostgreSQL metadata store。
+                thread_candidates = _get_case_memory().list_threads()
 
-            for thread_id, meta in mem.list_threads():
+            for thread_id, meta in thread_candidates:
                 config = {"configurable": {"thread_id": thread_id}}
                 interrupt_info = _check_interrupt(graph, config)
                 if interrupt_info is None:
@@ -244,6 +326,7 @@ class RunManager:
                     resume_payload["edited_output"] = request.edited_output
 
                 ctx.status = "running"
+                self._update_metadata(run_id, status="running")
                 asyncio.create_task(
                     self._resume_drive(ctx, Command(resume=resume_payload), config)
                 )
@@ -298,28 +381,16 @@ class RunManager:
                             "timestamp": now,
                             "duration_ms": round(duration_ms, 2),
                         })
+                        error = payload.get("error")
+                        if error is not None:
+                            await ctx.publish({
+                                "event": "node_error",
+                                "node": task_name,
+                                "error": str(error),
+                            })
 
                 elif mode == "updates" and isinstance(payload, dict):
-                    for node_name, update in payload.items():
-                        if node_name in (None, ""):
-                            continue
-                        now = _time.time()
-                        if node_name not in pending_starts:
-                            start_ts = now
-                        else:
-                            start_ts = pending_starts.pop(node_name, now)
-                        duration_ms = max(0.0, (now - start_ts) * 1000.0)
-                        await ctx.publish({
-                            "event": "node_start",
-                            "node": node_name,
-                            "timestamp": start_ts,
-                        })
-                        await ctx.publish({
-                            "event": "node_end",
-                            "node": node_name,
-                            "timestamp": now,
-                            "duration_ms": round(duration_ms, 2),
-                        })
+                    for _node_name, update in payload.items():
                         if isinstance(update, dict):
                             out = update.get("final_output")
                             if out:
@@ -331,6 +402,11 @@ class RunManager:
                 ctx.status = "awaiting_hitl"
                 ctx.hitl_interrupt = interrupt_info
                 interrupted = True
+                self._update_metadata(
+                    ctx.run_id,
+                    status="awaiting_hitl",
+                    interrupt_payload=interrupt_info,
+                )
                 await ctx.publish(
                     {"event": "hitl_required", "run_id": ctx.run_id, "message": interrupt_info.get("message", "")}
                 )
@@ -340,6 +416,13 @@ class RunManager:
             ctx.status = "completed"
             import time as _time
             ctx.completed_at = _time.time()
+            from datetime import datetime, timezone
+            self._update_metadata(
+                ctx.run_id,
+                status="completed",
+                final_output=ctx.final_output,
+                completed_at=datetime.now(timezone.utc),
+            )
 
             # 标记会话已有输出
             try:
@@ -354,6 +437,13 @@ class RunManager:
             ctx.error = str(exc)
             import time as _time
             ctx.completed_at = _time.time()
+            from datetime import datetime, timezone
+            self._update_metadata(
+                ctx.run_id,
+                status="failed",
+                error=ctx.error,
+                completed_at=datetime.now(timezone.utc),
+            )
             _logger.exception("HITL 恢复执行失败 run %s", ctx.run_id)
             await ctx.publish({"event": "error", "message": str(exc)})
         finally:
@@ -488,6 +578,7 @@ async def default_runner(
             thread_id,
             title=query[:40] if query else thread_id,
             complexity=complexity,
+            user_id=ctx.user_id,
         )
 
         initial = CaseState(
@@ -497,6 +588,7 @@ async def default_runner(
             user_goal=query,
             complexity=complexity,
             user_id=ctx.user_id,
+            law_as_of_date=ctx.law_as_of_date,
         )
         final_output = ""
         last_state: dict[str, Any] = {}
@@ -542,35 +634,16 @@ async def default_runner(
                             "timestamp": now,
                             "duration_ms": round(duration_ms, 2),
                         })
-                        if "error" in payload:
-                            err_msg = payload.get("error", "unknown error")
+                        error = payload.get("error")
+                        if error is not None:
                             await ctx.publish({
                                 "event": "node_error",
                                 "node": task_name,
-                                "error": str(err_msg),
+                                "error": str(error),
                             })
 
                 elif mode == "updates" and isinstance(payload, dict):
-                    for node_name, update in payload.items():
-                        if node_name in (None, ""):
-                            continue
-                        now = _time.time()
-                        if node_name not in pending_starts:
-                            start_ts = now
-                        else:
-                            start_ts = pending_starts.pop(node_name, now)
-                        duration_ms = max(0.0, (now - start_ts) * 1000.0)
-                        await ctx.publish({
-                            "event": "node_start",
-                            "node": node_name,
-                            "timestamp": start_ts,
-                        })
-                        await ctx.publish({
-                            "event": "node_end",
-                            "node": node_name,
-                            "timestamp": now,
-                            "duration_ms": round(duration_ms, 2),
-                        })
+                    for _node_name, update in payload.items():
                         if isinstance(update, dict):
                             last_state.update(update)
                             out = update.get("final_output")
@@ -586,23 +659,7 @@ async def default_runner(
             ):
                 if not isinstance(chunk, dict):
                     continue
-                for node_name, update in chunk.items():
-                    if node_name in (None, ""):
-                        continue
-                    now = _time.time()
-                    start_ts = pending_starts.pop(node_name, now)
-                    duration_ms = max(0.0, (now - start_ts) * 1000.0)
-                    await ctx.publish({
-                        "event": "node_start",
-                        "node": node_name,
-                        "timestamp": start_ts,
-                    })
-                    await ctx.publish({
-                        "event": "node_end",
-                        "node": node_name,
-                        "timestamp": now,
-                        "duration_ms": round(duration_ms, 2),
-                    })
+                for _node_name, update in chunk.items():
                     if isinstance(update, dict):
                         last_state.update(update)
                         out = update.get("final_output")
@@ -614,6 +671,8 @@ async def default_runner(
         if interrupt_info:
             ctx.status = "awaiting_hitl"
             ctx.hitl_interrupt = interrupt_info
+            # The persisted run_id -> thread_id mapping is the cross-instance
+            # discovery path; the checkpoint remains LangGraph's state source.
             await ctx.publish(
                 {
                     "event": "hitl_required",
