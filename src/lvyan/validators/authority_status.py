@@ -119,7 +119,7 @@ def _check_authority(
     effective_date = _to_date(_get(authority, "effective_date", None))
     expiry_date = _to_date(_get(authority, "expiry_date", None))
 
-    # 通过 verify_statute_status 获取当前有效性（失败时回退到 Authority.status）
+    # 通过 verify_statute_status 获取有效性（P0-1：传入 as_of=current_date 支持历史校验）
     current_status = own_status
     superseded_by: str | None = None
     if source_id:

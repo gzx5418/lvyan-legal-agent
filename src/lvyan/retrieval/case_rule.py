@@ -143,24 +143,36 @@ def case_rule_search(
     if not chunks:
         return []
 
-    results: list[ScoredChunk] = []
+    # 同一部法律的全部条文都会命中标题。对隐私/个人信息等细分场景，优先返回
+    # 正文含有具体争点的条文，避免 RRF 只因文件顺序选到无关的前几条。
+    focus_terms: set[str] = set(cases)
+    if any(case in {"隐私", "个人信息", "数据保护", "健康信息"} for case in cases):
+        focus_terms.update({"个人信息", "隐私", "敏感个人信息"})
+
+    ranked_results: list[tuple[int, ScoredChunk]] = []
     seen_ids: set[str] = set()
     for chunk in chunks:
         if isinstance(chunk, dict):
             chunk_id = chunk.get("chunk_id", "")
             title = chunk.get("title", "") or ""
+            article_text = chunk.get("article_text", "") or ""
         else:
             chunk_id = getattr(chunk, "chunk_id", "")
             title = getattr(chunk, "title", "") or ""
+            article_text = getattr(chunk, "article_text", "") or ""
 
         if not title or chunk_id in seen_ids:
             continue
 
         if any(lk in title for lk in law_keywords):
-            results.append(ScoredChunk(chunk_id=chunk_id, score=0.8, chunk=chunk))
+            specificity = sum(term in article_text for term in focus_terms)
+            ranked_results.append(
+                (specificity, ScoredChunk(chunk_id=chunk_id, score=0.8, chunk=chunk))
+            )
             seen_ids.add(chunk_id)
 
-    return results
+    ranked_results.sort(key=lambda item: item[0], reverse=True)
+    return [result for _, result in ranked_results]
 
 
 __all__ = [

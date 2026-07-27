@@ -867,7 +867,14 @@ async function loadHistory() {
     const resp = await fetch('/api/agent/threads');
     if (!resp.ok) throw new Error(await responseError(resp, '历史同步失败'));
     const data = await resp.json();
-    const localById = new Map(state.history.map(item => [item.threadId, item]));
+    const serverThreadIds = new Set(data.threads.map(thread => thread.thread_id));
+    // 只保留仍可由服务端恢复的会话，或保留了完整本地消息的离线副本。
+    // 早期版本仅保存了 thread_id/标题，服务重启后会留下无法打开的幽灵条目。
+    const recoverableLocal = state.history.filter(item => (
+      serverThreadIds.has(item.threadId)
+      || (Array.isArray(item.messages) && item.messages.length > 0)
+    ));
+    const localById = new Map(recoverableLocal.map(item => [item.threadId, item]));
     data.threads.forEach(thread => {
       const local = localById.get(thread.thread_id);
       localById.set(thread.thread_id, {
@@ -991,6 +998,14 @@ async function loadThreadState(threadId, item) {
       if (localMessages.length > 0) {
         renderConversation(localMessages);
         addConversationNotice(`${reason}，当前显示浏览器缓存。`, 'warning');
+        return;
+      }
+      if (resp.status === 404) {
+        state.history = state.history.filter(history => history.threadId !== threadId);
+        persistHistory();
+        renderHistory();
+        state.threadId = null;
+        addConversationNotice('该历史会话已不可恢复，已从列表移除。', 'warning');
         return;
       }
       throw new Error(reason);

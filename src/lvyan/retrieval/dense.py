@@ -19,10 +19,12 @@ import math
 from typing import Any
 
 from lvyan.config import settings
+from lvyan.retrieval.case_rule import case_rule_search
 from lvyan.retrieval.lexical import (
     ScoredChunk,
     _bm25_tokenize,
     _load_article_chunks,
+    bm25_search,
     log,
 )
 
@@ -31,13 +33,13 @@ from lvyan.retrieval.lexical import (
 # ---------------------------------------------------------------------------
 _DENSE_DIM = 256  # 桩向量维度
 
-# 模块级缓存：避免 85k chunks 重复 embed 导致 30s+ 查询
+# 模块级缓存：记录真实 embedding 的可用性，避免反复网络探测。
 # - _REAL_EMBEDDING_PROBED: 是否已尝试真实接入（None=未尝试 / True=可用 / False=不可用）
 # - _ST_MODEL_CACHE: sentence-transformers 模型实例（真实接入可用时填充）
-# - _CHUNK_VEC_CACHE: {chunk_id: vector}，全库 chunk 向量预计算缓存
 _REAL_EMBEDDING_PROBED: bool | None = None
 _ST_MODEL_CACHE: Any = None
-_CHUNK_VEC_CACHE: dict[str, list[float]] = {}
+_DENSE_CANDIDATE_FLOOR = 100
+_DENSE_CANDIDATE_MULTIPLIER = 10
 
 
 # ---------------------------------------------------------------------------
@@ -193,38 +195,43 @@ def embed_text(text: str) -> list[float]:
     return _hash_embed(text)
 
 
-def _precompute_chunk_vectors(chunks: list[Any]) -> dict[str, list[float]]:
-    """预计算所有 chunk 的向量并缓存到模块级。
+def _select_dense_candidates(
+    query: str,
+    chunks: list[Any],
+    top_k: int,
+) -> list[Any]:
+    """为 hash-dense 召回限制候选集，避免首次请求扫描整个法规库。
 
-    全库 85k chunks 的 hash embed 一次性计算约 5-10s，缓存后后续 dense_search
-    只需做余弦相似度遍历（~0.5s）。返回与 ``_CHUNK_VEC_CACHE`` 同一对象。
-
-    注意：chunk 向量始终使用 hash 桩（快速），真实 API embedding 仅用于查询向量
-    和 reranker。对 85k chunks 逐个调用远程 API 不现实（需数小时）。
+    Hash 向量只反映词面重叠，不具备独立于 BM25 的语义空间。因此在全库检索时
+    先由 BM25 选出候选，再以 hash 相似度做轻量排序；小集合与测试传入集合仍
+    全量处理，保持原有接口行为。
     """
-    global _CHUNK_VEC_CACHE
-    if _CHUNK_VEC_CACHE:
-        return _CHUNK_VEC_CACHE
+    global_chunks = _load_article_chunks.__globals__.get("_GLOBAL_CHUNKS_CACHE")
+    if chunks is not global_chunks:
+        return chunks
 
-    log(f"[Dense] 预计算 {len(chunks)} chunks 向量（hash 桩）...")
-    cache: dict[str, list[float]] = {}
-    for chunk in chunks:
-        if isinstance(chunk, dict):
-            chunk_id = chunk.get("chunk_id", "")
-            title = chunk.get("title", "") or ""
-            article_text = chunk.get("article_text", "") or ""
-        else:
-            chunk_id = getattr(chunk, "chunk_id", "")
-            title = getattr(chunk, "title", "") or ""
-            article_text = getattr(chunk, "article_text", "") or ""
-        if not chunk_id:
-            continue
-        full = f"{title} {article_text}" if title else article_text
-        # 始终用 hash 桩计算 chunk 向量，避免对 85k chunks 调用远程 API
-        cache[chunk_id] = _hash_embed(full)
-    _CHUNK_VEC_CACHE = cache
-    log(f"[Dense] 向量缓存就绪：{len(cache)} 条")
-    return _CHUNK_VEC_CACHE
+    candidate_limit = min(
+        len(chunks), max(_DENSE_CANDIDATE_FLOOR, top_k * _DENSE_CANDIDATE_MULTIPLIER)
+    )
+    lexical_candidates = bm25_search(query=query, chunks=chunks, top_k=candidate_limit)
+    rule_candidates = case_rule_search(query=query, chunks=chunks)
+    if lexical_candidates or rule_candidates:
+        candidates: list[Any] = []
+        seen_ids: set[str] = set()
+        for item in [*lexical_candidates, *rule_candidates[:candidate_limit]]:
+            chunk = item.chunk
+            chunk_id = (
+                chunk.get("chunk_id", "")
+                if isinstance(chunk, dict)
+                else getattr(chunk, "chunk_id", "")
+            )
+            if chunk_id and chunk_id not in seen_ids:
+                candidates.append(chunk)
+                seen_ids.add(chunk_id)
+        if candidates:
+            return candidates
+    # 查询没有词面命中时，保留有界降级路径，不在请求线程扫描全库。
+    return chunks[:candidate_limit]
 
 
 # ---------------------------------------------------------------------------
@@ -245,41 +252,32 @@ def dense_search(
     Returns:
         list[ScoredChunk]：按余弦相似度降序。
 
-    性能：
-        - 首次调用预计算全库 chunk 向量 ~5-10s（仅一次，缓存复用）
-        - 后续调用 < 1s（仅做余弦相似度遍历）
+    Hash 降级路径始终在同一向量空间计算查询与文档向量。全库调用会先用
+    BM25 预筛选有界候选集，避免在用户请求线程预计算全部法规向量。
     """
     if chunks is None:
         chunks = _load_article_chunks()
     if not chunks:
         return []
 
-    query_vec = embed_text(query)
+    # 文档向量始终是 hash 向量；查询也必须使用同一向量空间，不能混入真实
+    # embedding，否则不同维度/分布的向量相似度没有语义意义。
+    query_vec = _hash_embed(query)
     if not any(query_vec):
         return []
 
-    # 预计算 chunk 向量缓存（仅对全局 chunks 缓存生效，避免污染小集合测试）
-    use_global_cache = chunks is _load_article_chunks.__globals__.get("_GLOBAL_CHUNKS_CACHE")
-    if use_global_cache:
-        vec_cache = _precompute_chunk_vectors(chunks)
-    else:
-        vec_cache = {}
+    candidate_chunks = _select_dense_candidates(query, chunks, top_k)
 
     scored: list[tuple[int, float]] = []
-    for idx, chunk in enumerate(chunks):
-        if isinstance(chunk, dict):
-            chunk_id = chunk.get("chunk_id", "")
-        else:
-            chunk_id = getattr(chunk, "chunk_id", "")
-
-        # 优先用预计算缓存；未命中则现场计算
-        if use_global_cache and chunk_id in vec_cache:
-            chunk_vec = vec_cache[chunk_id]
-        else:
-            text = getattr(chunk, "article_text", "") or (chunk.get("article_text", "") if isinstance(chunk, dict) else "")
-            title = getattr(chunk, "title", "") or (chunk.get("title", "") if isinstance(chunk, dict) else "")
-            full = f"{title} {text}" if title else text
-            chunk_vec = embed_text(full)
+    for idx, chunk in enumerate(candidate_chunks):
+        text = getattr(chunk, "article_text", "") or (
+            chunk.get("article_text", "") if isinstance(chunk, dict) else ""
+        )
+        title = getattr(chunk, "title", "") or (
+            chunk.get("title", "") if isinstance(chunk, dict) else ""
+        )
+        full = f"{title} {text}" if title else text
+        chunk_vec = _hash_embed(full)
 
         sim = _cosine_similarity(query_vec, chunk_vec)
         if sim > 0:
@@ -290,7 +288,7 @@ def dense_search(
 
     results: list[ScoredChunk] = []
     for idx, sim in top:
-        chunk = chunks[idx]
+        chunk = candidate_chunks[idx]
         chunk_id = (chunk.get("chunk_id", "") if isinstance(chunk, dict)
                     else getattr(chunk, "chunk_id", ""))
         results.append(ScoredChunk(chunk_id=chunk_id, score=round(sim, 4), chunk=chunk))
@@ -321,4 +319,3 @@ __all__ = [
     "dense_search_bge_m3",
     "embed_text",
 ]
-

@@ -228,6 +228,7 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
             autocommit=True,
             prepare_threshold=0,
             row_factory=dict_row,
+            connect_timeout=3,
         )
     except Exception as exc:  # noqa: BLE001 连接失败需宽口径捕获
         print(

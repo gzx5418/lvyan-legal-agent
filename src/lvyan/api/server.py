@@ -183,8 +183,8 @@ def _check_retrieval() -> str:
 
 
 def _check_model_gateway() -> str:
-    """模型网关可用性：URL 已配置视为可用。"""
-    return "ok" if settings.model_gateway_url.strip() else "unavailable"
+    """模型网关可用性：以可访问的健康端点为准，而非仅检查 URL 配置。"""
+    return _check_model_gateway_ready()
 
 
 def _check_model_gateway_ready() -> str:
@@ -206,12 +206,12 @@ def _check_model_gateway_ready() -> str:
                         else {}
                     ),
                 )
-                if r.status_code < 500:
+                if 200 <= r.status_code < 300:
                     return "ok"
             except Exception:  # noqa: BLE001
                 pass
             r = client.get(f"{gateway.rstrip('/')}/health")
-            return "ok" if r.status_code < 500 else "unavailable"
+            return "ok" if 200 <= r.status_code < 300 else "unavailable"
     except Exception:  # noqa: BLE001
         return "unavailable"
 
@@ -220,14 +220,20 @@ def _get_cors_origins() -> list[str]:
     """读取 CORS 白名单。
 
     通过 ``CORS_ALLOWED_ORIGINS`` 环境变量配置，逗号分隔；
-    未配置时回退到 ``["*"]``（仅本地开发可用，生产必须显式配置白名单）。
+    未配置时仅允许内置前端的本地来源。鉴于 API 支持凭据与 ``X-User-ID``，
+    不允许通配符来源。
     """
     import os
 
     raw = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
     if not raw:
-        return ["*"]
-    return [o.strip() for o in raw.split(",") if o.strip()]
+        return ["http://localhost:8000", "http://127.0.0.1:8000"]
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    if "*" in origins:
+        raise ValueError(
+            "CORS_ALLOWED_ORIGINS 不能包含 '*'：启用凭据时必须配置明确来源"
+        )
+    return origins
 
 
 def _read_text_preview(file_path: Path, max_chars: int = 500) -> str:
@@ -257,7 +263,16 @@ def create_app(
     """
     app = FastAPI(title="律言法律智能体 API", version="0.2.0")
     if metadata_store is None and runner is None and memory is None:
-        metadata_store = PostgresRunMetadataStore()
+        try:
+            metadata_store = PostgresRunMetadataStore()
+            # 做一次轻量探测，确认数据库可达
+            metadata_store.healthcheck()
+        except Exception:
+            _logger.warning(
+                "PostgreSQL 不可达，RunMetadata 持久化已禁用；"
+                "run 恢复、跨实例 HITL 等功能将不可用"
+            )
+            metadata_store = None
     manager = RunManager(runner=runner, metadata_store=metadata_store)
     # 优先使用注入的 memory（测试隔离），否则使用共享 CaseMemory（生产单源）
     mem = memory if memory is not None else get_case_memory()
@@ -642,7 +657,18 @@ def create_app(
                     detail="thread metadata 暂时不可用",
                 ) from exc
         else:
-            threads = mem.list_threads()
+            # MemorySaver / 文件回退模式下，索引可能比 checkpoint 存活得更久。
+            # 不返回无法被 /state 读取的幽灵 thread，避免前端历史点击后 404。
+            threads = []
+            try:
+                for tid, meta in mem.list_threads():
+                    if mem.load_strict(tid) is not None:
+                        threads.append((tid, meta))
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail="checkpoint 暂时不可用",
+                ) from exc
         summaries: list[ThreadSummary] = []
         for tid, meta in threads:
             # ownership 过滤

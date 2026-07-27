@@ -110,6 +110,34 @@ def test_health_returns_200():
     assert data["status"] in ("ok", "degraded")
 
 
+def test_default_cors_rejects_untrusted_origin(monkeypatch: pytest.MonkeyPatch):
+    """默认 CORS 只允许内置前端来源，不能接受任意跨站认证请求。"""
+    monkeypatch.delenv("CORS_ALLOWED_ORIGINS", raising=False)
+    app = create_app(runner=mock_runner)
+    headers = {
+        "Origin": "https://evil.example",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type,x-user-id",
+    }
+    with TestClient(app) as client:
+        response = client.options("/api/agent/run", headers=headers)
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_default_cors_allows_builtin_frontend(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("CORS_ALLOWED_ORIGINS", raising=False)
+    app = create_app(runner=mock_runner)
+    headers = {
+        "Origin": "http://127.0.0.1:8000",
+        "Access-Control-Request-Method": "POST",
+    }
+    with TestClient(app) as client:
+        response = client.options("/api/agent/run", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:8000"
+
+
 # ---------------------------------------------------------------------------
 # 2. POST /api/agent/run 启动 Agent 运行
 # ---------------------------------------------------------------------------
@@ -235,11 +263,24 @@ def test_state_unknown_thread_returns_404():
 
 
 def test_list_threads_returns_summaries_from_index():
-    """list_threads 从索引读取元数据，不依赖 load。"""
+    """list_threads 只返回同时拥有元数据和可恢复 checkpoint 的会话。"""
     mem = FakeCaseMemory()
-    mem.register("t1", title="押金纠纷咨询", complexity="light")
-    mem.register("t2", title="劳动仲裁", complexity="deep")
+    mem.save("t1", CaseState(
+        run_id="run-t1",
+        thread_id="t1",
+        current_date=date(2026, 7, 24),
+        user_goal="押金纠纷咨询",
+        complexity="light",
+    ))
+    mem.save("t2", CaseState(
+        run_id="run-t2",
+        thread_id="t2",
+        current_date=date(2026, 7, 24),
+        user_goal="劳动仲裁",
+        complexity="deep",
+    ))
     mem.mark_output("t1")
+    mem.register("stale-thread", title="已丢失的旧会话", complexity="light")
 
     app = create_app(runner=mock_runner, memory=mem)
     with TestClient(app) as client:
@@ -252,6 +293,7 @@ def test_list_threads_returns_summaries_from_index():
     assert by_id["t1"]["has_output"] is True
     assert by_id["t2"]["complexity"] == "deep"
     assert by_id["t2"]["has_output"] is False
+    assert "stale-thread" not in by_id
 
 
 def test_delete_thread_removes_from_index():
