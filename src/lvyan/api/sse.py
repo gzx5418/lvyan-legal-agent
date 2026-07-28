@@ -525,7 +525,13 @@ class RunManager:
             graph = _get_graph()
             final_output = ctx.final_output or ""
 
-            final_output = await _stream_graph_events(graph, command, config, ctx, final_output)
+            final_output = await _stream_graph_events(
+                graph,
+                command,
+                config,
+                ctx,
+                final_output=final_output,
+            )
 
             # 再次检查是否还有中断
             interrupt_info = _check_interrupt(graph, config)
