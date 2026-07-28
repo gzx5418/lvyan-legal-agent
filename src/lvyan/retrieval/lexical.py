@@ -32,18 +32,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# Windows 控制台 UTF-8 输出（保留原脚本行为）
-try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-except (AttributeError, OSError):
-    pass
-
 # 路径解析统一走 lvyan.config（环境变量优先 > AGENT 内默认 > 回退到 ../律言skill/...）
 from lvyan.config import (  # noqa: E402
     AGENT_DIR,
-    KNOWLEDGE_DIR,
-    LAWTEXT_DIR,
     REPO_ROOT,
     settings,
 )
@@ -79,7 +70,16 @@ SEARCH_TYPES = ["law", "case", "evidence", "official", "all"]
 
 # 检索类型 → 知识库目录/文件名提示（沿用原 project_config.SEARCH_TYPE_DIR_MAP）
 SEARCH_TYPE_DIR_MAP: dict[str, list[str]] = {
-    "law": ["law", "法条", "法规", "法律", "civil_code", "labor_law", "consumer_and_tort", "procedure_law"],
+    "law": [
+        "law",
+        "法条",
+        "法规",
+        "法律",
+        "civil_code",
+        "labor_law",
+        "consumer_and_tort",
+        "procedure_law",
+    ],
     "case": ["case", "裁判", "案例", "判例", "case_patterns"],
     "evidence": ["evidence", "证据", "evidence_guide"],
     "official": [],
@@ -91,19 +91,90 @@ SEARCH_TYPE_DIR_MAP: dict[str, list[str]] = {
 # 口语长短语（如"买到假货"）应被切成"买到"+"假货"，让子词去匹配。
 _DOMAIN_TERMS: list[str] = [
     # 行为/状态（原子词，不再细分）
-    "买到", "假货", "假冒", "伪劣", "欺诈", "索赔", "退一赔三",
-    "退还", "返还", "退款", "退货", "赔偿", "补偿", "辞退", "开除", "解雇",
-    "解除", "终止", "违约", "欠薪", "拖欠工资", "不发工资", "工伤", "受伤",
-    "离婚", "结婚", "继承", "遗嘱", "借款", "欠款", "还款", "利息", "利率",
+    "买到",
+    "假货",
+    "假冒",
+    "伪劣",
+    "欺诈",
+    "索赔",
+    "退一赔三",
+    "退还",
+    "返还",
+    "退款",
+    "退货",
+    "赔偿",
+    "补偿",
+    "辞退",
+    "开除",
+    "解雇",
+    "解除",
+    "终止",
+    "违约",
+    "欠薪",
+    "拖欠工资",
+    "不发工资",
+    "工伤",
+    "受伤",
+    "离婚",
+    "结婚",
+    "继承",
+    "遗嘱",
+    "借款",
+    "欠款",
+    "还款",
+    "利息",
+    "利率",
     # 实体/领域
-    "消费者", "消费者权益", "经营者", "用人单位", "劳动者", "劳动合同", "劳动",
-    "房东", "租客", "租赁", "租房", "房屋租赁", "承租", "押金", "保证金", "定金",
-    "房产", "房屋", "不动产", "房地产", "遗产", "交通事故", "机动车", "肇事",
-    "食品安全", "食品", "知识产权", "专利", "商标", "著作权", "网购", "网络购物",
-    "电子商务", "网络交易", "隐私", "个人信息", "数据保护", "三倍赔偿", "惩罚性赔偿",
-    "违约金", "损害赔偿",
+    "消费者",
+    "消费者权益",
+    "经营者",
+    "用人单位",
+    "劳动者",
+    "劳动合同",
+    "劳动",
+    "房东",
+    "租客",
+    "租赁",
+    "租房",
+    "房屋租赁",
+    "承租",
+    "押金",
+    "保证金",
+    "定金",
+    "房产",
+    "房屋",
+    "不动产",
+    "房地产",
+    "遗产",
+    "交通事故",
+    "机动车",
+    "肇事",
+    "食品安全",
+    "食品",
+    "知识产权",
+    "专利",
+    "商标",
+    "著作权",
+    "网购",
+    "网络购物",
+    "电子商务",
+    "网络交易",
+    "隐私",
+    "个人信息",
+    "数据保护",
+    "三倍赔偿",
+    "惩罚性赔偿",
+    "违约金",
+    "损害赔偿",
     # 法律概念
-    "诉讼时效", "管辖", "举证责任", "证据", "胜诉率", "裁判", "公司", "合同",
+    "诉讼时效",
+    "管辖",
+    "举证责任",
+    "证据",
+    "胜诉率",
+    "裁判",
+    "公司",
+    "合同",
 ]
 
 # 同义词表默认值（synonyms.json 缺失或加载失败时的兜底，保证永不因配置缺失而崩溃）
@@ -213,6 +284,7 @@ def _load_article_chunks() -> list[Any]:
     if _ARTICLE_INDEX_PKL.is_file():
         try:
             import pickle
+
             with open(_ARTICLE_INDEX_PKL, "rb") as f:
                 cached = pickle.load(f)
             if (
@@ -244,6 +316,7 @@ def _load_article_chunks() -> list[Any]:
                 # 顺手写一份 pickle 加速后续
                 try:
                     import pickle
+
                     with open(_ARTICLE_INDEX_PKL, "wb") as f:
                         pickle.dump(
                             {
@@ -261,7 +334,7 @@ def _load_article_chunks() -> list[Any]:
             _GLOBAL_CHUNKS_CACHE = None
 
     # 3) 现场构建（较慢，仅首次运行）
-    log(f"[BM25] article_index_v2 缓存不存在或损坏，现场构建全库 chunks ...")
+    log("[BM25] article_index_v2 缓存不存在或损坏，现场构建全库 chunks ...")
     chunks = build_article_index()
     try:
         save_index_json(chunks, _ARTICLE_INDEX_FILE)
@@ -269,6 +342,7 @@ def _load_article_chunks() -> list[Any]:
         # 同时写 pickle
         try:
             import pickle
+
             with open(_ARTICLE_INDEX_PKL, "wb") as f:
                 pickle.dump(
                     {
@@ -324,7 +398,7 @@ def _bm25_tokenize(text: str) -> list[str]:
         seg = text[i:j]
         if len(seg) >= 2:
             for k in range(len(seg) - 1):
-                bigrams.append(seg[k:k + 2])
+                bigrams.append(seg[k : k + 2])
         elif len(seg) == 1:
             # 单字也作为一个 token 兜底（避免极短条文零 token）
             bigrams.append(seg)
@@ -357,16 +431,26 @@ def _build_bm25_index(chunks: list[Any]) -> dict[str, Any]:
     """
     n_docs = len(chunks)
     if n_docs == 0:
-        return {"doc_lengths": [], "avgdl": 0.0, "inverted": {}, "idf": {},
-                "n_docs": 0, "signature": ""}
+        return {
+            "doc_lengths": [],
+            "avgdl": 0.0,
+            "inverted": {},
+            "idf": {},
+            "n_docs": 0,
+            "signature": "",
+        }
 
     doc_lengths: list[int] = []
     doc_freq: dict[str, int] = {}  # token -> 含该 token 的文档数
     inverted: dict[str, list[tuple[int, int]]] = {}
 
     for idx, chunk in enumerate(chunks):
-        text = getattr(chunk, "article_text", "") or (chunk.get("article_text", "") if isinstance(chunk, dict) else "")
-        title = getattr(chunk, "title", "") or (chunk.get("title", "") if isinstance(chunk, dict) else "")
+        text = getattr(chunk, "article_text", "") or (
+            chunk.get("article_text", "") if isinstance(chunk, dict) else ""
+        )
+        title = getattr(chunk, "title", "") or (
+            chunk.get("title", "") if isinstance(chunk, dict) else ""
+        )
         # 标题也并入分词（标题命中可显著提升 BM25 命中率）
         tokens = _bm25_tokenize(text) + _bm25_tokenize(title)
         doc_lengths.append(len(tokens))
@@ -386,10 +470,12 @@ def _build_bm25_index(chunks: list[Any]) -> dict[str, Any]:
     for tok, df in doc_freq.items():
         idf[tok] = math.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
 
-    signature = _compute_chunk_signature([
-        getattr(c, "chunk_id", "") or (c.get("chunk_id", "") if isinstance(c, dict) else "")
-        for c in chunks
-    ])
+    signature = _compute_chunk_signature(
+        [
+            getattr(c, "chunk_id", "") or (c.get("chunk_id", "") if isinstance(c, dict) else "")
+            for c in chunks
+        ]
+    )
 
     return {
         "doc_lengths": doc_lengths,
@@ -412,8 +498,7 @@ def _serialize_bm25_index(index: dict[str, Any]) -> dict[str, Any]:
         "doc_lengths": index["doc_lengths"],
         # inverted: {token: [[doc_idx, tf], ...]}
         "inverted": {
-            tok: [[di, tf] for di, tf in postings]
-            for tok, postings in index["inverted"].items()
+            tok: [[di, tf] for di, tf in postings] for tok, postings in index["inverted"].items()
         },
         "idf": index["idf"],
     }
@@ -444,15 +529,18 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
     if _GLOBAL_BM25_INDEX is not None:
         return _GLOBAL_BM25_INDEX
 
-    expected_sig = _compute_chunk_signature([
-        getattr(c, "chunk_id", "") or (c.get("chunk_id", "") if isinstance(c, dict) else "")
-        for c in chunks
-    ])
+    expected_sig = _compute_chunk_signature(
+        [
+            getattr(c, "chunk_id", "") or (c.get("chunk_id", "") if isinstance(c, dict) else "")
+            for c in chunks
+        ]
+    )
 
     # 1) 优先尝试 pickle 缓存（更快）
     if _BM25_INDEX_PKL.is_file():
         try:
             import pickle
+
             with open(_BM25_INDEX_PKL, "rb") as f:
                 raw = pickle.load(f)
             if (
@@ -461,10 +549,12 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
                 and int(raw.get("n_docs", 0)) == len(chunks)
             ):
                 _GLOBAL_BM25_INDEX = _deserialize_bm25_index(raw)
-                log(f"[BM25] 命中 pickle 缓存：{_BM25_INDEX_PKL} (n_docs={_GLOBAL_BM25_INDEX['n_docs']})")
+                log(
+                    f"[BM25] 命中 pickle 缓存：{_BM25_INDEX_PKL} (n_docs={_GLOBAL_BM25_INDEX['n_docs']})"
+                )
                 return _GLOBAL_BM25_INDEX
             else:
-                log(f"[BM25] pickle 缓存签名不匹配，重建索引 ...")
+                log("[BM25] pickle 缓存签名不匹配，重建索引 ...")
         except (OSError, pickle.PickleError, Exception) as exc:
             log(f"[BM25] pickle 缓存读取失败 ({exc})，尝试 JSON ...")
 
@@ -479,17 +569,20 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
                 and int(raw.get("n_docs", 0)) == len(chunks)
             ):
                 _GLOBAL_BM25_INDEX = _deserialize_bm25_index(raw)
-                log(f"[BM25] 命中 JSON 缓存：{_BM25_INDEX_FILE} (n_docs={_GLOBAL_BM25_INDEX['n_docs']})")
+                log(
+                    f"[BM25] 命中 JSON 缓存：{_BM25_INDEX_FILE} (n_docs={_GLOBAL_BM25_INDEX['n_docs']})"
+                )
                 # 顺手写一份 pickle 加速后续
                 try:
                     import pickle
+
                     with open(_BM25_INDEX_PKL, "wb") as f:
                         pickle.dump(_serialize_bm25_index(_GLOBAL_BM25_INDEX), f)
                 except Exception:
                     pass
                 return _GLOBAL_BM25_INDEX
             else:
-                log(f"[BM25] JSON 缓存签名不匹配，重建索引 ...")
+                log("[BM25] JSON 缓存签名不匹配，重建索引 ...")
         except (OSError, json.JSONDecodeError, Exception) as exc:
             log(f"[BM25] JSON 缓存读取失败 ({exc})，重建索引 ...")
 
@@ -502,6 +595,7 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
         # pickle（首选）
         try:
             import pickle
+
             with open(_BM25_INDEX_PKL, "wb") as f:
                 pickle.dump(serialized, f)
             log(f"[BM25] 已写入 pickle 索引 -> {_BM25_INDEX_PKL}")
@@ -666,7 +760,9 @@ def bm25_search(
     boosted: list[tuple[int, float]] = []
     for doc_idx, sc in scores.items():
         chunk = chunks[doc_idx]
-        title = getattr(chunk, "title", "") or (chunk.get("title", "") if isinstance(chunk, dict) else "")
+        title = getattr(chunk, "title", "") or (
+            chunk.get("title", "") if isinstance(chunk, dict) else ""
+        )
         if title and any(term in title for term in query_terms):
             sc *= _TITLE_MATCH_BOOST
         boosted.append((doc_idx, sc))
@@ -677,7 +773,9 @@ def bm25_search(
     results: list[ScoredChunk] = []
     for doc_idx, sc in top:
         chunk = chunks[doc_idx]
-        chunk_id = getattr(chunk, "chunk_id", "") or (chunk.get("chunk_id", "") if isinstance(chunk, dict) else "")
+        chunk_id = getattr(chunk, "chunk_id", "") or (
+            chunk.get("chunk_id", "") if isinstance(chunk, dict) else ""
+        )
         results.append(ScoredChunk(chunk_id=chunk_id, score=round(sc, 4), chunk=chunk))
     return results
 
@@ -783,11 +881,11 @@ def _extend_known_subtokens(segment: str, out: list[str]) -> None:
     while k < L_seg:
         matched_len = 0
         for L in (4, 3, 2):
-            if k + L <= L_seg and segment[k:k + L] in known:
+            if k + L <= L_seg and segment[k : k + L] in known:
                 matched_len = L
                 break
         if matched_len:
-            out.append(segment[k:k + matched_len])
+            out.append(segment[k : k + matched_len])
             k += matched_len
         else:
             k += 1
@@ -954,13 +1052,15 @@ def _search_in_files(
             groups_hit = sum(1 for g in groups if any(v in stripped for v in g))
             all_keyword_bonus = groups_hit * 0.5 if groups_hit == len(groups) else 0.0
 
-            file_matches.append({
-                "line_number": line_num,
-                "content": stripped,
-                "score": round(score + all_keyword_bonus, 1),
-                "matched_keywords": matched_kws,
-                "all_keywords_in_line": groups_hit == len(groups),
-            })
+            file_matches.append(
+                {
+                    "line_number": line_num,
+                    "content": stripped,
+                    "score": round(score + all_keyword_bonus, 1),
+                    "matched_keywords": matched_kws,
+                    "all_keywords_in_line": groups_hit == len(groups),
+                }
+            )
 
         if file_matches:
             # 文档级得分用 max_line_score 归一化，避免「弱命中多行」压过「强命中少行」
@@ -969,14 +1069,16 @@ def _search_in_files(
                 rel_path = str(md_file.relative_to(_PROJECT_DIR)).replace("\\", "/")
             except ValueError:
                 rel_path = md_file.name
-            all_matches.append({
-                "file": md_file.name,
-                "path": rel_path,
-                "source": source,
-                "matches": file_matches,
-                "_file_score": round(max_line_score, 1),
-                "_total_score": round(sum(m["score"] for m in file_matches), 1),
-            })
+            all_matches.append(
+                {
+                    "file": md_file.name,
+                    "path": rel_path,
+                    "source": source,
+                    "matches": file_matches,
+                    "_file_score": round(max_line_score, 1),
+                    "_total_score": round(sum(m["score"] for m in file_matches), 1),
+                }
+            )
 
     return all_matches
 
@@ -1016,7 +1118,7 @@ def _search_full(
 
     expanded_keywords = _expand_keywords(keywords)
 
-    log(f"[Local Query] 查询: \"{query}\"", quiet)
+    log(f'[Local Query] 查询: "{query}"', quiet)
     log(f"[Keywords] 原始关键词: {keywords}", quiet)
     if len(expanded_keywords) > len(keywords):
         log(f"[Keywords] 扩展关键词: {expanded_keywords}", quiet)
@@ -1059,14 +1161,16 @@ def _search_full(
     for f in all_matches[:top_n]:
         sorted_matches = sorted(f["matches"], key=lambda m: m["score"], reverse=True)
         take = min(len(sorted_matches), MAX_LINES_PER_FILE)
-        trimmed.append({
-            "file": f["file"],
-            "path": f["path"],
-            "source": f.get("source", ""),
-            "match_count": len(f["matches"]),
-            "max_score": f["_file_score"],
-            "top_matches": sorted_matches[:take],
-        })
+        trimmed.append(
+            {
+                "file": f["file"],
+                "path": f["path"],
+                "source": f.get("source", ""),
+                "match_count": len(f["matches"]),
+                "max_score": f["_file_score"],
+                "top_matches": sorted_matches[:take],
+            }
+        )
 
     files_searched = knowledge_count + official_count
 
@@ -1145,13 +1249,15 @@ def _scored_chunk_to_dict(sc: ScoredChunk) -> dict:
         "path": f"chunks/{chunk_id}",
         "max_score": sc.score,
         "match_count": 1,
-        "top_matches": [{
-            "line_number": 0,
-            "content": article_text[:500],
-            "score": sc.score,
-            "matched_keywords": [],
-            "all_keywords_in_line": False,
-        }],
+        "top_matches": [
+            {
+                "line_number": 0,
+                "content": article_text[:500],
+                "score": sc.score,
+                "matched_keywords": [],
+                "all_keywords_in_line": False,
+            }
+        ],
     }
 
 
@@ -1168,24 +1274,32 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "-q", "--query", required=True,
+        "-q",
+        "--query",
+        required=True,
         help="搜索查询，空格分隔多个关键词",
     )
     parser.add_argument(
-        "-o", "--output", default=None,
+        "-o",
+        "--output",
+        default=None,
         help="输出 JSON 文件路径（不指定则输出到 stdout）",
     )
     parser.add_argument(
-        "--type", default="all",
+        "--type",
+        default="all",
         choices=SEARCH_TYPES,
         help="检索类型: law=法条, case=裁判规则, evidence=证据, official=官方法律, all=全部",
     )
     parser.add_argument(
-        "--quiet", action="store_true",
+        "--quiet",
+        action="store_true",
         help="静默模式",
     )
     parser.add_argument(
-        "--top", type=int, default=10,
+        "--top",
+        type=int,
+        default=10,
         help="返回前 N 个最相关的结果（默认 10）",
     )
 

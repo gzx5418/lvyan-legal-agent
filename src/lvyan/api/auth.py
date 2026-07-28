@@ -1,32 +1,39 @@
-"""P2-13：API 认证与租户隔离框架。
+"""M3：API 认证与租户隔离框架（移除未验签 JWT 信任路径）。
 
-本模块提供轻量级、可选开启的 user_id 提取与会话 ownership 校验：
-
-- :func:`get_current_user_id`：FastAPI dependency，从请求头 ``X-User-ID`` /
-  ``Authorization: Bearer <token>`` 提取 user_id；未启用认证时返回 ``"anonymous"``。
-- :func:`enable_auth_middleware`：开启后所有 thread/run/attachment 查询都强
-  制带 ``WHERE user_id = current_user.id``。
-- :func:`assert_thread_owner`：基于 CaseMemory 索引中的 ``user_id`` 字段
-  校验 thread 归属；不匹配抛 ``HTTPException(403)``。
-- :func:`assert_run_owner`：基于 RunContext 上记录的 ``user_id`` 校验 run 归属。
-
-设计原则
+认证模式
 --------
-- 默认 ``AUTH_ENABLED=false``：本地开发零依赖，所有 user_id 都是 ``anonymous``，
-  单租户场景下 ownership 不阻断。
-- 生产部署设 ``AUTH_ENABLED=true``，前端通过反代注入 ``X-User-ID`` 头（或
-  JWT）；本模块不实现完整 JWT 验签，仅做协议适配，留给生产侧用 API Gateway
-  / OIDC proxy 完成。
+1. ``AUTH_ENABLED=false``（默认）：
+   - 匿名本地开发模式；:func:`get_current_user_id` 直接返回 ``"anonymous"``，
+     不读取任何请求头。
+
+2. ``AUTH_ENABLED=true`` 且请求携带 ``X-User-ID``：
+   - **仅用于受信任的 API Gateway / OIDC Proxy 模式**。
+   - 部署时网关必须先剥离客户端传入的原始 ``X-User-ID``，再注入可信身份；
+     服务不得在未经过网关的情况下直接暴露此端口（见部署文档）。
+
+3. ``AUTH_ENABLED=true`` 且请求携带 ``Authorization: Bearer <jwt>``：
+   - 仅当 ``JWT_VERIFY_IN_PROCESS=true`` 时才会被接受。
+   - 必须验证签名、``exp``、``nbf``、``iss``、``aud``；任一校验失败返回 401。
+   - ``JWT_VERIFY_IN_PROCESS=false`` 时，本服务**不再信任未验签 JWT**，
+     直接返回 401，并提示当前部署只接受可信网关注入的身份头。
+
+设计要点
+--------
+- 不再保留「解码 JWT payload 后直接读取 sub」的旁路。所有信任都必须通过
+  显式开启的进程内验签或可信网关注入。
+- ``PyJWT`` 缺失时，进程内验签路径直接 503，不会回退到不安全的解析。
 - 与 :class:`CaseMemory.register` 协议：``register`` 在写入索引时同步记录
   ``user_id`` 字段，:func:`assert_thread_owner` 据此判定归属。
 """
 
 from __future__ import annotations
 
-import os
+import logging
 from typing import Any
 
 from fastapi import Header, HTTPException, Request
+
+_logger = logging.getLogger("lvyan.api.auth")
 
 __all__ = [
     "is_auth_enabled",
@@ -40,9 +47,161 @@ ANONYMOUS_USER = "anonymous"
 
 
 def is_auth_enabled() -> bool:
-    """是否启用认证（默认 false，单租户本地开发零依赖）。"""
-    raw = os.getenv("AUTH_ENABLED", "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    """是否启用认证（默认 false，单租户本地开发零依赖）。
+
+    读取顺序：环境变量 ``AUTH_ENABLED`` 实时读取 → ``settings.auth_enabled``。
+    环境变量优先使测试可通过 ``monkeypatch.setenv`` 注入。
+    """
+    import os
+
+    raw = os.getenv("AUTH_ENABLED")
+    if raw is not None:
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    from lvyan.config import settings
+
+    return bool(settings.auth_enabled)
+
+
+def _auth_settings():
+    """获取认证相关配置（环境变量优先于 settings 单例，便于测试注入）。
+
+    返回 dict，包含 ``jwt_verify_in_process`` / ``jwt_issuer`` / ``jwt_audience``
+    / ``jwt_jwks_url`` / ``jwt_algorithms``。
+    """
+    import os
+
+    def _get(name: str, default: str) -> str:
+        return os.getenv(name, default)
+
+    def _get_bool(name: str, default: bool) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    from lvyan.config import settings
+
+    return {
+        "jwt_verify_in_process": _get_bool("JWT_VERIFY_IN_PROCESS", settings.jwt_verify_in_process),
+        "jwt_issuer": _get("JWT_ISSUER", settings.jwt_issuer),
+        "jwt_audience": _get("JWT_AUDIENCE", settings.jwt_audience),
+        "jwt_jwks_url": _get("JWT_JWKS_URL", settings.jwt_jwks_url),
+        "jwt_algorithms": _get("JWT_ALGORITHMS", settings.jwt_algorithms),
+    }
+
+
+def _verify_jwt_and_extract_sub(authorization: str) -> str:
+    """验证 Bearer JWT 并返回 ``sub``。
+
+    校验项：签名、``exp``、``nbf``、``iss``（若配置）、``aud``（若配置）、
+    算法白名单（禁止 ``none``）。任一失败抛 :class:`HTTPException(401)`。
+
+    ``PyJWT`` 未安装或 ``JWT_VERIFY_IN_PROCESS=false`` 时抛
+    :class:`HTTPException(401)` —— 不会回退到未验签的 payload 解析。
+    """
+    cfg = _auth_settings()
+
+    if not cfg["jwt_verify_in_process"]:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Bearer JWT 未被信任：本部署未开启进程内验签"
+                "（JWT_VERIFY_IN_PROCESS=false）。"
+                "请通过可信 API Gateway 注入 X-User-ID，"
+                "或让运维开启 JWT_VERIFY_IN_PROCESS=true 并配置 JWKS。"
+            ),
+        )
+
+    token = authorization[7:].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Bearer token 为空")
+
+    try:
+        import jwt  # type: ignore[import-untyped]
+    except ImportError as exc:
+        _logger.error("PyJWT 未安装但 JWT_VERIFY_IN_PROCESS=true：%s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="服务端未安装 JWT 验签依赖（PyJWT）",
+        ) from exc
+
+    algorithms = [a.strip() for a in cfg["jwt_algorithms"].split(",") if a.strip()]
+    if not algorithms or any(a.lower() == "none" for a in algorithms):
+        raise HTTPException(
+            status_code=500,
+            detail="JWT_ALGORITHMS 配置非法：禁止使用 none",
+        )
+
+    if not cfg["jwt_jwks_url"]:
+        raise HTTPException(
+            status_code=500,
+            detail="JWT_VERIFY_IN_PROCESS=true 但未配置 JWT_JWKS_URL",
+        )
+    if not cfg["jwt_issuer"] or not cfg["jwt_audience"]:
+        raise HTTPException(
+            status_code=500,
+            detail=("JWT_VERIFY_IN_PROCESS=true 时必须同时配置 JWT_ISSUER " "和 JWT_AUDIENCE"),
+        )
+
+    try:
+        signing_key = _fetch_signing_key(token, cfg["jwt_jwks_url"], algorithms)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 JWKS 解析失败统一 401
+        _logger.warning("JWKS 解析失败：%s", exc)
+        raise HTTPException(
+            status_code=401,
+            detail=f"JWT 验签失败：{exc}",
+        ) from exc
+
+    decode_options: dict[str, Any] = {
+        "verify_exp": True,
+        "verify_nbf": True,
+        "verify_signature": True,
+        # PyJWT 仅在 claim 存在时才校验 exp / nbf；认证令牌必须携带这些
+        # claim，不能允许省略后绕过时效控制。
+        "require": ["exp", "nbf", "iss", "aud"],
+    }
+    decode_kwargs: dict[str, Any] = {
+        "algorithms": algorithms,
+        "issuer": cfg["jwt_issuer"],
+        "audience": cfg["jwt_audience"],
+    }
+
+    try:
+        payload = jwt.decode(
+            token,
+            signing_key,
+            options=decode_options,
+            **decode_kwargs,
+        )
+    except Exception as exc:  # noqa: BLE001 PyJWT 抛出各种验签异常
+        _logger.info("JWT 校验失败：%s", exc)
+        raise HTTPException(
+            status_code=401,
+            detail=f"JWT 校验失败：{exc}",
+        ) from exc
+
+    uid = payload.get("sub") or payload.get("uid") or payload.get("user_id")
+    if not uid:
+        raise HTTPException(status_code=401, detail="JWT 缺少 sub/uid/user_id 字段")
+    return str(uid)
+
+
+def _fetch_signing_key(token: str, jwks_url: str, algorithms: list[str]) -> Any:
+    """从 JWKS 获取用于验签的密钥。
+
+    支持 RS256 / ES256 等非对称算法；HS256 这种对称算法需要 JWT_JWKS_URL
+    返回共享密钥（生产不推荐）。优先使用 ``PyJWKClient``；失败回退直接读取
+    JWKS JSON。
+    """
+    try:
+        from jwt import PyJWKClient  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise RuntimeError("PyJWT 缺少 PyJWKClient（请升级到 PyJWT>=2.6）") from exc
+
+    jwk_client = PyJWKClient(jwks_url)
+    return jwk_client.get_signing_key_from_jwt(token).key
 
 
 def get_current_user_id(
@@ -50,45 +209,27 @@ def get_current_user_id(
     x_user_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> str:
-    """FastAPI dependency：从请求头提取当前 user_id。
+    """FastAPI dependency：提取当前 user_id。
 
-    提取顺序：
-      1. ``X-User-ID`` 头（API Gateway / 反代注入，推荐）
-      2. ``Authorization: Bearer <jwt>`` 的 subject（解析失败回退 anonymous）
-      3. 未启用认证 → ``"anonymous"``
-
-    生产部署应通过 API Gateway 在网关层完成 OIDC / JWT 验签，本服务只接收
-    网关注入的可信 ``X-User-ID``。
+    解析顺序见模块 docstring。本方法**不会**信任未验签的 JWT payload。
     """
     if not is_auth_enabled():
         return ANONYMOUS_USER
 
     if x_user_id:
-        return x_user_id.strip()
+        trusted_user_id = x_user_id.strip()
+        if trusted_user_id:
+            return trusted_user_id
 
     if authorization and authorization.lower().startswith("bearer "):
-        # 仅解析 JWT payload 不验签（验签由 Gateway 负责）
-        token = authorization[7:].strip()
-        try:
-            import base64
-            import json
-
-            parts = token.split(".")
-            if len(parts) >= 2:
-                # base64url → padding → json
-                payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
-                payload = json.loads(
-                    base64.urlsafe_b64decode(payload_b64).decode("utf-8")
-                )
-                uid = payload.get("sub") or payload.get("uid") or payload.get("user_id")
-                if uid:
-                    return str(uid)
-        except Exception:  # noqa: BLE001 解析失败回退
-            pass
+        return _verify_jwt_and_extract_sub(authorization)
 
     raise HTTPException(
         status_code=401,
-        detail="未提供有效身份（缺少 X-User-ID 头或 Bearer token）",
+        detail=(
+            "未提供有效身份：缺少可信的 X-User-ID 头"
+            "（应由 API Gateway 注入）或可验签的 Bearer JWT"
+        ),
     )
 
 
@@ -111,9 +252,7 @@ def assert_thread_owner(
         thread_id: 用于错误消息。
     """
     if thread_meta is None:
-        raise HTTPException(
-            status_code=404, detail=f"thread {thread_id} 无记录"
-        )
+        raise HTTPException(status_code=404, detail=f"thread {thread_id} 无记录")
 
     if not is_auth_enabled():
         return  # 单租户模式不强制 ownership

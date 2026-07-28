@@ -125,6 +125,11 @@ AUTH_ENABLED=true
 CORS_ALLOWED_ORIGINS=https://your-frontend.example.com
 ```
 
+认证启用后，服务只能部署在可信 API Gateway / OIDC Proxy 后方：网关必须剥离
+客户端自行携带的 `X-User-ID`，再注入经认证的身份。若选择让服务校验 Bearer JWT，
+还必须设置 `JWT_VERIFY_IN_PROCESS=true` 以及 `JWT_JWKS_URL`、`JWT_ISSUER`、
+`JWT_AUDIENCE`；未验签的 Bearer JWT 会被拒绝。
+
 ### 3. 启动基础设施
 
 只启动 PostgreSQL：

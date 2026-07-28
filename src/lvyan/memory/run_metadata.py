@@ -10,6 +10,13 @@ from lvyan.config import AGENT_DIR, settings
 _logger = logging.getLogger("lvyan.memory.run_metadata")
 
 
+# H2：固定且稳定的 advisory lock 键（两个 int4）。
+# pg_advisory_xact_lock 接受两个 32-bit 有符号整数作为键；此处选取一对
+# 不太可能与其他业务模块冲突的常量。修改此值会使正在执行的旧实例释放不掉
+# 旧锁，因此一旦发布就不要再改。
+_SCHEMA_ADVISORY_LOCK_KEY: tuple[int, int] = (0x1C7A, 0xA11C)
+
+
 class RunMetadataStore(Protocol):
     def create_run(
         self,
@@ -53,9 +60,7 @@ class RunMetadataStore(Protocol):
         user_id: str,
     ) -> list[dict[str, Any]]: ...
 
-    def claim_hitl_run(
-        self, run_id: str, user_id: str
-    ) -> dict[str, Any] | None: ...
+    def claim_hitl_run(self, run_id: str, user_id: str) -> dict[str, Any] | None: ...
 
 
 class RunMetadataUnavailable(RuntimeError):
@@ -68,7 +73,7 @@ class ThreadOwnershipError(PermissionError):
 
 def _to_dsn(url: str) -> str:
     prefix = "postgresql+psycopg://"
-    return "postgresql://" + url[len(prefix):] if url.startswith(prefix) else url
+    return "postgresql://" + url[len(prefix) :] if url.startswith(prefix) else url
 
 
 class PostgresRunMetadataStore:
@@ -92,6 +97,12 @@ class PostgresRunMetadataStore:
         self._schema_ready = False
 
     def _connect(self):
+        """打开新连接。
+
+        注意：``autocommit=True`` 仅用于 CRUD 路径（每条语句各自提交）。
+        :meth:`_ensure_schema` 在内部临时把连接切到事务模式，确保 advisory
+        lock 与 migration 在同一事务内提交（H2）。
+        """
         import psycopg
         from psycopg.rows import dict_row
 
@@ -103,12 +114,35 @@ class PostgresRunMetadataStore:
         )
 
     def _ensure_schema(self, conn: Any) -> None:
+        """在 ``conn`` 上以事务方式执行 migration。
+
+        H2 修复：
+          1. 获取事务级 advisory lock（``pg_advisory_xact_lock``），保证多个
+             ``PostgresRunMetadataStore`` 实例（或多个进程）同时首次建表时
+             串行化执行 migration，避免触发器 ``DROP TRIGGER + CREATE TRIGGER``
+             之间的竞争。
+          2. advisory lock 与 migration 在同一事务中执行并提交；事务结束
+             自动释放锁。
+          3. migration 抛异常时事务回滚，锁随之释放，``_schema_ready`` 保持
+             ``False``，异常向上传播。
+
+        ``conn`` 默认 ``autocommit=True``（见 :meth:`_connect`），本方法通过
+        ``conn.transaction()`` 显式开启事务块；psycopg 的 ``transaction()``
+        在 autocommit 连接上也能正常工作。
+        """
         if self._schema_ready:
             return
         migration = AGENT_DIR / "migrations" / "001_agent_runs_threads.sql"
         sql = migration.read_text(encoding="utf-8")
-        with conn.cursor() as cur:
-            cur.execute(sql)
+        # transaction() 在 autocommit=True 连接上显式开启事务；异常自动回滚
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(%s, %s)",
+                    _SCHEMA_ADVISORY_LOCK_KEY,
+                )
+                cur.execute(sql)
+        # 事务已提交 → 锁已释放，schema 已就绪
         self._schema_ready = True
 
     def create_run(
@@ -144,9 +178,7 @@ class PostgresRunMetadataStore:
                     )
                     owner_row = cur.fetchone()
                     if owner_row is None:
-                        raise ThreadOwnershipError(
-                            f"thread {thread_id} belongs to another user"
-                        )
+                        raise ThreadOwnershipError(f"thread {thread_id} belongs to another user")
                     cur.execute(
                         """
                         INSERT INTO agent_runs
@@ -176,17 +208,12 @@ class PostgresRunMetadataStore:
                         )
 
     def update_run(self, run_id: str, **values: Any) -> None:
-        clean = {
-            key: value
-            for key, value in values.items()
-            if key in self._ALLOWED_UPDATE_COLUMNS
-        }
+        clean = {key: value for key, value in values.items() if key in self._ALLOWED_UPDATE_COLUMNS}
         if not clean:
             return
-        if "interrupt_payload" in clean and isinstance(
-            clean["interrupt_payload"], (dict, list)
-        ):
+        if "interrupt_payload" in clean and isinstance(clean["interrupt_payload"], (dict, list)):
             from psycopg.types.json import Jsonb
+
             clean["interrupt_payload"] = Jsonb(clean["interrupt_payload"])
         assignments = ", ".join(f"{key} = %s" for key in clean)
         params = [*clean.values(), run_id]
@@ -198,9 +225,7 @@ class PostgresRunMetadataStore:
                     params,
                 )
                 if cur.rowcount != 1:
-                    raise RunMetadataUnavailable(
-                        f"run {run_id} does not exist"
-                    )
+                    raise RunMetadataUnavailable(f"run {run_id} does not exist")
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -250,10 +275,7 @@ class PostgresRunMetadataStore:
                     (user_id,),
                 )
                 rows = cur.fetchall()
-        return [
-            (str(row["thread_id"]), dict(row))
-            for row in rows
-        ]
+        return [(str(row["thread_id"]), dict(row)) for row in rows]
 
     def delete_thread(self, thread_id: str, user_id: str) -> bool:
         """Delete an inactive user-owned thread and cascade-delete its runs."""
@@ -308,9 +330,7 @@ class PostgresRunMetadataStore:
                     (thread_id,),
                 )
                 if cur.rowcount != 1:
-                    raise RunMetadataUnavailable(
-                        f"thread {thread_id} does not exist"
-                    )
+                    raise RunMetadataUnavailable(f"thread {thread_id} does not exist")
 
     def append_message(
         self,
@@ -397,9 +417,7 @@ class PostgresRunMetadataStore:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1 FROM agent_runs LIMIT 1")
                 cur.fetchone()
-                cur.execute(
-                    "UPDATE agent_runs SET status = status WHERE FALSE"
-                )
+                cur.execute("UPDATE agent_runs SET status = status WHERE FALSE")
         return True
 
 

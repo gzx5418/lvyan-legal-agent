@@ -16,8 +16,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from lvyan.memory.run_metadata import (
@@ -182,17 +183,14 @@ class RunManager:
         self._tasks[ctx.run_id] = task
         task.add_done_callback(
             lambda completed, run_id=ctx.run_id: (
-                self._tasks.pop(run_id, None)
-                if self._tasks.get(run_id) is completed
-                else None
+                self._tasks.pop(run_id, None) if self._tasks.get(run_id) is completed else None
             )
         )
 
     def has_active_thread_runs(self, thread_id: str) -> bool:
         """Return whether this process still owns an active run for a thread."""
         return any(
-            ctx.thread_id == thread_id
-            and ctx.status in {"started", "running", "awaiting_hitl"}
+            ctx.thread_id == thread_id and ctx.status in {"started", "running", "awaiting_hitl"}
             for ctx in self._runs.values()
         )
 
@@ -215,12 +213,14 @@ class RunManager:
         run_id = f"run-{uuid.uuid4().hex}"
         resolved_thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"
         visible_query = display_query if display_query is not None else query
-        ctx = self._bind_context(RunContext(
-            run_id,
-            resolved_thread_id,
-            user_id=user_id,
-            law_as_of_date=law_as_of_date,
-        ))
+        ctx = self._bind_context(
+            RunContext(
+                run_id,
+                resolved_thread_id,
+                user_id=user_id,
+                law_as_of_date=law_as_of_date,
+            )
+        )
         ctx.created_at = _time.time()
         self._runs[run_id] = ctx
         if self._metadata_store is not None:
@@ -239,9 +239,7 @@ class RunManager:
                 raise
             except Exception as exc:  # noqa: BLE001
                 self._runs.pop(run_id, None)
-                raise RunMetadataUnavailable(
-                    f"无法持久化 run metadata: {exc}"
-                ) from exc
+                raise RunMetadataUnavailable(f"无法持久化 run metadata: {exc}") from exc
         self._start_task(ctx, self._drive(ctx, query, complexity))
         # 顺手做一次 TTL 清理
         self.gc_runs()
@@ -255,11 +253,13 @@ class RunManager:
         """
         ctx.status = "running"
         if not self._update_metadata(ctx.run_id, status="running"):
-            await ctx.publish({
-                "event": "warning",
-                "code": "run_non_recoverable",
-                "message": "运行状态无法持久化；服务重启后可能无法恢复",
-            })
+            await ctx.publish(
+                {
+                    "event": "warning",
+                    "code": "run_non_recoverable",
+                    "message": "运行状态无法持久化；服务重启后可能无法恢复",
+                }
+            )
         interrupted = False
         try:
             if self._runner is not None:
@@ -272,26 +272,23 @@ class RunManager:
 
             # P0-1 修复：runner 主动进入 awaiting_hitl 时不覆盖状态
             if ctx.status == "awaiting_hitl":
-                if (
-                    not ctx.hitl_persisted
-                    and not ctx.persist_hitl_state(ctx.hitl_interrupt or {})
-                ):
+                if not ctx.hitl_persisted and not ctx.persist_hitl_state(ctx.hitl_interrupt or {}):
                     ctx.status = "failed"
                     ctx.error = "无法持久化 HITL 状态，运行不可安全恢复"
-                    await ctx.publish({
-                        "event": "error",
-                        "code": "hitl_persistence_failed",
-                        "message": ctx.error,
-                    })
+                    await ctx.publish(
+                        {
+                            "event": "error",
+                            "code": "hitl_persistence_failed",
+                            "message": ctx.error,
+                        }
+                    )
                     return
                 interrupted = True
                 return
 
             ctx.final_output = output or ""
             ctx.status = "completed"
-            import time as _time
-            ctx.completed_at = _time.time()
-            from datetime import datetime, timezone
+            ctx.completed_at = time.time()
             run_persisted = self._update_metadata(
                 ctx.run_id,
                 status="completed",
@@ -305,18 +302,18 @@ class RunManager:
                 ctx.final_output,
             )
             if not run_persisted or not thread_marked or not message_persisted:
-                await ctx.publish({
-                    "event": "warning",
-                    "code": "completion_not_persisted",
-                    "message": "结果已生成，但持久化失败，请保存当前内容",
-                })
+                await ctx.publish(
+                    {
+                        "event": "warning",
+                        "code": "completion_not_persisted",
+                        "message": "结果已生成，但持久化失败，请保存当前内容",
+                    }
+                )
             await ctx.publish({"event": "final_output", "output": ctx.final_output})
         except Exception as exc:  # noqa: BLE001 入口层需宽口径捕获
             ctx.status = "failed"
             ctx.error = str(exc)
-            import time as _time
-            ctx.completed_at = _time.time()
-            from datetime import datetime, timezone
+            ctx.completed_at = time.time()
             self._update_metadata(
                 ctx.run_id,
                 status="failed",
@@ -382,9 +379,7 @@ class RunManager:
 
         # P1-7：进程内无 run → 尝试从 checkpoint 恢复（服务重启 / 多实例场景）
         if ctx is None:
-            return await self._resolve_hitl_from_checkpoint(
-                run_id, request, current_user_id
-            )
+            return await self._resolve_hitl_from_checkpoint(run_id, request, current_user_id)
 
         if ctx.status != "awaiting_hitl":
             return ("error", f"run {run_id} 不在等待 HITL 状态（当前: {ctx.status}）")
@@ -474,19 +469,20 @@ class RunManager:
                     continue
 
                 state_values = snapshot.values if hasattr(snapshot, "values") else {}
-                state_run_id = state_values.get("run_id", "") if isinstance(state_values, dict) else ""
+                state_run_id = (
+                    state_values.get("run_id", "") if isinstance(state_values, dict) else ""
+                )
                 if state_run_id != run_id:
                     continue
 
                 # 找到匹配 thread → P0-5 ownership 校验
                 user_id = meta.get("user_id", "anonymous")
                 from .auth import is_auth_enabled
+
                 if is_auth_enabled() and user_id != current_user_id:
                     return ("forbidden", f"run {run_id} 不属于当前用户（owner={user_id}）")
 
-                ctx = self._bind_context(
-                    RunContext(run_id, thread_id, user_id=user_id)
-                )
+                ctx = self._bind_context(RunContext(run_id, thread_id, user_id=user_id))
                 ctx.status = "awaiting_hitl"
                 ctx.hitl_interrupt = interrupt_info
                 ctx.created_at = meta.get("created_at", 0.0)
@@ -522,64 +518,14 @@ class RunManager:
             _logger.exception("HITL checkpoint 恢复失败 run %s", run_id)
             return ("error", f"checkpoint 恢复失败: {exc}")
 
-    async def _resume_drive(
-        self, ctx: RunContext, command: Any, config: dict[str, Any]
-    ) -> None:
+    async def _resume_drive(self, ctx: RunContext, command: Any, config: dict[str, Any]) -> None:
         """恢复中断的图执行并继续流式推送事件。"""
         interrupted = False
         try:
             graph = _get_graph()
             final_output = ctx.final_output or ""
 
-            import time as _time
-            pending_starts: dict[str, float] = {}
-
-            async for part in graph.astream(
-                command, config,
-                stream_mode=["updates", "tasks"],
-                version="v2",
-            ):
-                if not isinstance(part, dict):
-                    continue
-                mode = part.get("type", "")
-                payload = part.get("data", part)
-
-                if mode == "tasks" and isinstance(payload, dict):
-                    task_id = payload.get("id", "")
-                    task_name = payload.get("name", "")
-                    if not task_name:
-                        continue
-                    if "input" in payload:
-                        pending_starts[task_id or task_name] = _time.time()
-                        await ctx.publish({
-                            "event": "node_start",
-                            "node": task_name,
-                            "timestamp": pending_starts[task_id or task_name],
-                        })
-                    elif "result" in payload or "error" in payload:
-                        start_ts = pending_starts.pop(task_id or task_name, None)
-                        now = _time.time()
-                        duration_ms = max(0.0, (now - (start_ts or now)) * 1000.0)
-                        await ctx.publish({
-                            "event": "node_end",
-                            "node": task_name,
-                            "timestamp": now,
-                            "duration_ms": round(duration_ms, 2),
-                        })
-                        error = payload.get("error")
-                        if error is not None:
-                            await ctx.publish({
-                                "event": "node_error",
-                                "node": task_name,
-                                "error": str(error),
-                            })
-
-                elif mode == "updates" and isinstance(payload, dict):
-                    for _node_name, update in payload.items():
-                        if isinstance(update, dict):
-                            out = update.get("final_output")
-                            if out:
-                                final_output = out
+            final_output = await _stream_graph_events(graph, command, config, ctx, final_output)
 
             # 再次检查是否还有中断
             interrupt_info = _check_interrupt(graph, config)
@@ -587,25 +533,29 @@ class RunManager:
                 if not ctx.persist_hitl_state(interrupt_info):
                     ctx.status = "failed"
                     ctx.error = "无法持久化 HITL 状态，运行不可安全恢复"
-                    await ctx.publish({
-                        "event": "error",
-                        "code": "hitl_persistence_failed",
-                        "message": ctx.error,
-                    })
+                    await ctx.publish(
+                        {
+                            "event": "error",
+                            "code": "hitl_persistence_failed",
+                            "message": ctx.error,
+                        }
+                    )
                     return
                 ctx.status = "awaiting_hitl"
                 ctx.hitl_interrupt = interrupt_info
                 interrupted = True
                 await ctx.publish(
-                    {"event": "hitl_required", "run_id": ctx.run_id, "message": interrupt_info.get("message", "")}
+                    {
+                        "event": "hitl_required",
+                        "run_id": ctx.run_id,
+                        "message": interrupt_info.get("message", ""),
+                    }
                 )
                 return
 
             ctx.final_output = final_output or ""
             ctx.status = "completed"
-            import time as _time
-            ctx.completed_at = _time.time()
-            from datetime import datetime, timezone
+            ctx.completed_at = time.time()
             run_persisted = self._update_metadata(
                 ctx.run_id,
                 status="completed",
@@ -619,11 +569,13 @@ class RunManager:
                 ctx.final_output,
             )
             if not run_persisted or not thread_marked or not message_persisted:
-                await ctx.publish({
-                    "event": "warning",
-                    "code": "completion_not_persisted",
-                    "message": "结果已生成，但持久化失败，请保存当前内容",
-                })
+                await ctx.publish(
+                    {
+                        "event": "warning",
+                        "code": "completion_not_persisted",
+                        "message": "结果已生成，但持久化失败，请保存当前内容",
+                    }
+                )
 
             # 标记会话已有输出
             try:
@@ -636,9 +588,7 @@ class RunManager:
         except Exception as exc:  # noqa: BLE001
             ctx.status = "failed"
             ctx.error = str(exc)
-            import time as _time
-            ctx.completed_at = _time.time()
-            from datetime import datetime, timezone
+            ctx.completed_at = time.time()
             self._update_metadata(
                 ctx.run_id,
                 status="failed",
@@ -693,19 +643,113 @@ class RunManager:
 # SSE 格式化
 # ---------------------------------------------------------------------------
 def format_sse_event(event: dict[str, Any]) -> str:
-    """将事件字典格式化为 SSE 数据帧字符串。"""
+    """将事件字典格式化为 SSE 数据帧字符串。
+
+    实现：始终只输出 ``data: <json>\n\n``，事件类型由 JSON 内的 ``event``
+    字段携带。这样前端 ``EventSource.onmessage`` 与既有解析（按 ``data:``
+    行读取并 JSON 解析）都能正常工作；前端用 ``data.event`` 字段做分发。
+    """
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+async def _stream_graph_events(
+    graph: Any,
+    source: Any,
+    config: dict[str, Any],
+    ctx: "RunContext",
+    *,
+    final_output: str = "",
+    collect_state: dict[str, Any] | None = None,
+) -> str:
+    """统一处理 ``graph.astream`` 的事件流，推送 node_start/end/error 事件。
+
+    被 ``default_runner``（source=initial_state）与 ``_resume_drive``
+    （source=Command(resume=...)）共用，消除两处近似 50 行的重复逻辑。
+
+    Args:
+        graph: 共享 LangGraph 编译图。
+        source: astream 的输入（CaseState.model_dump() 或 Command(resume=...)）。
+        config: LangGraph 配置（含 thread_id）。
+        ctx: RunContext，用于 ``publish`` SSE 事件。
+        final_output: 初始的 final_output（用于 HITL 恢复时承接上文）。
+        collect_state: 可选；若提供，会把 updates 写入该 dict（default_runner
+            用于 fallback 输出生成）。
+
+    Returns:
+        流式过程中累积的 ``final_output``。
+    """
+    pending_starts: dict[str, float] = {}
+
+    async for part in graph.astream(
+        source,
+        config,
+        stream_mode=["updates", "tasks"],
+        version="v2",
+    ):
+        if not isinstance(part, dict):
+            continue
+        mode = part.get("type", "")
+        payload = part.get("data", part)
+
+        if mode == "tasks" and isinstance(payload, dict):
+            task_id = payload.get("id", "")
+            task_name = payload.get("name", "")
+            if not task_name:
+                continue
+            if "input" in payload:
+                pending_starts[task_id or task_name] = time.time()
+                await ctx.publish(
+                    {
+                        "event": "node_start",
+                        "node": task_name,
+                        "timestamp": pending_starts[task_id or task_name],
+                    }
+                )
+            elif "result" in payload or "error" in payload:
+                start_ts = pending_starts.pop(task_id or task_name, None)
+                now = time.time()
+                duration_ms = max(0.0, (now - (start_ts or now)) * 1000.0)
+                await ctx.publish(
+                    {
+                        "event": "node_end",
+                        "node": task_name,
+                        "timestamp": now,
+                        "duration_ms": round(duration_ms, 2),
+                    }
+                )
+                error = payload.get("error")
+                if error is not None:
+                    await ctx.publish(
+                        {
+                            "event": "node_error",
+                            "node": task_name,
+                            "error": str(error),
+                        }
+                    )
+
+        elif mode == "updates" and isinstance(payload, dict):
+            for _node_name, update in payload.items():
+                if isinstance(update, dict):
+                    if collect_state is not None:
+                        collect_state.update(update)
+                    out = update.get("final_output")
+                    if out:
+                        final_output = out
+
+    return final_output
 
 
 def _get_graph() -> Any:
     """获取共享图实例。"""
     from lvyan.runtime import get_shared_graph
+
     return get_shared_graph()
 
 
 def _get_case_memory() -> Any:
     """获取共享 CaseMemory 实例。"""
     from lvyan.runtime import get_case_memory
+
     return get_case_memory()
 
 
@@ -728,14 +772,19 @@ def _check_interrupt(graph: Any, config: dict[str, Any]) -> dict[str, Any] | Non
                 for task in task_values:
                     interrupts = getattr(task, "interrupts", [])
                     if interrupts:
-                        return interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+                        return (
+                            interrupts[0].value
+                            if hasattr(interrupts[0], "value")
+                            else interrupts[0]
+                        )
             # 回退：返回通用中断信息
             return {
                 "message": "Agent 执行中遇到需要人工确认的操作",
                 "pending_nodes": list(snapshot.next),
             }
         return None
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug("check_interrupt 失败，按无中断处理: %s", exc)
         return None
 
 
@@ -788,9 +837,7 @@ def _build_fallback_output(state: dict[str, Any], query: str) -> str:
 # ---------------------------------------------------------------------------
 # 默认 runner：驱动共享 LangGraph 图并流式推送节点事件
 # ---------------------------------------------------------------------------
-async def default_runner(
-    query: str, thread_id: str, complexity: str, ctx: RunContext
-) -> str:
+async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunContext) -> str:
     """默认 runner：使用共享图实例运行 LangGraph，流式推送节点事件。
 
     PR1 改进：
@@ -835,66 +882,19 @@ async def default_runner(
         # v2 格式统一返回 {"type": ..., "data": ...} 字典；
         # v1 多 stream mode 返回 (mode, data) 元组，会被 isinstance(dict) 跳过。
         # "tasks" 流提供节点任务的开始/完成/错误事件，比 "debug" 更语义化。
-        import time as _time
-
-        pending_starts: dict[str, float] = {}
-
         try:
-            async for part in graph.astream(
-                initial.model_dump(), config,
-                stream_mode=["updates", "tasks"],
-                version="v2",
-            ):
-                if not isinstance(part, dict):
-                    continue
-                mode = part.get("type", "")
-                payload = part.get("data", part)
-
-                if mode == "tasks" and isinstance(payload, dict):
-                    task_id = payload.get("id", "")
-                    task_name = payload.get("name", "")
-                    if not task_name:
-                        continue
-                    if "input" in payload:
-                        pending_starts[task_id or task_name] = _time.time()
-                        await ctx.publish({
-                            "event": "node_start",
-                            "node": task_name,
-                            "timestamp": pending_starts[task_id or task_name],
-                        })
-                    elif "result" in payload or "error" in payload:
-                        start_ts = pending_starts.pop(task_id or task_name, None)
-                        now = _time.time()
-                        duration_ms = max(0.0, (now - (start_ts or now)) * 1000.0)
-                        await ctx.publish({
-                            "event": "node_end",
-                            "node": task_name,
-                            "timestamp": now,
-                            "duration_ms": round(duration_ms, 2),
-                        })
-                        error = payload.get("error")
-                        if error is not None:
-                            await ctx.publish({
-                                "event": "node_error",
-                                "node": task_name,
-                                "error": str(error),
-                            })
-
-                elif mode == "updates" and isinstance(payload, dict):
-                    for _node_name, update in payload.items():
-                        if isinstance(update, dict):
-                            last_state.update(update)
-                            out = update.get("final_output")
-                            if out:
-                                final_output = out
-
+            final_output = await _stream_graph_events(
+                graph,
+                initial.model_dump(),
+                config,
+                ctx,
+                final_output=final_output,
+                collect_state=last_state,
+            )
         except TypeError as exc:  # v2 参数不兼容 → 回退 v1 updates
             if "version" not in str(exc):
                 raise
-            pending_starts = {}
-            async for chunk in graph.astream(
-                initial.model_dump(), config, stream_mode="updates"
-            ):
+            async for chunk in graph.astream(initial.model_dump(), config, stream_mode="updates"):
                 if not isinstance(chunk, dict):
                     continue
                 for _node_name, update in chunk.items():
@@ -910,11 +910,13 @@ async def default_runner(
             if not ctx.persist_hitl_state(interrupt_info):
                 ctx.status = "failed"
                 ctx.error = "无法持久化 HITL 状态，运行不可安全恢复"
-                await ctx.publish({
-                    "event": "error",
-                    "code": "hitl_persistence_failed",
-                    "message": ctx.error,
-                })
+                await ctx.publish(
+                    {
+                        "event": "error",
+                        "code": "hitl_persistence_failed",
+                        "message": ctx.error,
+                    }
+                )
                 return ""
             ctx.status = "awaiting_hitl"
             ctx.hitl_interrupt = interrupt_info

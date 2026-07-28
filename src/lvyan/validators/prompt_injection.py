@@ -29,6 +29,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 __all__ = [
+    "InjectionMatch",
     "InjectionDetectionResult",
     "SecurityEvalReport",
     "detect_prompt_injection",
@@ -54,6 +55,18 @@ InjectionPatternName = Literal[
 ]
 
 
+class InjectionMatch(BaseModel):
+    """单条命中详情：模式名 + 命中的原文片段 + 起止位置。
+
+    M6：供评测与误报分析用，便于在统计中观察「为什么被标记」。
+    """
+
+    pattern: str
+    snippet: str = Field(default="", description="命中片段（最多 80 字符）")
+    start: int = Field(default=0, description="命中片段在原文中的起始字符偏移")
+    end: int = Field(default=0, description="命中片段在原文中的结束字符偏移")
+
+
 class InjectionDetectionResult(BaseModel):
     """提示注入检测结果。
 
@@ -64,6 +77,8 @@ class InjectionDetectionResult(BaseModel):
         sanitized_text: 净化后文本；当前策略为「仅标记不修改」，故恒等于
             ``original_text``。保留该字段以备未来策略升级为主动净化。
         warning: 检测到注入时的警告说明；未检测到时为 ``None``。
+        matches: M6 新增。每条命中的详情（模式名 + 片段 + 位置），便于
+            误报统计与可观测性。同一模式多次命中会生成多条记录。
     """
 
     detected: bool = False
@@ -71,6 +86,7 @@ class InjectionDetectionResult(BaseModel):
     original_text: str = ""
     sanitized_text: str = ""
     warning: str | None = None
+    matches: list[InjectionMatch] = Field(default_factory=list)
 
 
 class SecurityEvalReport(BaseModel):
@@ -112,8 +128,7 @@ _INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "ignore_instructions_en",
         re.compile(
-            r"ignore\s+(?:all\s+|the\s+)?(?:previous|prior|above|earlier)\s+"
-            r"instructions",
+            r"ignore\s+(?:all\s+|the\s+)?(?:previous|prior|above|earlier)\s+" r"instructions",
             re.IGNORECASE,
         ),
     ),
@@ -121,8 +136,7 @@ _INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "disregard_instructions_en",
         re.compile(
-            r"disregard\s+(?:all\s+|the\s+)?(?:prior|previous|above|earlier)\s+"
-            r"instructions",
+            r"disregard\s+(?:all\s+|the\s+)?(?:prior|previous|above|earlier)\s+" r"instructions",
             re.IGNORECASE,
         ),
     ),
@@ -217,13 +231,28 @@ def detect_prompt_injection(text: str) -> InjectionDetectionResult:
         )
 
     matched: list[str] = []
+    matches: list[InjectionMatch] = []
     seen: set[str] = set()
     for name, pattern in _INJECTION_PATTERNS:
-        if name in seen:
-            continue
-        if pattern.search(text):
-            matched.append(name)
-            seen.add(name)
+        for m in pattern.finditer(text):
+            if name not in seen:
+                matched.append(name)
+                seen.add(name)
+            # 截取命中片段上下文（前后各 20 字符），最多 80 字符
+            start, end = m.start(), m.end()
+            ctx_start = max(0, start - 20)
+            ctx_end = min(len(text), end + 20)
+            snippet = text[ctx_start:ctx_end].replace("\n", " ")
+            if len(snippet) > 80:
+                snippet = snippet[:80]
+            matches.append(
+                InjectionMatch(
+                    pattern=name,
+                    snippet=snippet,
+                    start=start,
+                    end=end,
+                )
+            )
 
     if not matched:
         return InjectionDetectionResult(
@@ -232,6 +261,7 @@ def detect_prompt_injection(text: str) -> InjectionDetectionResult:
             original_text=text,
             sanitized_text=text,
             warning=None,
+            matches=[],
         )
 
     warning = (
@@ -244,4 +274,5 @@ def detect_prompt_injection(text: str) -> InjectionDetectionResult:
         original_text=text,
         sanitized_text=text,  # 仅标记不修改用户原文
         warning=warning,
+        matches=matches,
     )

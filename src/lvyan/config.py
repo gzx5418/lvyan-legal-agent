@@ -52,10 +52,10 @@ def _load_dotenv() -> None:
 # 路径常量（模块级，便于直接 import）
 # ---------------------------------------------------------------------------
 # config.py 位于 AGENT/src/lvyan/config.py
-_PKG_DIR = Path(__file__).resolve().parent            # AGENT/src/lvyan
-_SRC_DIR = _PKG_DIR.parent                            # AGENT/src
-AGENT_DIR = _SRC_DIR.parent                           # AGENT/
-REPO_ROOT = AGENT_DIR.parent                          # 法律/（仓库根）
+_PKG_DIR = Path(__file__).resolve().parent  # AGENT/src/lvyan
+_SRC_DIR = _PKG_DIR.parent  # AGENT/src
+AGENT_DIR = _SRC_DIR.parent  # AGENT/
+REPO_ROOT = AGENT_DIR.parent  # 法律/（仓库根）
 
 
 def _resolve_knowledge_dir() -> Path:
@@ -105,7 +105,38 @@ class Settings(BaseModel):
 
     # --- 模型网关（统一 LLM/Embedding/Reranker 入口） ---
     model_gateway_url: str = Field(default="", description="为空时由 ModelGateway 自行决定降级策略")
-    model_gateway_api_key: str = Field(default="", description="模型网关 API Key，用于 Authorization: Bearer 头")
+    model_gateway_api_key: str = Field(
+        default="", description="模型网关 API Key，用于 Authorization: Bearer 头"
+    )
+
+    # --- M3：API 认证（X-User-ID 网关模式 vs 进程内 JWT 验签） ---
+    auth_enabled: bool = Field(
+        default=False,
+        description="是否启用认证；false 时所有 user_id 都返回 anonymous（单租户本地开发）",
+    )
+    jwt_verify_in_process: bool = Field(
+        default=False,
+        description=(
+            "是否在本进程内验证 Bearer JWT 的签名 / exp / nbf / iss / aud。"
+            "false 时禁止信任 Bearer JWT（必须由可信网关注入 X-User-ID）。"
+        ),
+    )
+    jwt_issuer: str = Field(
+        default="",
+        description="JWT 预期 iss；jwt_verify_in_process=true 时必填",
+    )
+    jwt_audience: str = Field(
+        default="",
+        description="JWT 预期 aud；jwt_verify_in_process=true 时必填",
+    )
+    jwt_jwks_url: str = Field(
+        default="",
+        description="JWKS endpoint，用于获取 RS256 等非对称签名公钥；jwt_verify_in_process=true 时必填",
+    )
+    jwt_algorithms: str = Field(
+        default="RS256",
+        description="允许的签名算法，逗号分隔；默认 RS256。禁止允许 none。",
+    )
 
     # --- 模型选择 ---
     chat_model: str = Field(default="Qwen/Qwen2.5-7B-Instruct", description="对话/推理模型名称")
@@ -128,7 +159,9 @@ class Settings(BaseModel):
     # --- 运行时策略守卫 ---
     max_retrieval_iterations: int = Field(default=3, description="Citation Verifier 最大重检索次数")
     max_cost_budget_usd: float = Field(default=2.0, description="单次 run 最大成本预算（美元）")
-    hitl_enabled: bool = Field(default=True, description="是否启用 Human-in-the-loop 不可逆操作审批")
+    hitl_enabled: bool = Field(
+        default=True, description="是否启用 Human-in-the-loop 不可逆操作审批"
+    )
 
     # --- Legal Reasoner 迭代守卫 ---
     max_legal_reasoner_iterations: int = Field(
@@ -175,6 +208,12 @@ def _build_settings() -> Settings:
         object_storage_endpoint=_get("OBJECT_STORAGE_ENDPOINT", "localhost:9000"),
         model_gateway_url=_get("MODEL_GATEWAY_URL", ""),
         model_gateway_api_key=_get("MODEL_GATEWAY_API_KEY", ""),
+        auth_enabled=_get_bool("AUTH_ENABLED", False),
+        jwt_verify_in_process=_get_bool("JWT_VERIFY_IN_PROCESS", False),
+        jwt_issuer=_get("JWT_ISSUER", ""),
+        jwt_audience=_get("JWT_AUDIENCE", ""),
+        jwt_jwks_url=_get("JWT_JWKS_URL", ""),
+        jwt_algorithms=_get("JWT_ALGORITHMS", "RS256"),
         chat_model=_get("CHAT_MODEL", "Qwen/Qwen2.5-7B-Instruct"),
         embedding_model=_get("EMBEDDING_MODEL", "BAAI/bge-m3"),
         reranker_model=_get("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"),

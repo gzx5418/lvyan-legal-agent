@@ -29,8 +29,11 @@ PR1 改进
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -82,19 +85,29 @@ _ALLOWED_TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".log"}
 _ALLOWED_OFFICE_EXTS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx"}
 _ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
 _ALLOWED_ALL_EXTS = _ALLOWED_TEXT_EXTS | _ALLOWED_OFFICE_EXTS | _ALLOWED_IMAGE_EXTS
+_UPLOAD_FILE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 # 扩展名 → 期望 MIME 前缀（用于一致性校验，避免扩展名伪装）
 _EXT_TO_MIME_PREFIX: dict[str, str] = {
-    ".txt": "text/", ".md": "text/", ".csv": "text/", ".json": "application/json",
-    ".xml": "application/xml", ".html": "text/html", ".log": "text/",
+    ".txt": "text/",
+    ".md": "text/",
+    ".csv": "text/",
+    ".json": "application/json",
+    ".xml": "application/xml",
+    ".html": "text/html",
+    ".log": "text/",
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".doc": "application/msword",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".xls": "application/vnd.ms-excel",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-    ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
     ".tiff": "image/tiff",
 }
 
@@ -150,6 +163,7 @@ def _check_database() -> str:
     """
     try:
         import psycopg  # noqa: F401
+
         return "ok"
     except Exception:  # noqa: BLE001
         return "unavailable"
@@ -164,7 +178,7 @@ def _check_database_ready() -> str:
         # 把 SQLAlchemy 风格连接串转为 psycopg 原生 DSN
         dsn = _settings.database_url
         if dsn.startswith("postgresql+psycopg://"):
-            dsn = "postgresql://" + dsn[len("postgresql+psycopg://"):]
+            dsn = "postgresql://" + dsn[len("postgresql+psycopg://") :]
         with psycopg.connect(dsn, connect_timeout=2) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
@@ -177,7 +191,9 @@ def _check_database_ready() -> str:
 def _check_retrieval() -> str:
     """检索服务可用性：精编知识库目录存在视为可用。"""
     try:
-        return "ok" if is_official_db_available() or settings.knowledge_dir.is_dir() else "unavailable"
+        return (
+            "ok" if is_official_db_available() or settings.knowledge_dir.is_dir() else "unavailable"
+        )
     except Exception:  # noqa: BLE001
         return "unavailable"
 
@@ -230,9 +246,7 @@ def _get_cors_origins() -> list[str]:
         return ["http://localhost:8000", "http://127.0.0.1:8000"]
     origins = [o.strip() for o in raw.split(",") if o.strip()]
     if "*" in origins:
-        raise ValueError(
-            "CORS_ALLOWED_ORIGINS 不能包含 '*'：启用凭据时必须配置明确来源"
-        )
+        raise ValueError("CORS_ALLOWED_ORIGINS 不能包含 '*'：启用凭据时必须配置明确来源")
     return origins
 
 
@@ -250,6 +264,82 @@ def _read_text_preview(file_path: Path, max_chars: int = 500) -> str:
     return ""
 
 
+def _atomic_write_bytes(target: Path, data: bytes) -> None:
+    """原子写入字节文件：先写临时文件再 ``os.replace`` 覆盖目标。"""
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, target)
+
+
+def _atomic_write_text(target: Path, data: str, encoding: str = "utf-8") -> None:
+    """原子写入文本文件。"""
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(data, encoding=encoding)
+    os.replace(tmp, target)
+
+
+def _resolve_upload_path(path_str: str) -> Path:
+    """把 ``path_str`` 解析为绝对路径，并校验仍在 ``_UPLOAD_DIR`` 内。
+
+    M5：防止 ``markdown_path`` / ``raw_path`` 被构造为 ``../../etc/passwd`` 等
+    路径穿越。任一路径逃逸出 ``_UPLOAD_DIR`` 抛 :class:`HTTPException(404)`。
+    """
+    candidate = (Path(path_str)).resolve()
+    try:
+        candidate.relative_to(_UPLOAD_DIR.resolve())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"附件路径非法（逃逸出上传目录）：{path_str}",
+        ) from exc
+    return candidate
+
+
+def _metadata_path_for_file_id(file_id: str) -> Path:
+    """返回附件元数据路径，并拒绝把 file_id 解释为路径。
+
+    ``file_id`` 来自 API 请求体；即使后缀固定为 ``.json``，也不能允许
+    ``../``、盘符或路径分隔符参与路径拼接。当前上传生成 16 位 hex，放宽
+    为安全的字母数字、下划线和连字符以兼容旧数据。
+    """
+    if not _UPLOAD_FILE_ID_RE.fullmatch(file_id):
+        raise HTTPException(status_code=422, detail="附件 file_id 格式非法")
+    return _resolve_upload_path(str(_UPLOAD_DIR / f"{file_id}.json"))
+
+
+def _load_attachment_markdown(meta: dict[str, Any], fid: str) -> str:
+    """从附件元数据读取 Markdown 正文，按以下顺序：
+
+    1. 优先读取 ``markdown_path`` 指向的 ``.md`` 文件（M5 新格式）。
+    2. 路径不存在或读取失败 → 回退到旧 JSON 中的 ``markdown`` 字段（M5 兼容）。
+    3. 最后回退 ``text_preview``。
+
+    Markdown 文件被声明却不存在时，按场景返回 404；不能静默忽略。
+    """
+    markdown_path_str = meta.get("markdown_path")
+    if markdown_path_str:
+        md_path = _resolve_upload_path(markdown_path_str)
+        if not md_path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail=f"附件 {fid} 的 Markdown 文件不存在：{md_path.name}",
+            )
+        try:
+            return md_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"附件 {fid} 的 Markdown 文件读取失败：{exc}",
+            ) from exc
+
+    # 兼容旧 JSON：markdown 字段直接存了全文
+    legacy_md = meta.get("markdown")
+    if legacy_md:
+        return str(legacy_md)
+
+    return meta.get("text_preview", "") or ""
+
+
 def create_app(
     runner: Any = None,
     memory: CaseMemory | None = None,
@@ -265,7 +355,7 @@ def create_app(
     if metadata_store is None and runner is None and memory is None:
         try:
             metadata_store = PostgresRunMetadataStore()
-            # 做一次轻量探测，确认数据库可达
+            # 做一次轻量探测，确认数据库可达。
             metadata_store.healthcheck()
         except Exception:
             _logger.warning(
@@ -294,9 +384,7 @@ def create_app(
         ret = _check_retrieval()
         gw = _check_model_gateway()
         overall = "ok" if (db == "ok" and ret == "ok" and gw == "ok") else "degraded"
-        return HealthResponse(
-            status=overall, database=db, retrieval=ret, model_gateway=gw
-        )
+        return HealthResponse(status=overall, database=db, retrieval=ret, model_gateway=gw)
 
     # P2-19：分离 livez（进程活着）与 readyz（依赖就绪）
     @app.get("/livez")
@@ -350,7 +438,7 @@ def create_app(
         if req.attachments:
             attachment_parts: list[str] = []
             for fid in req.attachments:
-                meta_path = _UPLOAD_DIR / f"{fid}.json"
+                meta_path = _metadata_path_for_file_id(fid)
                 if meta_path.is_file():
                     try:
                         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -362,12 +450,14 @@ def create_app(
                                     status_code=403,
                                     detail=f"附件 {fid} 不属于当前用户",
                                 )
-                        md = meta.get("markdown", "") or meta.get("text_preview", "")
+                        # M5：读取 Markdown 正文（优先 .md 文件，回退旧 markdown，再回退 preview）
+                        md = _load_attachment_markdown(meta, fid)
                         if md:
                             # P2-15：检测文档中的提示注入，标记为不可信
                             from lvyan.validators.prompt_injection import (
                                 detect_prompt_injection,
                             )
+
                             injection = detect_prompt_injection(md)
                             doc_id = meta.get("filename", fid)
                             warning_attr = (
@@ -403,10 +493,7 @@ def create_app(
                         status_code=503,
                         detail="run metadata 暂时不可用",
                     ) from exc
-                if (
-                    durable_thread is not None
-                    and str(durable_thread.get("user_id", "")) != user_id
-                ):
+                if durable_thread is not None and str(durable_thread.get("user_id", "")) != user_id:
                     raise HTTPException(
                         status_code=403,
                         detail=f"thread {req.thread_id} 不属于当前用户",
@@ -460,9 +547,7 @@ def create_app(
                 title=(req.query[:40] if req.query else ctx.thread_id),
                 complexity=complexity,
             )
-        return AgentRunResponse(
-            run_id=ctx.run_id, thread_id=ctx.thread_id, status="started"
-        )
+        return AgentRunResponse(run_id=ctx.run_id, thread_id=ctx.thread_id, status="started")
 
     @app.get("/api/agent/stream/{run_id}")
     async def stream(
@@ -482,10 +567,7 @@ def create_app(
                 ) from exc
             if durable_run is None:
                 raise HTTPException(status_code=404, detail=f"run {run_id} 不存在")
-            if (
-                is_auth_enabled()
-                and str(durable_run.get("user_id", "")) != user_id
-            ):
+            if is_auth_enabled() and str(durable_run.get("user_id", "")) != user_id:
                 raise HTTPException(
                     status_code=403,
                     detail=f"run {run_id} 不属于当前用户",
@@ -495,27 +577,31 @@ def create_app(
             if status not in ("completed", "failed", "cancelled"):
                 raise HTTPException(
                     status_code=409,
-                    detail=(
-                        "该 run 正在另一实例执行；流式事件需要 session affinity"
-                    ),
+                    detail=("该 run 正在另一实例执行；流式事件需要 session affinity"),
                 )
 
             async def durable_event_generator():
                 if status == "completed":
-                    yield format_sse_event({
-                        "event": "final_output",
-                        "output": durable_run.get("final_output") or "",
-                    })
+                    yield format_sse_event(
+                        {
+                            "event": "final_output",
+                            "output": durable_run.get("final_output") or "",
+                        }
+                    )
                 elif status == "failed":
-                    yield format_sse_event({
-                        "event": "error",
-                        "message": durable_run.get("error") or "Agent run failed",
-                    })
+                    yield format_sse_event(
+                        {
+                            "event": "error",
+                            "message": durable_run.get("error") or "Agent run failed",
+                        }
+                    )
                 else:
-                    yield format_sse_event({
-                        "event": "cancelled",
-                        "message": durable_run.get("error") or "已停止生成",
-                    })
+                    yield format_sse_event(
+                        {
+                            "event": "cancelled",
+                            "message": durable_run.get("error") or "已停止生成",
+                        }
+                    )
 
             return StreamingResponse(
                 durable_event_generator(),
@@ -525,15 +611,18 @@ def create_app(
         assert_run_owner(ctx, user_id, run_id)
 
         async def event_generator():
-            while True:
-                event = await ctx.queue.get()
-                if event is None:  # 哨兵：运行结束
-                    break
-                yield format_sse_event(event)
+            try:
+                while True:
+                    event = await ctx.queue.get()
+                    if event is None:  # 哨兵：运行结束
+                        break
+                    yield format_sse_event(event)
+            except asyncio.CancelledError:
+                # 客户端断开连接；记录日志，由 GC 收尾 RunContext
+                _logger.info("SSE 客户端断开 run %s", run_id)
+                raise
 
-        return StreamingResponse(
-            event_generator(), media_type="text/event-stream"
-        )
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @app.get("/api/agent/state/{thread_id}")
     async def state(
@@ -657,34 +746,34 @@ def create_app(
                     detail="thread metadata 暂时不可用",
                 ) from exc
         else:
-            # MemorySaver / 文件回退模式下，索引可能比 checkpoint 存活得更久。
-            # 不返回无法被 /state 读取的幽灵 thread，避免前端历史点击后 404。
+            # 元数据索引可能在 checkpointer 被清理或故障恢复后遗留条目。
+            # 只向前端暴露仍可恢复的会话，避免点击历史记录后看到空白页。
             threads = []
-            try:
-                for tid, meta in mem.list_threads():
+            for tid, meta in mem.list_threads():
+                try:
                     if mem.load_strict(tid) is not None:
                         threads.append((tid, meta))
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(
-                    status_code=503,
-                    detail="checkpoint 暂时不可用",
-                ) from exc
+                except Exception as exc:  # noqa: BLE001
+                    raise HTTPException(
+                        status_code=503,
+                        detail="checkpoint 读取失败，暂时无法列出会话",
+                    ) from exc
         summaries: list[ThreadSummary] = []
         for tid, meta in threads:
             # ownership 过滤
             if is_auth_enabled() and meta.get("user_id", ANONYMOUS_USER) != user_id:
                 continue
             title = (meta.get("title") or tid)[:40]
-            summaries.append(ThreadSummary(
-                thread_id=tid,
-                title=title,
-                complexity=meta.get("complexity") or "light",
-                created_at=_as_unix_timestamp(meta.get("created_at")),
-                updated_at=_as_unix_timestamp(
-                    meta.get("updated_at") or meta.get("created_at")
-                ),
-                has_output=bool(meta.get("has_output")),
-            ))
+            summaries.append(
+                ThreadSummary(
+                    thread_id=tid,
+                    title=title,
+                    complexity=meta.get("complexity") or "light",
+                    created_at=_as_unix_timestamp(meta.get("created_at")),
+                    updated_at=_as_unix_timestamp(meta.get("updated_at") or meta.get("created_at")),
+                    has_output=bool(meta.get("has_output")),
+                )
+            )
         return ThreadListResponse(threads=summaries)
 
     @app.post("/api/upload", response_model=UploadResponse)
@@ -750,44 +839,72 @@ def create_app(
 
         file_id = uuid.uuid4().hex[:16]
 
-        # 存原始文件
+        # M5：原子写入原始文件、Markdown、JSON 元数据。
+        # 任一步失败均清理本次产生的残留文件，避免半成品状态。
         raw_path = _UPLOAD_DIR / f"{file_id}{ext}"
-        raw_path.write_bytes(content)
-
-        # 调用 file_converter 转换为 Markdown
-        convert_result = convert_to_markdown(raw_path)
-        markdown_text = convert_result["markdown"]
-        category = convert_result["category"]
-        converter = convert_result["converter"]
-        char_count = convert_result["char_count"]
-
-        # 文本预览（前 500 字）
-        text_preview = markdown_text[:500] if markdown_text else ""
-
-        # 存元数据 JSON（包含 markdown 全文供 /api/agent/run 引用）
-        meta = {
-            "file_id": file_id,
-            "filename": filename,
-            "size": len(content),
-            "content_type": content_type,
-            "ext": ext,
-            "category": category,
-            "converter": converter,
-            "raw_path": str(raw_path),
-            "text_preview": text_preview,
-            "markdown": markdown_text,
-            "char_count": char_count,
-            "uploaded_at": time.time(),
-            "user_id": user_id,
-        }
+        markdown_path = _UPLOAD_DIR / f"{file_id}.md"
         meta_path = _UPLOAD_DIR / f"{file_id}.json"
-        meta_path.write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        created: list[Path] = []
+
+        try:
+            # 1) 原始文件（直接写二进制）
+            _atomic_write_bytes(raw_path, content)
+            created.append(raw_path)
+
+            # 2) 调用 file_converter 转换为 Markdown（CPU/IO 密集，放线程池避免阻塞事件循环）
+            convert_result = await asyncio.to_thread(convert_to_markdown, raw_path)
+            markdown_text = convert_result["markdown"]
+            category = convert_result["category"]
+            converter = convert_result["converter"]
+            char_count = convert_result["char_count"]
+
+            # 文本预览（前 500 字）
+            text_preview = markdown_text[:500] if markdown_text else ""
+
+            # 3) Markdown 独立文件（原子写入）
+            _atomic_write_text(markdown_path, markdown_text, encoding="utf-8")
+            created.append(markdown_path)
+
+            # 4) JSON 元数据（只存路径与预览，不再嵌入全文）
+            meta = {
+                "file_id": file_id,
+                "filename": filename,
+                "size": len(content),
+                "content_type": content_type,
+                "ext": ext,
+                "category": category,
+                "converter": converter,
+                "raw_path": str(raw_path),
+                # M5：Markdown 全文存独立 .md 文件，JSON 仅记录路径
+                "markdown_path": str(markdown_path),
+                "text_preview": text_preview,
+                "char_count": char_count,
+                "uploaded_at": time.time(),
+                "user_id": user_id,
+            }
+            _atomic_write_text(
+                meta_path,
+                json.dumps(meta, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            created.append(meta_path)
+        except Exception:
+            # 清理本次产生的残留文件
+            for path in created:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
 
         _logger.info(
             "文件上传: %s (%d bytes, %s via %s, %d chars) -> file_id=%s",
-            filename, len(content), category, converter, char_count, file_id,
+            filename,
+            len(content),
+            category,
+            converter,
+            char_count,
+            file_id,
         )
 
         return UploadResponse(
@@ -812,9 +929,7 @@ def create_app(
         if ctx is not None:
             # P2-13：HITL 决策必须由发起 run 的同一用户做出
             assert_run_owner(ctx, user_id, run_id)
-        status, message = await manager.resolve_hitl(
-            run_id, req, current_user_id=user_id
-        )
+        status, message = await manager.resolve_hitl(run_id, req, current_user_id=user_id)
         if status == "not_found":
             raise HTTPException(status_code=404, detail=message)
         if status == "forbidden":

@@ -19,6 +19,7 @@ dependencies = [
     "psycopg[binary]",                 # PostgreSQL 驱动
     "opensearch-py",                   # OpenSearch 检索
     "httpx",                           # HTTP 客户端，用于模型网关调用
+    "PyJWT[crypto]>=2.8",              # AUTH_ENABLED + 进程内 JWT 签名验证
     "python-docx",                     # DOCX 导出，复用现有能力
     "pyyaml",                          # 解析法规 front matter
     "langfuse",                        # 可观测性

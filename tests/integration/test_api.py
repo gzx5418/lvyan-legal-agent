@@ -48,7 +48,11 @@ class FakeCaseMemory:
         """测试专用：直接注入状态（生产 CaseMemory 由 checkpointer 自动保存）。"""
         self._store[thread_id] = state
         if thread_id not in self._index:
-            self.register(thread_id, title=(state.user_goal or "")[:40], complexity=state.complexity or "light")
+            self.register(
+                thread_id,
+                title=(state.user_goal or "")[:40],
+                complexity=state.complexity or "light",
+            )
         if state.final_output:
             self.mark_output(thread_id)
 
@@ -89,7 +93,7 @@ def _parse_sse(body: str) -> list[dict]:
         chunk = chunk.strip()
         if not chunk.startswith("data:"):
             continue
-        payload = chunk[len("data:"):].strip()
+        payload = chunk[len("data:") :].strip()
         if payload:
             events.append(json.loads(payload))
     return events
@@ -265,20 +269,26 @@ def test_state_unknown_thread_returns_404():
 def test_list_threads_returns_summaries_from_index():
     """list_threads 只返回同时拥有元数据和可恢复 checkpoint 的会话。"""
     mem = FakeCaseMemory()
-    mem.save("t1", CaseState(
-        run_id="run-t1",
-        thread_id="t1",
-        current_date=date(2026, 7, 24),
-        user_goal="押金纠纷咨询",
-        complexity="light",
-    ))
-    mem.save("t2", CaseState(
-        run_id="run-t2",
-        thread_id="t2",
-        current_date=date(2026, 7, 24),
-        user_goal="劳动仲裁",
-        complexity="deep",
-    ))
+    mem.save(
+        "t1",
+        CaseState(
+            run_id="run-t1",
+            thread_id="t1",
+            current_date=date(2026, 7, 24),
+            user_goal="押金纠纷咨询",
+            complexity="light",
+        ),
+    )
+    mem.save(
+        "t2",
+        CaseState(
+            run_id="run-t2",
+            thread_id="t2",
+            current_date=date(2026, 7, 24),
+            user_goal="劳动仲裁",
+            complexity="deep",
+        ),
+    )
     mem.mark_output("t1")
     mem.register("stale-thread", title="已丢失的旧会话", complexity="light")
 
@@ -350,9 +360,7 @@ def test_hitl_unknown_run_returns_404():
     """run_id 不存在时 HITL 端点返回 404（无需真实 interrupt）。"""
     app = create_app(runner=mock_runner)
     with TestClient(app) as client:
-        resp = client.post(
-            "/api/agent/hitl/run-nope", json={"action": "approve"}
-        )
+        resp = client.post("/api/agent/hitl/run-nope", json={"action": "approve"})
     assert resp.status_code == 404
 
 
@@ -360,7 +368,5 @@ def test_hitl_invalid_action_returns_422():
     """非法 action 触发 Pydantic 校验 422（无需真实 interrupt）。"""
     app = create_app(runner=mock_runner)
     with TestClient(app) as client:
-        resp = client.post(
-            "/api/agent/hitl/run-fake", json={"action": "maybe"}
-        )
+        resp = client.post("/api/agent/hitl/run-fake", json={"action": "maybe"})
     assert resp.status_code == 422
