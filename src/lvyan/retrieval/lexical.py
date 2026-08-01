@@ -407,11 +407,53 @@ def _bm25_tokenize(text: str) -> list[str]:
     return domain_tokens + bigrams
 
 
-def _compute_chunk_signature(chunk_ids: list[str]) -> str:
-    """根据 chunk_id 列表计算签名，用于 BM25 索引缓存失效判定。"""
+def _chunk_field(chunk: Any, name: str, default: str = "") -> str:
+    """统一从 dict / 对象读取字段为字符串。"""
+    if isinstance(chunk, dict):
+        v = chunk.get(name, default)
+    else:
+        v = getattr(chunk, name, default)
+    if v is None:
+        return ""
+    # 日期等非字符串统一 stringify
+    return str(v)
+
+
+def _compute_chunk_signature(chunks_or_ids: list[Any]) -> str:
+    """根据 chunk 列表计算签名，用于 BM25 索引缓存失效判定。
+
+    P1-7：签名必须覆盖影响检索正确性的字段，而不仅是 chunk_id。
+    否则法条正文 / 标题 / 施行日期 / 效力状态更新后 chunk_id 不变，旧索引仍
+    会被错误复用。现在签名包含：
+
+      chunk_id, title, article_number, article_text, effective_date,
+      expiry_date, authority_status（status）, source_revision
+
+    兼容旧调用：``chunks_or_ids`` 为字符串列表时退化为按 id 哈希（旧签名），
+    但 :func:`_build_bm25_index` / ``_get_or_build_bm25_index`` 已改为传 chunk 列表。
+    """
     h = hashlib.sha256()
-    for cid in chunk_ids:
-        h.update(cid.encode("utf-8"))
+    for item in chunks_or_ids:
+        if isinstance(item, str):
+            # 兼容路径：仅 chunk_id（旧签名，不足以发现正文变更）
+            h.update(item.encode("utf-8"))
+            h.update(b"\n")
+            continue
+        chunk = item
+        for field in (
+            "chunk_id",
+            "title",
+            "article_number",
+            "article_text",
+            "effective_date",
+            "expiry_date",
+            "source_revision",
+        ):
+            h.update(_chunk_field(chunk, field).encode("utf-8"))
+            h.update(b"\x1f")  # 字段分隔符
+        # authority_status 字段名在 schema 中可能是 status / authority_status
+        status_val = _chunk_field(chunk, "authority_status") or _chunk_field(chunk, "status")
+        h.update(status_val.encode("utf-8"))
         h.update(b"\n")
     return h.hexdigest()[:16]
 
@@ -470,12 +512,7 @@ def _build_bm25_index(chunks: list[Any]) -> dict[str, Any]:
     for tok, df in doc_freq.items():
         idf[tok] = math.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
 
-    signature = _compute_chunk_signature(
-        [
-            getattr(c, "chunk_id", "") or (c.get("chunk_id", "") if isinstance(c, dict) else "")
-            for c in chunks
-        ]
-    )
+    signature = _compute_chunk_signature(chunks)
 
     return {
         "doc_lengths": doc_lengths,
@@ -529,12 +566,7 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
     if _GLOBAL_BM25_INDEX is not None:
         return _GLOBAL_BM25_INDEX
 
-    expected_sig = _compute_chunk_signature(
-        [
-            getattr(c, "chunk_id", "") or (c.get("chunk_id", "") if isinstance(c, dict) else "")
-            for c in chunks
-        ]
-    )
+    expected_sig = _compute_chunk_signature(chunks)
 
     # 1) 优先尝试 pickle 缓存（更快）
     if _BM25_INDEX_PKL.is_file():

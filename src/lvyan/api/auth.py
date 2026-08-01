@@ -87,6 +87,9 @@ def _auth_settings():
         "jwt_audience": _get("JWT_AUDIENCE", settings.jwt_audience),
         "jwt_jwks_url": _get("JWT_JWKS_URL", settings.jwt_jwks_url),
         "jwt_algorithms": _get("JWT_ALGORITHMS", settings.jwt_algorithms),
+        # 三-1：认证模式。jwt=只接受验签 JWT；trusted_proxy=只接受网关注入的
+        # X-User-ID；auto（默认）=兼容旧逻辑（X-User-ID 优先），仅用于开发。
+        "auth_mode": _get("AUTH_MODE", "auto").strip().lower(),
     }
 
 
@@ -176,15 +179,17 @@ def _verify_jwt_and_extract_sub(authorization: str) -> str:
             **decode_kwargs,
         )
     except Exception as exc:  # noqa: BLE001 PyJWT 抛出各种验签异常
+        # 三-1：不向客户端泄露 PyJWT 内部异常原文（可能暴露密钥/算法细节），
+        # 仅记录服务端日志，对外返回标准化错误码。
         _logger.info("JWT 校验失败：%s", exc)
         raise HTTPException(
             status_code=401,
-            detail=f"JWT 校验失败：{exc}",
+            detail="invalid_token",
         ) from exc
 
     uid = payload.get("sub") or payload.get("uid") or payload.get("user_id")
     if not uid:
-        raise HTTPException(status_code=401, detail="JWT 缺少 sub/uid/user_id 字段")
+        raise HTTPException(status_code=401, detail="invalid_token")
     return str(uid)
 
 
@@ -211,25 +216,55 @@ def get_current_user_id(
 ) -> str:
     """FastAPI dependency：提取当前 user_id。
 
-    解析顺序见模块 docstring。本方法**不会**信任未验签的 JWT payload。
+    三-1 改进：
+    - 依据 ``AUTH_MODE`` 显式选择身份来源：
+      * ``jwt``：只接受验签 Bearer JWT；
+      * ``trusted_proxy``：只接受可信网关注入的 ``X-User-ID``；
+      * ``auto``（默认，仅开发）：``X-User-ID`` 优先，其次 Bearer JWT。
+    - 拒绝同时携带 ``X-User-ID`` 与 ``Bearer`` 的身份冲突请求（401），
+      避免攻击者用 JWT 旁路覆盖网关身份或反之。
+    - 本方法**不会**信任未验签的 JWT payload。
     """
     if not is_auth_enabled():
         return ANONYMOUS_USER
 
-    if x_user_id:
-        trusted_user_id = x_user_id.strip()
-        if trusted_user_id:
-            return trusted_user_id
+    cfg = _auth_settings()
+    mode = cfg["auth_mode"]
+    if mode not in {"jwt", "trusted_proxy", "auto"}:
+        mode = "auto"
 
-    if authorization and authorization.lower().startswith("bearer "):
+    has_xid = bool(x_user_id and x_user_id.strip())
+    has_bearer = bool(authorization and authorization.lower().startswith("bearer "))
+
+    # 身份冲突：同时出现两种身份来源 → 拒绝（防止互相覆盖）
+    if has_xid and has_bearer:
+        raise HTTPException(
+            status_code=401,
+            detail="identity_conflict",
+        )
+
+    if mode == "jwt":
+        if not has_bearer:
+            raise HTTPException(status_code=401, detail="missing_bearer_token")
+        return _verify_jwt_and_extract_sub(authorization)
+
+    if mode == "trusted_proxy":
+        if not has_xid:
+            raise HTTPException(
+                status_code=401,
+                detail="missing_trusted_identity",
+            )
+        return x_user_id.strip()
+
+    # auto：X-User-ID 优先
+    if has_xid:
+        return x_user_id.strip()
+    if has_bearer:
         return _verify_jwt_and_extract_sub(authorization)
 
     raise HTTPException(
         status_code=401,
-        detail=(
-            "未提供有效身份：缺少可信的 X-User-ID 头"
-            "（应由 API Gateway 注入）或可验签的 Bearer JWT"
-        ),
+        detail="missing_credentials",
     )
 
 

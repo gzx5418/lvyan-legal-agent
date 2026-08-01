@@ -337,20 +337,15 @@ def test_enforce_policies_retrieval_before_cost(monkeypatch: pytest.MonkeyPatch)
 # 9. citation_verifier 始终不通过 → reretrieval_count 不超过 2
 # ---------------------------------------------------------------------------
 def test_citation_verifier_reretrieval_count_capped(
-    monkeypatch: pytest.MonkeyPatch, make_authority, make_reasoning_result
+    monkeypatch: pytest.MonkeyPatch,
+    make_authority,
+    mock_statute_status_effective,
 ):
     """citation_verifier 始终不通过：reretrieval_count 不超过 min(max_iter, 2)=2。
 
     即使 settings.max_retrieval_iterations 设置为 10，citation_verifier 内部
     仍以 min(max, 2)=2 为上限，防止无限制重检索。
     """
-    # mock verify_statute_status 避免真实查询
-    from tests.security.conftest import _mock_verify_statute_status
-
-    mock = _mock_verify_statute_status("effective")
-    monkeypatch.setattr("lvyan.validators.citation.verify_statute_status", mock)
-    monkeypatch.setattr("lvyan.validators.authority_status.verify_statute_status", mock)
-
     monkeypatch.setattr(settings, "max_retrieval_iterations", 10)
     rr = _make_reasoning_result_fabricated()
     statutes = [make_authority(article_number="第五百七十七条")]
@@ -373,7 +368,9 @@ def test_citation_verifier_reretrieval_count_capped(
 
 
 def test_citation_verifier_never_exceeds_two_reretrievals(
-    monkeypatch: pytest.MonkeyPatch, make_authority
+    monkeypatch: pytest.MonkeyPatch,
+    make_authority,
+    mock_statute_status_effective,
 ):
     """即使 max_retrieval_iterations=100，连续流程中 reretrieval_count 始终 <= 2。
 
@@ -381,12 +378,6 @@ def test_citation_verifier_never_exceeds_two_reretrievals(
     citation_verifier 内部以 min(max_iter, 2)=2 为上限，iteration 在 2 处封顶，
     不会再增长（强制通过路径不返回 iteration）。
     """
-    from tests.security.conftest import _mock_verify_statute_status
-
-    mock = _mock_verify_statute_status("effective")
-    monkeypatch.setattr("lvyan.validators.citation.verify_statute_status", mock)
-    monkeypatch.setattr("lvyan.validators.authority_status.verify_statute_status", mock)
-
     monkeypatch.setattr(settings, "max_retrieval_iterations", 100)
     rr = _make_reasoning_result_fabricated()
     statutes = [make_authority(article_number="第五百七十七条")]

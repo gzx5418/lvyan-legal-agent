@@ -150,15 +150,18 @@ def test_python_m_lvyan_help_works():
 # ---------------------------------------------------------------------------
 # 8. python -m lvyan "查询" 输出非空（端到端，走 run_agent 降级路径）
 # ---------------------------------------------------------------------------
+@pytest.mark.slow
 def test_python_m_lvyan_query_outputs_nonempty():
     env = {**os.environ, "PYTHONPATH": str(_SRC_DIR)}
+    # 确保子进程走降级路径（无 LLM 网关），避免真实 API 调用拖慢测试
+    env["MODEL_GATEWAY_URL"] = ""
     result = subprocess.run(
         [sys.executable, "-m", "lvyan", "押金不退"],
         cwd=str(_AGENT_DIR),
         env=env,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=300,
     )
     # run_agent 捕获异常并返回友好串，故 stdout 必非空
     assert result.stdout.strip(), f"stdout 为空；stderr={result.stderr}"

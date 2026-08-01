@@ -134,7 +134,7 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
-  # Job 3: 代码风格检查（ruff）
+  # Job 3: 代码风格检查（ruff）—— P1-8：不再软失败
   # ---------------------------------------------------------------------------
   lint:
     name: Lint (ruff)
@@ -154,9 +154,66 @@ jobs:
           pip install ruff
 
       - name: Run ruff check
-        run: ruff check src/ tests/ || true
-        continue-on-error: true
+        run: ruff check src/ tests/
 
       - name: Run ruff format check
-        run: ruff format --check src/ tests/ || true
-        continue-on-error: true
+        run: ruff format --check src/ tests/
+
+  # ---------------------------------------------------------------------------
+  # Job 4: PostgreSQL 集成测试（advisory lock / cancel / 级联删除等）
+  # P1-8：真实 PG 测试必须被强制执行；若全部 skip 则本 job 失败。
+  # ---------------------------------------------------------------------------
+  postgres-integration:
+    name: PostgreSQL Integration
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lvyan
+          POSTGRES_PASSWORD: lvyan
+          POSTGRES_DB: lvyan
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lvyan"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PYTHONPATH: src
+      DATABASE_URL: "postgresql+psycopg://lvyan:lvyan@localhost:5432/lvyan"
+      LVYAN_TEST_POSTGRES_DSN: "postgresql://lvyan:lvyan@localhost:5432/lvyan"
+      MODEL_GATEWAY_URL: ""
+      HITL_ENABLED: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install PyJWT cryptography
+
+      - name: Run PostgreSQL integration tests
+        run: |
+          # 记录总数与通过数；若全部被 skip 则失败。
+          python -m pytest tests/integration/test_run_metadata_postgres.py \
+            -v --tb=short -p no:cacheprovider \
+            -rA 2>&1 | tee pg_out.txt
+          # 校验至少有一条非 skip 的通过项
+          if grep -qE "^[0-9]+ passed" pg_out.txt; then
+            echo "OK: 有真实 PostgreSQL 测试通过"
+          else
+            echo "ERROR: 没有 PostgreSQL 集成测试被实际执行（全部 skip）"
+            exit 1
+          fi

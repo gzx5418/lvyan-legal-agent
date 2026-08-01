@@ -62,6 +62,10 @@ class RunMetadataStore(Protocol):
 
     def claim_hitl_run(self, run_id: str, user_id: str) -> dict[str, Any] | None: ...
 
+    def request_cancel(self, run_id: str, user_id: str) -> bool: ...
+
+    def is_cancel_requested(self, run_id: str, user_id: str) -> bool: ...
+
 
 class RunMetadataUnavailable(RuntimeError):
     """The durable run registry could not be written."""
@@ -90,6 +94,7 @@ class PostgresRunMetadataStore:
         "error",
         "completed_at",
         "expires_at",
+        "cancel_requested_at",
     }
 
     def __init__(self, dsn: str | None = None) -> None:
@@ -132,8 +137,13 @@ class PostgresRunMetadataStore:
         """
         if self._schema_ready:
             return
-        migration = AGENT_DIR / "migrations" / "001_agent_runs_threads.sql"
-        sql = migration.read_text(encoding="utf-8")
+        migrations_dir = AGENT_DIR / "migrations"
+        # 按文件名排序依次执行所有 migration（001_…, 002_…, …）。
+        migration_files = sorted(
+            p for p in migrations_dir.glob("*.sql") if p.is_file()
+        )
+        if not migration_files:
+            raise RuntimeError(f"未找到任何 migration 文件于 {migrations_dir}")
         # transaction() 在 autocommit=True 连接上显式开启事务；异常自动回滚
         with conn.transaction():
             with conn.cursor() as cur:
@@ -141,7 +151,9 @@ class PostgresRunMetadataStore:
                     "SELECT pg_advisory_xact_lock(%s, %s)",
                     _SCHEMA_ADVISORY_LOCK_KEY,
                 )
-                cur.execute(sql)
+                for migration in migration_files:
+                    sql = migration.read_text(encoding="utf-8")
+                    cur.execute(sql)
         # 事务已提交 → 锁已释放，schema 已就绪
         self._schema_ready = True
 
@@ -419,6 +431,50 @@ class PostgresRunMetadataStore:
                 cur.fetchone()
                 cur.execute("UPDATE agent_runs SET status = status WHERE FALSE")
         return True
+
+    def request_cancel(self, run_id: str, user_id: str) -> bool:
+        """P1-2：跨实例取消的请求侧。
+
+        原子地把 ``cancel_requested_at`` 置为当前时间，仅当 run 属于该用户且
+        仍处于可取消状态（started/running/awaiting_hitl）。owner 实例的 worker
+        通过 :meth:`is_cancel_requested` 轮询发现后停止运行。
+
+        Returns:
+            ``True`` 表示成功记录取消请求；``False`` 表示 run 不存在、不属于该
+            用户、或已处于终态不可取消。
+        """
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE agent_runs
+                    SET cancel_requested_at = now()
+                    WHERE run_id = %s
+                      AND user_id = %s
+                      AND status IN ('started', 'running', 'awaiting_hitl')
+                    RETURNING run_id
+                    """,
+                    (run_id, user_id),
+                )
+                row = cur.fetchone()
+        return row is not None
+
+    def is_cancel_requested(self, run_id: str, user_id: str) -> bool:
+        """P1-2：worker 侧协作取消轮询。``cancel_requested_at`` 非空即已请求取消。"""
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT cancel_requested_at IS NOT NULL AS requested
+                    FROM agent_runs
+                    WHERE run_id = %s AND user_id = %s
+                    """,
+                    (run_id, user_id),
+                )
+                row = cur.fetchone()
+        return bool(row and row["requested"])
 
 
 __all__ = [

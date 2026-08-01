@@ -5,20 +5,33 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lvyan.observability.tracing import CostSummary
 
 
 class AgentRunRequest(BaseModel):
-    """POST /api/agent/run 请求体。"""
+    """POST /api/agent/run 请求体。
+
+    四（输入模型约束）：
+    - ``extra="forbid"``：拒绝未知字段，避免客户端拼错字段被静默忽略。
+    - ``thread_id`` 限制长度与字符集，防止注入路径片段。
+    - ``edited_output``（见 HITLRequest）有长度上限。
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     query: str = Field(
         min_length=1,
         max_length=50_000,
         description="用户法律问题或合同文本",
     )
-    thread_id: str | None = Field(default=None, description="会话线程 ID；为空时新生成")
+    thread_id: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="会话线程 ID；为空时新生成。仅允许字母、数字、下划线、连字符。",
+    )
     complexity: Literal["light", "deep", "document"] | None = Field(
         default=None, description="输出复杂度档位；为空时默认 light"
     )
@@ -40,6 +53,23 @@ class AgentRunRequest(BaseModel):
             raise ValueError("问题内容不能为空")
         return value
 
+    @field_validator("law_as_of_date")
+    @classmethod
+    def law_as_of_date_must_be_reasonable(cls, value: date | None) -> date | None:
+        """四：``law_as_of_date`` 合理范围提示（禁止明显非法的未来/远古日期）。"""
+        if value is None:
+            return value
+        import datetime as _dt
+
+        # 《民法典》施行日（2021-01-01）作为下限参考；早于 1900 视为明显错误。
+        if value < _dt.date(1900, 1, 1):
+            raise ValueError("law_as_of_date 不能早于 1900-01-01")
+        # 不允许设定超过当前日期 + 10 年的未来点
+        far_future = _dt.date.today().replace(year=_dt.date.today().year + 10)
+        if value > far_future:
+            raise ValueError("law_as_of_date 超出合理未来范围")
+        return value
+
 
 class AgentRunResponse(BaseModel):
     """POST /api/agent/run 响应体。"""
@@ -52,8 +82,14 @@ class AgentRunResponse(BaseModel):
 class HITLRequest(BaseModel):
     """POST /api/agent/hitl/{run_id} 请求体。"""
 
+    model_config = ConfigDict(extra="forbid")
+
     action: Literal["approve", "reject", "edit"]
-    edited_output: str | None = Field(default=None, description="edit 动作时用户改写后的输出")
+    edited_output: str | None = Field(
+        default=None,
+        max_length=100_000,
+        description="edit 动作时用户改写后的输出（四：限制最大长度）",
+    )
 
 
 class HITLResponse(BaseModel):

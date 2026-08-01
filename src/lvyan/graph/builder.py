@@ -76,7 +76,7 @@ from .routing import (
 )
 from .state import GraphState
 
-__all__ = ["build_graph", "build_graph_with_postgres", "NODE_NAMES"]
+__all__ = ["build_graph", "build_graph_with_postgres", "NODE_NAMES", "PersistenceUnavailable"]
 
 # 12 个节点名（注册顺序 = 主链顺序，不含 START/END）
 NODE_NAMES: tuple[str, ...] = (
@@ -199,19 +199,41 @@ def _to_dsn(url: str) -> str:
     return url
 
 
+class PersistenceUnavailable(RuntimeError):
+    """P0-1：生产/强制持久化模式下 PostgreSQL checkpointer 初始化失败。
+
+    在 development 且未强制持久化时，:func:`build_graph_with_postgres` 仍会
+    回退到 MemorySaver；但在 production（或 PERSISTENCE_REQUIRED=true）下，
+    任何回退都是不可接受的「半持久化」状态，必须抛出本异常让服务启动失败。
+    """
+
+
+def _persistence_required() -> bool:
+    from lvyan.config import persistence_required
+
+    return persistence_required()
+
+
 def build_graph_with_postgres(dsn: str | None = None) -> Any:
     """构建并返回编译后的图，优先使用 PostgreSQL checkpoint。
 
     - ``dsn`` 为空时从 ``settings.database_url`` 推导（自动去掉 SQLAlchemy 的
       ``+psycopg`` 前缀）。
-    - 若 psycopg / langgraph-checkpoint-postgres 未安装，或数据库不可达，
-      捕获异常并回退到 :func:`build_graph`（MemorySaver），打印警告。
+    - 若 psycopg / langgraph-checkpoint-postgres 未安装，或数据库不可达：
+        * development 且未强制持久化 → 回退 :func:`build_graph`（MemorySaver）；
+        * production / PERSISTENCE_REQUIRED=true → 抛 :class:`PersistenceUnavailable`，
+          让服务启动失败，绝不静默降级（P0-1）。
     """
     resolved_dsn = _to_dsn(dsn or settings.database_url)
     try:
         import psycopg  # noqa: F401  仅探测是否可用
         from langgraph.checkpoint.postgres import PostgresSaver
     except ImportError as exc:
+        if _persistence_required():
+            raise PersistenceUnavailable(
+                f"psycopg / langgraph-checkpoint-postgres 未安装（{exc}），"
+                f"且当前为强制持久化模式，拒绝回退 MemorySaver"
+            ) from exc
         print(
             f"[lvyan.graph] psycopg / langgraph-checkpoint-postgres 未安装"
             f"（{exc}），回退到 MemorySaver"
@@ -231,6 +253,10 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
             connect_timeout=3,
         )
     except Exception as exc:  # noqa: BLE001 连接失败需宽口径捕获
+        if _persistence_required():
+            raise PersistenceUnavailable(
+                f"PostgreSQL 不可达（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
+            ) from exc
         print(
             f"[lvyan.graph] PostgreSQL 不可达（{exc}），回退到 MemorySaver"
         )
@@ -241,11 +267,15 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
         saver.setup()  # 首次运行需建 checkpoint 表
         return _build_graph_with_checkpointer(saver)
     except Exception as exc:  # noqa: BLE001 setup / 编译失败需宽口径捕获
-        print(
-            f"[lvyan.graph] PostgresSaver 初始化失败（{exc}），回退到 MemorySaver"
-        )
         try:
             conn.close()
         except Exception:  # noqa: S110, BLE001 关闭失败无需上报
             pass
+        if _persistence_required():
+            raise PersistenceUnavailable(
+                f"PostgresSaver 初始化失败（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
+            ) from exc
+        print(
+            f"[lvyan.graph] PostgresSaver 初始化失败（{exc}），回退到 MemorySaver"
+        )
         return build_graph()

@@ -63,10 +63,35 @@ class RunContext:
         # P3-24：TTL 摘要（用于 RunManager 自动清理过期运行）
         self.created_at: float = 0.0
         self.completed_at: float | None = None
+        # P1-2：跨实例协作取消。``_cancel_check`` 由 RunManager 注入，
+        # 返回 True 表示远端已请求取消；default_runner / _resume_drive 据此抛
+        # ``asyncio.CancelledError``。``_last_cancel_poll`` 用于节流轮询频率。
+        self._cancel_check: Callable[[], bool] | None = None
+        self._last_cancel_poll: float = 0.0
 
     async def publish(self, event: dict[str, Any]) -> None:
         """发布一个 SSE 事件到队列，供流式消费者读取。"""
         await self.queue.put(event)
+
+    def poll_cancel(self) -> bool:
+        """节流地检查跨实例取消请求。间隔内重复调用直接返回 False。
+
+        本地任务取消（asyncio.Task.cancel）仍由事件循环直接生效；本方法只
+        处理「远端实例发起的取消请求」这一补充路径。
+        """
+        if self._cancel_check is None:
+            return False
+        now = time.time()
+        from lvyan.config import settings as _settings
+
+        if now - self._last_cancel_poll < _settings.cancel_poll_interval_seconds:
+            return False
+        self._last_cancel_poll = now
+        try:
+            return bool(self._cancel_check())
+        except Exception as exc:  # noqa: BLE001 轮询失败不应中断运行
+            _logger.debug("cancel 轮询失败 run %s: %s", self.run_id, exc)
+            return False
 
     def persist_hitl_state(self, interrupt_info: dict[str, Any]) -> bool:
         """Persist HITL before exposing an approval action to the client."""
@@ -99,6 +124,15 @@ class RunManager:
             status="awaiting_hitl",
             interrupt_payload=interrupt_info,
         )
+        # P1-2：注入跨实例取消轮询回调（同步 DB 查询，由 poll_cancel 节流）
+        if self._metadata_store is not None:
+            store = self._metadata_store
+            uid = ctx.user_id
+
+            def _cancel_check() -> bool:
+                return store.is_cancel_requested(ctx.run_id, uid)
+
+            ctx._cancel_check = _cancel_check
         return ctx
 
     def _update_metadata(self, run_id: str, **values: Any) -> bool:
@@ -346,14 +380,14 @@ class RunManager:
 
         P3-24：长时间运行的服务会持续累积 RunContext；本方法在
         ``create_run`` 时自动调用一次，亦可由外部定时器周期调用。
-        """
-        import time as _time
 
+        P1-2：``cancelled`` 状态也纳入清理，避免取消的 RunContext 永久驻留。
+        """
         ttl = ttl_seconds if ttl_seconds is not None else self._RUN_TTL_SECONDS
-        now = _time.time()
+        now = time.time()
         stale: list[str] = []
         for rid, ctx in self._runs.items():
-            if ctx.status in ("completed", "failed"):
+            if ctx.status in ("completed", "failed", "cancelled"):
                 completed = ctx.completed_at or ctx.created_at
                 if completed and (now - completed) > ttl:
                     stale.append(rid)
@@ -533,9 +567,21 @@ class RunManager:
                 final_output=final_output,
             )
 
-            # 再次检查是否还有中断
-            interrupt_info = _check_interrupt(graph, config)
-            if interrupt_info:
+            # 再次检查是否还有中断 —— P0-2 三态 fail-closed
+            icr = _check_interrupt_status(graph, config)
+            if icr.status == "unavailable":
+                ctx.status = "failed"
+                ctx.error = "无法读取 checkpoint 判断 HITL 状态，运行不可安全完成"
+                await ctx.publish(
+                    {
+                        "event": "error",
+                        "code": "checkpoint_unavailable",
+                        "message": ctx.error,
+                    }
+                )
+                return
+            if icr.status == "pending" and icr.payload:
+                interrupt_info = icr.payload
                 if not ctx.persist_hitl_state(interrupt_info):
                     ctx.status = "failed"
                     ctx.error = "无法持久化 HITL 状态，运行不可安全恢复"
@@ -620,9 +666,35 @@ class RunManager:
         run_id: str,
         current_user_id: str,
     ) -> tuple[str, str]:
+        """取消运行。
+
+        P1-2 修复：
+        - 持久化取消状态失败时返回 ``unavailable``（供 API 层映射为 503），
+          不再吞掉 ``_update_metadata`` 的返回值。
+        - 本实例无该 run 时，尝试在 metadata store 中写入 ``cancel_requested``
+          标记，供运行该 run 的远端实例协作取消（跨实例取消的请求侧）。
+        """
         ctx = self._runs.get(run_id)
+
+        # 跨实例：本地没有该 run → 记录取消请求，让 owner 实例协作取消
         if ctx is None:
+            if self._metadata_store is not None:
+                try:
+                    requested = self._metadata_store.request_cancel(
+                        run_id, current_user_id
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("request_cancel 持久化失败 run %s: %s", run_id, exc)
+                    return ("unavailable", f"无法记录取消请求：{exc}")
+                if requested:
+                    return (
+                        "cancel_requested",
+                        f"已请求取消 run {run_id}，远端实例将在下个轮询周期停止",
+                    )
+                # request_cancel 返回 False：run 不存在或不属于该用户
+                return ("not_found", f"run {run_id} 不存在或不属于当前用户")
             return ("not_found", f"run {run_id} 不存在")
+
         if ctx.user_id != current_user_id:
             return ("forbidden", f"run {run_id} 不属于当前用户")
         if ctx.status not in {"started", "running", "awaiting_hitl"}:
@@ -638,10 +710,19 @@ class RunManager:
         if ctx.status != "cancelled":
             ctx.status = "cancelled"
             ctx.error = "用户已停止生成"
-            self._update_metadata(run_id, status="cancelled", error=ctx.error)
+            ctx.completed_at = time.time()
+            # P1-2：检查持久化结果；失败时返回 unavailable（API 层 → 503）
+            persisted = self._update_metadata(
+                run_id, status="cancelled", error=ctx.error
+            )
             self._append_message(ctx, "assistant", ctx.error)
             await ctx.publish({"event": "cancelled", "message": ctx.error})
             await ctx.queue.put(None)
+            if not persisted:
+                return (
+                    "unavailable",
+                    "运行已在本实例停止，但持久化失败；重启后状态可能不一致",
+                )
         return ("cancelled", "已停止生成")
 
 
@@ -692,6 +773,9 @@ async def _stream_graph_events(
         stream_mode=["updates", "tasks"],
         version="v2",
     ):
+        # P1-2：跨实例协作取消。远端发起取消后，本 worker 在下个流事件察觉并终止。
+        if ctx.poll_cancel():
+            raise asyncio.CancelledError()
         if not isinstance(part, dict):
             continue
         mode = part.get("type", "")
@@ -760,38 +844,69 @@ def _get_case_memory() -> Any:
 
 
 def _check_interrupt(graph: Any, config: dict[str, Any]) -> dict[str, Any] | None:
-    """检查图是否有待处理的 LangGraph interrupt。
+    """检查图是否有待处理的 LangGraph interrupt（向后兼容包装）。
 
-    Returns:
-        中断信息字典（含 message 等），无中断返回 None。
+    保留旧二态语义（pending → dict / 否则 None），供不关心持久化故障的调用方使用。
+    安全敏感路径（runner / HITL 恢复）应改用 :func:`_check_interrupt_status`，
+    以区分「无中断」与「checkpoint 不可读」（P0-2 fail-closed）。
+    """
+    result = _check_interrupt_status(graph, config)
+    if result.status == "pending":
+        return result.payload
+    return None
+
+
+class InterruptCheckResult:
+    """P0-2：中断检查的三态结果。
+
+    - ``pending``：存在待审批 interrupt，``payload`` 为中断信息。
+    - ``none``：明确无 interrupt（checkpoint 正常读取且无待执行节点）。
+    - ``unavailable``：checkpoint 读取失败。安全护栏已触发但无法读取时，
+      必须 fail-closed：调用方不得发送 final_output / 标记 completed。
+    """
+
+    __slots__ = ("status", "payload")
+
+    def __init__(self, status: str, payload: dict[str, Any] | None = None) -> None:
+        self.status = status
+        self.payload = payload
+
+
+def _check_interrupt_status(graph: Any, config: dict[str, Any]) -> InterruptCheckResult:
+    """三态中断检查（P0-2 fail-closed）。
+
+    checkpoint 读取异常时返回 ``unavailable``，不再被静默当作「无中断」。
     """
     try:
         snapshot = graph.get_state(config)
-        if snapshot is None:
-            return None
-        # 有待执行节点 = 图被中断
-        if snapshot.next:
-            # 尝试获取 interrupt 详细信息
-            tasks = getattr(snapshot, "tasks", None)
-            if tasks:
-                task_values = tasks.values() if isinstance(tasks, dict) else tasks
-                for task in task_values:
-                    interrupts = getattr(task, "interrupts", [])
-                    if interrupts:
-                        return (
-                            interrupts[0].value
-                            if hasattr(interrupts[0], "value")
-                            else interrupts[0]
-                        )
-            # 回退：返回通用中断信息
-            return {
+    except Exception as exc:  # noqa: BLE001 checkpoint 故障
+        _logger.warning("check_interrupt 读取 checkpoint 失败，按 fail-closed 处理: %s", exc)
+        return InterruptCheckResult("unavailable", {"error": str(exc)})
+
+    if snapshot is None:
+        return InterruptCheckResult("none")
+    # 有待执行节点 = 图被中断
+    if snapshot.next:
+        tasks = getattr(snapshot, "tasks", None)
+        if tasks:
+            task_values = tasks.values() if isinstance(tasks, dict) else tasks
+            for task in task_values:
+                interrupts = getattr(task, "interrupts", [])
+                if interrupts:
+                    payload = (
+                        interrupts[0].value
+                        if hasattr(interrupts[0], "value")
+                        else interrupts[0]
+                    )
+                    return InterruptCheckResult("pending", payload)
+        return InterruptCheckResult(
+            "pending",
+            {
                 "message": "Agent 执行中遇到需要人工确认的操作",
                 "pending_nodes": list(snapshot.next),
-            }
-        return None
-    except Exception as exc:  # noqa: BLE001
-        _logger.debug("check_interrupt 失败，按无中断处理: %s", exc)
-        return None
+            },
+        )
+    return InterruptCheckResult("none")
 
 
 def _build_fallback_output(state: dict[str, Any], query: str) -> str:
@@ -910,9 +1025,22 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
                         if out:
                             final_output = out
 
-        # 检查是否有 LangGraph interrupt（HITL）
-        interrupt_info = _check_interrupt(graph, config)
-        if interrupt_info:
+        # 检查是否有 LangGraph interrupt（HITL）—— P0-2 三态 fail-closed
+        icr = _check_interrupt_status(graph, config)
+        if icr.status == "unavailable":
+            # checkpoint 不可读：不得假定无 interrupt，不得发送 final_output
+            ctx.status = "failed"
+            ctx.error = "无法读取 checkpoint 判断 HITL 状态，运行不可安全完成"
+            await ctx.publish(
+                {
+                    "event": "error",
+                    "code": "checkpoint_unavailable",
+                    "message": ctx.error,
+                }
+            )
+            return ""
+        if icr.status == "pending" and icr.payload:
+            interrupt_info = icr.payload
             if not ctx.persist_hitl_state(interrupt_info):
                 ctx.status = "failed"
                 ctx.error = "无法持久化 HITL 状态，运行不可安全恢复"

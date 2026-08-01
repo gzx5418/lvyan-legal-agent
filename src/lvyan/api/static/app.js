@@ -18,6 +18,11 @@ const state = {
   sidebarCollapsed: false,
 };
 
+// P1-2：全局运行超时定时器。只在终态（final_output/error/cancelled）或
+// stopGeneration 中清理，不能在 POST /run 的 finally 里清理——否则 POST 一返回
+// 定时器就被取消，「5 分钟超时自动停止」实际从未生效。
+let runTimeoutId = null;
+
 // 全局 EventSource 引用
 let currentEventSource = null;
 
@@ -282,7 +287,10 @@ async function sendQuery() {
   showProgress(true);
 
   // 深度法律分析可能耗时较长，5 分钟后才主动请求服务端停止。
-  const timeoutId = setTimeout(async () => {
+  // P1-2：定时器存到全局 runTimeoutId，由 finalizeRun/resetRunState 清理，
+  // 不在 POST /run 的 finally 中清理（否则 POST 返回即被取消，超时形同虚设）。
+  if (runTimeoutId) clearTimeout(runTimeoutId);
+  runTimeoutId = setTimeout(async () => {
     if (state.isRunning && state.runStartTime && (Date.now() - state.runStartTime > 300000)) {
       console.warn('Agent 运行超时（5 分钟），请求服务端停止');
       await stopGeneration('运行超过 5 分钟，已停止。你可以缩短问题后重试。');
@@ -330,9 +338,8 @@ async function sendQuery() {
   } catch (err) {
     addMessage('agent', `请求失败: ${err.message}`);
     resetRunState();
-  } finally {
-    clearTimeout(timeoutId);
   }
+  // 注意：此处不再 finally clearTimeout —— 见上方 runTimeoutId 说明。
 }
 
 // 停止生成：同时通知服务端取消后台任务。
@@ -345,8 +352,26 @@ async function stopGeneration(message = '已停止生成。') {
       showToast('任务已结束，正在同步最终结果', 'info');
       return;
     }
-    if (!resp.ok && resp.status !== 404) {
+    // P1-2：503 = 持久化失败（任务可能仍在运行）；404 = run 不存在（可能跨实例）。
+    // 这两种情况都不应直接当作「已成功停止」并关闭 SSE。
+    if (resp.status === 503) {
+      throw new Error('服务端持久化失败，任务可能仍在后台运行');
+    }
+    if (resp.status === 404) {
+      // run 不在本实例、已结束或已过期：不假定成功，提示用户刷新查看实际状态。
+      showToast('未找到运行任务，可能已在其他实例结束', 'warning');
+      finalizeRun();
+      return;
+    }
+    if (!resp.ok) {
       throw new Error(await responseError(resp, '停止失败'));
+    }
+    // 202 cancel_requested：远端实例将停止，等待 SSE cancelled 事件到达。
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 202 || data.status === 'cancel_requested') {
+      showToast('已请求远端实例停止，请稍候', 'info');
+      // 不关闭 SSE，等待 cancelled 事件
+      return;
     }
     if (currentEventSource) {
       currentEventSource.close();
@@ -459,6 +484,11 @@ function resetRunState() {
   els.hitlPanel.style.display = 'none';
   els.messages.setAttribute('aria-busy', 'false');
   updateCharCount();
+  // P1-2：清理全局运行超时定时器（终态 / 重置时）
+  if (runTimeoutId) {
+    clearTimeout(runTimeoutId);
+    runTimeoutId = null;
+  }
 }
 
 function finalizeRun() {

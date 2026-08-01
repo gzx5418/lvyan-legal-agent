@@ -163,6 +163,49 @@ class Settings(BaseModel):
         default=True, description="是否启用 Human-in-the-loop 不可逆操作审批"
     )
 
+    # --- P0-1：部署模式与持久化强制 ---
+    # production：禁止任何静默降级；PostgresSaver / metadata store 初始化失败
+    # 必须让服务启动失败。development（默认）：允许回退 MemorySaver / None。
+    runtime_mode: str = Field(
+        default="development",
+        description="部署模式：development（允许内存降级）/ production（禁止降级）",
+    )
+    # 即使在 development 也允许显式强制持久化（CI / 预发环境用）
+    persistence_required: bool = Field(
+        default=False,
+        description="为 true 时，PostgresSaver 与 metadata store 任一初始化失败都抛异常",
+    )
+    checkpointer_backend: str = Field(
+        default="auto",
+        description="期望的 checkpointer 后端：postgres / memory / auto",
+    )
+
+    # --- P1-2：跨实例取消 ---
+    cancel_poll_interval_seconds: float = Field(
+        default=5.0,
+        description="运行中 worker 检查 PostgreSQL cancel_requested_at 的间隔",
+    )
+
+    # --- P1-4：上传与上下文资源限制 ---
+    max_upload_bytes: int = Field(default=10 * 1024 * 1024, description="单文件上传字节上限")
+    max_extracted_chars_per_file: int = Field(
+        default=200_000, description="单附件转换后 Markdown 字符上限"
+    )
+    max_total_attachment_chars: int = Field(
+        default=400_000, description="单次 run 所有附件拼接后的总字符上限"
+    )
+    max_attachment_count: int = Field(default=10, description="单次 run 附件数量上限")
+    max_concurrent_conversions: int = Field(
+        default=2, description="文档转换并发数上限（信号量）"
+    )
+    document_conversion_timeout_seconds: float = Field(
+        default=60.0, description="单次文档转换超时秒数"
+    )
+    zip_uncompressed_bytes_limit: int = Field(
+        default=100 * 1024 * 1024,
+        description="Office(ZIP) 文件解压后总字节上限，防止 ZIP bomb",
+    )
+
     # --- Legal Reasoner 迭代守卫 ---
     max_legal_reasoner_iterations: int = Field(
         default=2,
@@ -226,6 +269,19 @@ def _build_settings() -> Settings:
         max_retrieval_iterations=_get_int("MAX_RETRIEVAL_ITERATIONS", 3),
         max_cost_budget_usd=_get_float("MAX_COST_BUDGET_USD", 2.0),
         hitl_enabled=_get_bool("HITL_ENABLED", True),
+        runtime_mode=_get("RUNTIME_MODE", "development").strip().lower(),
+        persistence_required=_get_bool("PERSISTENCE_REQUIRED", False),
+        checkpointer_backend=_get("CHECKPOINTER_BACKEND", "auto").strip().lower(),
+        cancel_poll_interval_seconds=_get_float("CANCEL_POLL_INTERVAL_SECONDS", 5.0),
+        max_upload_bytes=_get_int("MAX_UPLOAD_BYTES", 10 * 1024 * 1024),
+        max_extracted_chars_per_file=_get_int("MAX_EXTRACTED_CHARS_PER_FILE", 200_000),
+        max_total_attachment_chars=_get_int("MAX_TOTAL_ATTACHMENT_CHARS", 400_000),
+        max_attachment_count=_get_int("MAX_ATTACHMENT_COUNT", 10),
+        max_concurrent_conversions=_get_int("MAX_CONCURRENT_CONVERSIONS", 2),
+        document_conversion_timeout_seconds=_get_float(
+            "DOCUMENT_CONVERSION_TIMEOUT_SECONDS", 60.0
+        ),
+        zip_uncompressed_bytes_limit=_get_int("ZIP_UNCOMPRESSED_BYTES_LIMIT", 100 * 1024 * 1024),
         max_legal_reasoner_iterations=_get_int("MAX_LEGAL_REASONER_ITERATIONS", 2),
     )
 
@@ -242,6 +298,29 @@ def is_official_db_available() -> bool:
     return LAWTEXT_DIR.is_dir() and any(LAWTEXT_DIR.iterdir())
 
 
+def is_production() -> bool:
+    """是否处于生产部署模式（``RUNTIME_MODE=production``）。
+
+    P0-1：生产模式下禁止任何静默降级（MemorySaver / metadata store=None）。
+    """
+    import os
+
+    raw = os.getenv("RUNTIME_MODE", settings.runtime_mode).strip().lower()
+    return raw == "production"
+
+
+def persistence_required() -> bool:
+    """是否强制持久化（生产模式或显式 ``PERSISTENCE_REQUIRED=true``）。"""
+    import os
+
+    if is_production():
+        return True
+    raw = os.getenv("PERSISTENCE_REQUIRED")
+    if raw is None:
+        return settings.persistence_required
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 __all__ = [
     "AGENT_DIR",
     "REPO_ROOT",
@@ -250,4 +329,6 @@ __all__ = [
     "Settings",
     "settings",
     "is_official_db_available",
+    "is_production",
+    "persistence_required",
 ]
