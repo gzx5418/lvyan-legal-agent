@@ -131,6 +131,9 @@ class PostgresRunMetadataStore:
           3. migration 抛异常时事务回滚，锁随之释放，``_schema_ready`` 保持
              ``False``，异常向上传播。
 
+        P1-2 改进：增加 ``schema_migrations`` 版本表，已应用的 migration 不再
+        重复执行（避免每次实例启动都 ``ALTER TABLE`` 取表锁）。
+
         ``conn`` 默认 ``autocommit=True``（见 :meth:`_connect`），本方法通过
         ``conn.transaction()`` 显式开启事务块；psycopg 的 ``transaction()``
         在 autocommit 连接上也能正常工作。
@@ -151,9 +154,30 @@ class PostgresRunMetadataStore:
                     "SELECT pg_advisory_xact_lock(%s, %s)",
                     _SCHEMA_ADVISORY_LOCK_KEY,
                 )
+                # P1-2：创建 migration 版本表（幂等）
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS schema_migrations (
+                        version TEXT PRIMARY KEY,
+                        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                    """
+                )
                 for migration in migration_files:
+                    version = migration.name
+                    cur.execute(
+                        "SELECT 1 FROM schema_migrations WHERE version = %s",
+                        (version,),
+                    )
+                    if cur.fetchone():
+                        continue
                     sql = migration.read_text(encoding="utf-8")
                     cur.execute(sql)
+                    cur.execute(
+                        "INSERT INTO schema_migrations(version) VALUES (%s) "
+                        "ON CONFLICT DO NOTHING",
+                        (version,),
+                    )
         # 事务已提交 → 锁已释放，schema 已就绪
         self._schema_ready = True
 
@@ -404,7 +428,11 @@ class PostgresRunMetadataStore:
         run_id: str,
         user_id: str,
     ) -> dict[str, Any] | None:
-        """Atomically transition one pending HITL run to ``running``."""
+        """Atomically transition one pending HITL run to ``running``.
+
+        P1-1：已请求取消（``cancel_requested_at`` 非空）的 run 不得被 claim，
+        防止用户取消后仍能提交审批将 run 恢复为 running。
+        """
         with self._connect() as conn:
             self._ensure_schema(conn)
             with conn.cursor() as cur:
@@ -415,6 +443,7 @@ class PostgresRunMetadataStore:
                     WHERE run_id = %s
                       AND user_id = %s
                       AND status = 'awaiting_hitl'
+                      AND cancel_requested_at IS NULL
                     RETURNING run_id, thread_id, user_id, status, created_at
                     """,
                     (run_id, user_id),
@@ -435,24 +464,44 @@ class PostgresRunMetadataStore:
     def request_cancel(self, run_id: str, user_id: str) -> bool:
         """P1-2：跨实例取消的请求侧。
 
-        原子地把 ``cancel_requested_at`` 置为当前时间，仅当 run 属于该用户且
-        仍处于可取消状态（started/running/awaiting_hitl）。owner 实例的 worker
-        通过 :meth:`is_cancel_requested` 轮询发现后停止运行。
+        P1-1 改进：``awaiting_hitl`` 状态下没有 worker 轮询，无法通过协作取消
+        终结。因此对 ``awaiting_hitl`` 直接原子地置为 ``cancelled`` 终态；
+        对 ``started/running`` 仍只设置 ``cancel_requested_at``，由 owner 实例
+        的 worker 轮询发现后停止。
 
         Returns:
-            ``True`` 表示成功记录取消请求；``False`` 表示 run 不存在、不属于该
-            用户、或已处于终态不可取消。
+            ``True`` 表示成功记录取消请求（或直接终结）；``False`` 表示 run
+            不存在、不属于该用户、或已处于终态不可取消。
         """
         with self._connect() as conn:
             self._ensure_schema(conn)
             with conn.cursor() as cur:
+                # P1-1：awaiting_hitl 直接终结（无 worker 轮询）
+                cur.execute(
+                    """
+                    UPDATE agent_runs
+                    SET status = 'cancelled',
+                        cancel_requested_at = now(),
+                        completed_at = now(),
+                        error = '用户已停止生成'
+                    WHERE run_id = %s
+                      AND user_id = %s
+                      AND status = 'awaiting_hitl'
+                    RETURNING run_id
+                    """,
+                    (run_id, user_id),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    return True
+                # started/running：协作取消（worker 轮询发现后停止）
                 cur.execute(
                     """
                     UPDATE agent_runs
                     SET cancel_requested_at = now()
                     WHERE run_id = %s
                       AND user_id = %s
-                      AND status IN ('started', 'running', 'awaiting_hitl')
+                      AND status IN ('started', 'running')
                     RETURNING run_id
                     """,
                     (run_id, user_id),

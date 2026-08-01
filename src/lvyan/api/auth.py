@@ -150,11 +150,13 @@ def _verify_jwt_and_extract_sub(authorization: str) -> str:
         signing_key = _fetch_signing_key(token, cfg["jwt_jwks_url"], algorithms)
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001 JWKS 解析失败统一 401
+    except Exception as exc:  # noqa: BLE001 JWKS 解析/网络失败统一 401
+        # P1-5：不向客户端泄露 JWKS 内部异常（可能暴露 URL/网络拓扑），
+        # 统一返回 invalid_token，详情记录服务端日志。
         _logger.warning("JWKS 解析失败：%s", exc)
         raise HTTPException(
             status_code=401,
-            detail=f"JWT 验签失败：{exc}",
+            detail="invalid_token",
         ) from exc
 
     decode_options: dict[str, Any] = {
@@ -232,6 +234,18 @@ def get_current_user_id(
     mode = cfg["auth_mode"]
     if mode not in {"jwt", "trusted_proxy", "auto"}:
         mode = "auto"
+
+    # P1-5：生产模式禁止 AUTH_MODE=auto（仍会信任客户端 X-User-ID）
+    from lvyan.config import is_production
+
+    if is_production() and mode == "auto":
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "AUTH_MODE=auto is forbidden in production; "
+                "set AUTH_MODE=jwt or AUTH_MODE=trusted_proxy"
+            ),
+        )
 
     has_xid = bool(x_user_id and x_user_id.strip())
     has_bearer = bool(authorization and authorization.lower().startswith("bearer "))

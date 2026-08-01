@@ -80,7 +80,6 @@ _logger = logging.getLogger("lvyan.api.server")
 # 文件上传相关常量
 _UPLOAD_DIR = AGENT_DIR / "data" / "uploads"
 _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-_MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
 _ALLOWED_TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".log"}
 _ALLOWED_OFFICE_EXTS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx"}
 _ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
@@ -430,11 +429,23 @@ def create_app(
     """
     app = FastAPI(title="律言法律智能体 API", version="0.2.0")
     if metadata_store is None and runner is None and memory is None:
+        from lvyan.config import persistence_required
+
         try:
             metadata_store = PostgresRunMetadataStore()
             # 做一次轻量探测，确认数据库可达。
             metadata_store.healthcheck()
-        except Exception:
+        except Exception as exc:
+            # P0-1：生产/强制持久化模式下，metadata store 初始化失败必须让服务
+            # 启动失败，绝不静默降级到 None（否则 run/HITL 元数据无持久化，
+            # 而 checkpointer 可能正常，形成「半持久化」状态）。
+            if persistence_required():
+                from lvyan.graph.builder import PersistenceUnavailable
+
+                raise PersistenceUnavailable(
+                    f"PostgreSQL run metadata store 不可用，且当前为强制持久化模式，"
+                    f"拒绝降级: {exc}"
+                ) from exc
             _logger.warning(
                 "PostgreSQL 不可达，RunMetadata 持久化已禁用；"
                 "run 恢复、跨实例 HITL 等功能将不可用"
@@ -504,7 +515,17 @@ def create_app(
         elif is_production() and cp_kind != "postgres":
             cp_status = "degraded"
 
-        ready = db == "ok" and ret == "ok" and cp_status != "degraded"
+        # P0-1：生产模式下 metadata store 为 None（降级）→ not-ready
+        metadata_status = "ok" if metadata_store is not None else "unavailable"
+        if is_production() and metadata_store is None:
+            metadata_status = "degraded"
+
+        ready = (
+            db == "ok"
+            and ret == "ok"
+            and cp_status != "degraded"
+            and metadata_status != "degraded"
+        )
         # model_gateway 不可用不阻断 ready（可降级到规则路径）
         return JSONResponse(
             status_code=200 if ready else 503,
@@ -515,6 +536,7 @@ def create_app(
                 "model_gateway": gw,
                 "checkpointer": cp_kind,
                 "checkpointer_status": cp_status,
+                "metadata_store": metadata_status,
                 "object_storage": "unknown",
             },
         )
@@ -999,11 +1021,6 @@ def create_app(
                     detail=f"文件过大（>{len(buf)} bytes），上限 {max_bytes} bytes",
                 )
         content = bytes(buf)
-        if len(content) > _MAX_UPLOAD_SIZE:
-            raise HTTPException(
-                status_code=413,
-                detail=f"文件过大（{len(content)} bytes），上限 {_MAX_UPLOAD_SIZE} bytes",
-            )
 
         filename = file.filename or "unnamed"
         ext = Path(filename).suffix.lower()

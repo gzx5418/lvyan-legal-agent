@@ -217,6 +217,12 @@ def _persistence_required() -> bool:
 def build_graph_with_postgres(dsn: str | None = None) -> Any:
     """构建并返回编译后的图，优先使用 PostgreSQL checkpoint。
 
+    P2-4：``settings.checkpointer_backend`` 参与选择：
+
+    - ``memory``：直接用 MemorySaver。生产模式下拒绝（必须显式用 postgres）。
+    - ``postgres``：强制使用 PostgreSQL，等价于 ``persistence_required=true``。
+    - ``auto``（默认）：先尝试 PostgreSQL，失败按 ``persistence_required()`` 决定回退。
+
     - ``dsn`` 为空时从 ``settings.database_url`` 推导（自动去掉 SQLAlchemy 的
       ``+psycopg`` 前缀）。
     - 若 psycopg / langgraph-checkpoint-postgres 未安装，或数据库不可达：
@@ -224,12 +230,34 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
         * production / PERSISTENCE_REQUIRED=true → 抛 :class:`PersistenceUnavailable`，
           让服务启动失败，绝不静默降级（P0-1）。
     """
+    import os
+
+    # P2-4：从环境变量实时读取（与 is_production/persistence_required 一致），
+    # 不依赖 settings 单例（可能已在 import 时冻结）。
+    backend = os.getenv("CHECKPOINTER_BACKEND", settings.checkpointer_backend).strip().lower()
+
+    # P2-4：显式选择 memory
+    if backend == "memory":
+        from lvyan.config import is_production
+
+        if is_production():
+            raise PersistenceUnavailable(
+                "CHECKPOINTER_BACKEND=memory 在生产模式下被拒绝；请使用 postgres"
+            )
+        return build_graph()
+
+    # P2-4：显式选择 postgres → 强制持久化
+    if backend == "postgres":
+        required = True
+    else:  # auto
+        required = _persistence_required()
+
     resolved_dsn = _to_dsn(dsn or settings.database_url)
     try:
         import psycopg  # noqa: F401  仅探测是否可用
         from langgraph.checkpoint.postgres import PostgresSaver
     except ImportError as exc:
-        if _persistence_required():
+        if required:
             raise PersistenceUnavailable(
                 f"psycopg / langgraph-checkpoint-postgres 未安装（{exc}），"
                 f"且当前为强制持久化模式，拒绝回退 MemorySaver"
@@ -253,7 +281,7 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
             connect_timeout=3,
         )
     except Exception as exc:  # noqa: BLE001 连接失败需宽口径捕获
-        if _persistence_required():
+        if required:
             raise PersistenceUnavailable(
                 f"PostgreSQL 不可达（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
             ) from exc
@@ -271,7 +299,7 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
             conn.close()
         except Exception:  # noqa: S110, BLE001 关闭失败无需上报
             pass
-        if _persistence_required():
+        if required:
             raise PersistenceUnavailable(
                 f"PostgresSaver 初始化失败（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
             ) from exc

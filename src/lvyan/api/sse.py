@@ -68,6 +68,8 @@ class RunContext:
         # ``asyncio.CancelledError``。``_last_cancel_poll`` 用于节流轮询频率。
         self._cancel_check: Callable[[], bool] | None = None
         self._last_cancel_poll: float = 0.0
+        # P0-2：runner 设置失败时记录错误码，供 _drive 的 _fail_run 使用
+        self.fail_code: str | None = None
 
     async def publish(self, event: dict[str, Any]) -> None:
         """发布一个 SSE 事件到队列，供流式消费者读取。"""
@@ -78,6 +80,9 @@ class RunContext:
 
         本地任务取消（asyncio.Task.cancel）仍由事件循环直接生效；本方法只
         处理「远端实例发起的取消请求」这一补充路径。
+
+        P1-3：同步 DB 查询通过 ``asyncio.to_thread`` 卸载到线程池，避免阻塞
+        event loop。调用方在 async 上下文中应改用 :meth:`poll_cancel_async`。
         """
         if self._cancel_check is None:
             return False
@@ -89,6 +94,22 @@ class RunContext:
         self._last_cancel_poll = now
         try:
             return bool(self._cancel_check())
+        except Exception as exc:  # noqa: BLE001 轮询失败不应中断运行
+            _logger.debug("cancel 轮询失败 run %s: %s", self.run_id, exc)
+            return False
+
+    async def poll_cancel_async(self) -> bool:
+        """P1-3：异步版取消轮询，通过 ``asyncio.to_thread`` 避免阻塞 event loop。"""
+        if self._cancel_check is None:
+            return False
+        now = time.time()
+        from lvyan.config import settings as _settings
+
+        if now - self._last_cancel_poll < _settings.cancel_poll_interval_seconds:
+            return False
+        self._last_cancel_poll = now
+        try:
+            return bool(await asyncio.to_thread(self._cancel_check))
         except Exception as exc:  # noqa: BLE001 轮询失败不应中断运行
             _logger.debug("cancel 轮询失败 run %s: %s", self.run_id, exc)
             return False
@@ -147,6 +168,46 @@ class RunManager:
             if ctx is not None:
                 ctx.non_recoverable = True
             return False
+
+    async def _fail_run(
+        self,
+        ctx: RunContext,
+        *,
+        code: str = "run_failed",
+        message: str | None = None,
+        publish: bool = True,
+    ) -> None:
+        """P0-2：统一失败收尾。
+
+        确保所有 ``failed`` 路径都同步写回数据库终态（``status='failed'`` +
+        ``error`` + ``completed_at``），避免 run 永久停在 ``running`` 导致
+        ``has_active_runs`` 永远为 true、thread 无法删除。
+
+        Args:
+            code: SSE 错误事件中的 ``code`` 字段。
+            message: 错误消息；为 None 时使用 ``ctx.error``。
+            publish: 是否推送 SSE error 事件（runner 已推送过的路径设为 False）。
+        """
+        msg = message or ctx.error or "运行失败"
+        ctx.status = "failed"
+        ctx.error = msg
+        ctx.completed_at = time.time()
+        persisted = self._update_metadata(
+            ctx.run_id,
+            status="failed",
+            error=msg,
+            completed_at=datetime.now(timezone.utc),
+        )
+        if not persisted:
+            ctx.non_recoverable = True
+        if publish:
+            await ctx.publish(
+                {
+                    "event": "error",
+                    "code": code,
+                    "message": msg,
+                }
+            )
 
     def _claim_hitl(
         self,
@@ -221,6 +282,36 @@ class RunManager:
             )
         )
 
+    def _start_cancel_watcher(self, ctx: RunContext) -> asyncio.Task[Any] | None:
+        """P1-4：启动独立 cancel watcher，周期性检查远端取消请求。
+
+        即使 graph 长时间无事件产生（如模型调用卡住），watcher 也能发现取消
+        并取消主任务。watcher 在 ``_drive`` / ``_resume_drive`` 的 finally 块中
+        被 :meth:`_stop_cancel_watcher` 停止。
+        """
+        if ctx._cancel_check is None:
+            return None
+
+        async def _watch() -> None:
+            from lvyan.config import settings as _settings
+
+            interval = _settings.cancel_poll_interval_seconds
+            while True:
+                await asyncio.sleep(interval)
+                if await ctx.poll_cancel_async():
+                    # 取消主运行任务
+                    main_task = self._tasks.get(ctx.run_id)
+                    if main_task is not None and not main_task.done():
+                        main_task.cancel()
+                    return
+
+        return asyncio.create_task(_watch())
+
+    def _stop_cancel_watcher(self, watcher: asyncio.Task[Any] | None) -> None:
+        """P1-4：停止 cancel watcher 任务。"""
+        if watcher is not None and not watcher.done():
+            watcher.cancel()
+
     def has_active_thread_runs(self, thread_id: str) -> bool:
         """Return whether this process still owns an active run for a thread."""
         return any(
@@ -284,6 +375,8 @@ class RunManager:
 
         关键：runner 进入 ``awaiting_hitl`` 状态时不覆盖、不发送 final_output、
         不关闭 SSE 流，由 :meth:`_resume_drive` 在 HITL 决策后负责收尾。
+
+        P1-4：启动独立 cancel watcher 任务，不依赖 graph 事件产生即可取消。
         """
         ctx.status = "running"
         if not self._update_metadata(ctx.run_id, status="running"):
@@ -295,6 +388,8 @@ class RunManager:
                 }
             )
         interrupted = False
+        # P1-4：独立 cancel watcher —— 即使 graph 长时间无事件也能取消
+        cancel_watcher = self._start_cancel_watcher(ctx)
         try:
             if self._runner is not None:
                 output = await self._runner(query, ctx.thread_id, complexity, ctx)
@@ -302,19 +397,22 @@ class RunManager:
                 output = await default_runner(query, ctx.thread_id, complexity, ctx)
 
             if ctx.status == "failed":
+                # P0-2：runner 已设置 failed（如 checkpoint unavailable），
+                # 这里确保数据库终态同步，不推送重复事件。
+                await self._fail_run(
+                    ctx,
+                    code=ctx.fail_code or "runner_failed",
+                    publish=False,
+                )
                 return
 
             # P0-1 修复：runner 主动进入 awaiting_hitl 时不覆盖状态
             if ctx.status == "awaiting_hitl":
                 if not ctx.hitl_persisted and not ctx.persist_hitl_state(ctx.hitl_interrupt or {}):
-                    ctx.status = "failed"
-                    ctx.error = "无法持久化 HITL 状态，运行不可安全恢复"
-                    await ctx.publish(
-                        {
-                            "event": "error",
-                            "code": "hitl_persistence_failed",
-                            "message": ctx.error,
-                        }
+                    await self._fail_run(
+                        ctx,
+                        code="hitl_persistence_failed",
+                        message="无法持久化 HITL 状态，运行不可安全恢复",
                     )
                     return
                 interrupted = True
@@ -345,18 +443,9 @@ class RunManager:
                 )
             await ctx.publish({"event": "final_output", "output": ctx.final_output})
         except Exception as exc:  # noqa: BLE001 入口层需宽口径捕获
-            ctx.status = "failed"
-            ctx.error = str(exc)
-            ctx.completed_at = time.time()
-            self._update_metadata(
-                ctx.run_id,
-                status="failed",
-                error=ctx.error,
-                completed_at=datetime.now(timezone.utc),
-            )
+            await self._fail_run(ctx, code="run_exception", message=str(exc))
             self._append_message(ctx, "assistant", f"运行错误：{ctx.error}")
             _logger.exception("Agent run %s failed", ctx.run_id)
-            await ctx.publish({"event": "error", "message": str(exc)})
         except asyncio.CancelledError:
             ctx.status = "cancelled"
             ctx.error = "用户已停止生成"
@@ -365,6 +454,8 @@ class RunManager:
             await ctx.publish({"event": "cancelled", "message": ctx.error})
             raise
         finally:
+            # P1-4：停止 cancel watcher
+            self._stop_cancel_watcher(cancel_watcher)
             # 仅在非中断时关闭 SSE 流；HITL 由 _resume_drive 收尾
             if not interrupted:
                 await ctx.queue.put(None)
@@ -553,8 +644,13 @@ class RunManager:
             return ("error", f"checkpoint 恢复失败: {exc}")
 
     async def _resume_drive(self, ctx: RunContext, command: Any, config: dict[str, Any]) -> None:
-        """恢复中断的图执行并继续流式推送事件。"""
+        """恢复中断的图执行并继续流式推送事件。
+
+        P1-4：启动独立 cancel watcher，不依赖 graph 事件产生即可取消。
+        """
         interrupted = False
+        # P1-4：独立 cancel watcher
+        cancel_watcher = self._start_cancel_watcher(ctx)
         try:
             graph = _get_graph()
             final_output = ctx.final_output or ""
@@ -570,27 +666,19 @@ class RunManager:
             # 再次检查是否还有中断 —— P0-2 三态 fail-closed
             icr = _check_interrupt_status(graph, config)
             if icr.status == "unavailable":
-                ctx.status = "failed"
-                ctx.error = "无法读取 checkpoint 判断 HITL 状态，运行不可安全完成"
-                await ctx.publish(
-                    {
-                        "event": "error",
-                        "code": "checkpoint_unavailable",
-                        "message": ctx.error,
-                    }
+                await self._fail_run(
+                    ctx,
+                    code="checkpoint_unavailable",
+                    message="无法读取 checkpoint 判断 HITL 状态，运行不可安全完成",
                 )
                 return
             if icr.status == "pending" and icr.payload:
                 interrupt_info = icr.payload
                 if not ctx.persist_hitl_state(interrupt_info):
-                    ctx.status = "failed"
-                    ctx.error = "无法持久化 HITL 状态，运行不可安全恢复"
-                    await ctx.publish(
-                        {
-                            "event": "error",
-                            "code": "hitl_persistence_failed",
-                            "message": ctx.error,
-                        }
+                    await self._fail_run(
+                        ctx,
+                        code="hitl_persistence_failed",
+                        message="无法持久化 HITL 状态，运行不可安全恢复",
                     )
                     return
                 ctx.status = "awaiting_hitl"
@@ -638,18 +726,9 @@ class RunManager:
 
             await ctx.publish({"event": "final_output", "output": ctx.final_output})
         except Exception as exc:  # noqa: BLE001
-            ctx.status = "failed"
-            ctx.error = str(exc)
-            ctx.completed_at = time.time()
-            self._update_metadata(
-                ctx.run_id,
-                status="failed",
-                error=ctx.error,
-                completed_at=datetime.now(timezone.utc),
-            )
+            await self._fail_run(ctx, code="hitl_resume_exception", message=str(exc))
             self._append_message(ctx, "assistant", f"运行错误：{ctx.error}")
             _logger.exception("HITL 恢复执行失败 run %s", ctx.run_id)
-            await ctx.publish({"event": "error", "message": str(exc)})
         except asyncio.CancelledError:
             ctx.status = "cancelled"
             ctx.error = "用户已停止生成"
@@ -658,6 +737,8 @@ class RunManager:
             await ctx.publish({"event": "cancelled", "message": ctx.error})
             raise
         finally:
+            # P1-4：停止 cancel watcher
+            self._stop_cancel_watcher(cancel_watcher)
             if not interrupted:
                 await ctx.queue.put(None)
 
@@ -773,8 +854,8 @@ async def _stream_graph_events(
         stream_mode=["updates", "tasks"],
         version="v2",
     ):
-        # P1-2：跨实例协作取消。远端发起取消后，本 worker 在下个流事件察觉并终止。
-        if ctx.poll_cancel():
+        # P1-2/P1-3：跨实例协作取消（异步轮询，不阻塞 event loop）
+        if await ctx.poll_cancel_async():
             raise asyncio.CancelledError()
         if not isinstance(part, dict):
             continue
@@ -1029,8 +1110,10 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
         icr = _check_interrupt_status(graph, config)
         if icr.status == "unavailable":
             # checkpoint 不可读：不得假定无 interrupt，不得发送 final_output
+            # P0-2：设置状态和错误码，_drive 的 _fail_run 负责持久化
             ctx.status = "failed"
             ctx.error = "无法读取 checkpoint 判断 HITL 状态，运行不可安全完成"
+            ctx.fail_code = "checkpoint_unavailable"
             await ctx.publish(
                 {
                     "event": "error",
@@ -1044,6 +1127,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
             if not ctx.persist_hitl_state(interrupt_info):
                 ctx.status = "failed"
                 ctx.error = "无法持久化 HITL 状态，运行不可安全恢复"
+                ctx.fail_code = "hitl_persistence_failed"
                 await ctx.publish(
                     {
                         "event": "error",
