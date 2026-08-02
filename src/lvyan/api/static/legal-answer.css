@@ -1,0 +1,25 @@
+/* 法律分析结构化输出样式 */
+.legal-answer { max-width: 880px; line-height: 1.75; font-size: 16px; }
+.la-section { margin: 24px 0; padding: 16px 0; border-bottom: 1px solid #e4e7ec; }
+.la-meta { margin-bottom: 8px; }
+.la-title { color: #1F4B7A; font-size: 22px; margin: 0 0 12px; }
+.la-meta-grid { display: flex; flex-wrap: wrap; gap: 12px; color: #667085; font-size: 14px; }
+.la-conclusion { font-size: 17px; font-weight: 500; color: #1F4B7A; }
+.la-facts { list-style: none; padding: 0; }
+.la-fact { padding: 8px 12px; margin: 6px 0; background: #f9fafb; }
+.la-fact-icon, .la-fact-tag { font-weight: 600; margin-right: 6px; }
+.la-issue { margin: 16px 0; padding: 12px; background: #f9fafb; border-radius: 4px; }
+.la-counter { color: #B7791F; }
+.la-table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.la-evidence-table, .la-risk-table { width: 100%; border-collapse: collapse; }
+.la-evidence-table th, .la-risk-table th { background: #f2f4f7; text-align: left; padding: 8px; }
+.la-evidence-table td, .la-risk-table td { padding: 8px; border-bottom: 1px solid #e4e7ec; white-space: nowrap; }
+.la-evidence-table td:last-child, .la-risk-table td:last-child { white-space: normal; }
+.la-citation { margin: 8px 0; padding: 8px; background: #f9fafb; }
+.la-disclaimer { color: #667085; font-size: 13px; border-top: 2px solid #e4e7ec; }
+.la-action-phase { margin: 12px 0; }
+
+@media print {
+  .legal-answer { max-width: 100%; }
+  .la-section { page-break-inside: avoid; }
+}

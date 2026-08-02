@@ -24,6 +24,12 @@ const RISK_RATING_META = {
   low:    { label: '低风险', color: LEGAL_COLORS.success },
 };
 
+// P2：枚举中文化映射
+const EVIDENCE_STATUS_CN = { provided: '已提供', missing: '未提供', partial: '部分提供' };
+const PROBATIVE_FORCE_CN = { key: '关键', strong: '较强', medium: '一般', weak: '较弱', unevaluated: '待评估' };
+const MATERIAL_COMPLETENESS_CN = { complete: '材料较完整', partial: '材料部分完整', insufficient: '材料不足' };
+const CITATION_STATUS_CN = { effective: '现行有效', repealed: '已废止', not_yet_effective: '尚未生效', unknown: '状态未知' };
+
 function esc(text) {
   if (text == null) return '';
   return String(text)
@@ -53,15 +59,16 @@ function renderLegalAnswer(answer) {
 function renderMeta(meta) {
   if (!meta) return '';
   const risk = RISK_RATING_META[meta.risk_level] || RISK_RATING_META.medium;
+  const completeness = MATERIAL_COMPLETENESS_CN[meta.material_completeness] || meta.material_completeness || '';
   return `
     <div class="la-meta">
-      <h1>法律分析意见</h1>
+      <h2 class="la-title">法律分析意见</h2>
       <div class="la-meta-grid">
         <span>案件类型：<strong>${esc(meta.case_type)}</strong></span>
         <span>适用法域：<strong>${esc(meta.jurisdiction)}</strong></span>
         <span>法律适用时间：<strong>${esc(meta.law_as_of_date)}</strong></span>
         <span>风险等级：<strong style="color:${risk.color}">${risk.label}</strong></span>
-        <span>材料完整度：<strong>${esc(meta.material_completeness)}</strong></span>
+        <span>材料完整度：<strong>${esc(completeness)}</strong></span>
       </div>
     </div>`;
 }
@@ -71,7 +78,7 @@ function renderExecutiveSummary(summary) {
   const reasons = (summary.key_reasons || []).map(r => `<li>${esc(r)}</li>`).join('');
   return `
     <section class="la-section">
-      <h2>核心结论</h2>
+      <h3>核心结论</h3>
       <p class="la-conclusion">${esc(summary.conclusion)}</p>
       ${reasons ? `<ul class="la-reasons">${reasons}</ul>` : ''}
       <p class="la-uncertainty-main">主要不确定点：${esc(summary.main_uncertainty)}</p>
@@ -91,7 +98,7 @@ function renderFacts(facts) {
   }).join('');
   return `
     <section class="la-section">
-      <h2>事实基础</h2>
+      <h3>事实基础</h3>
       <ul class="la-facts">${items}</ul>
     </section>`;
 }
@@ -110,7 +117,7 @@ function renderIssues(issues) {
   }).join('');
   return `
     <section class="la-section">
-      <h2>争议焦点</h2>
+      <h3>争议焦点</h3>
       ${blocks}
     </section>`;
 }
@@ -121,17 +128,19 @@ function renderEvidence(evidence) {
     <tr>
       <td>${esc(e.name)}</td>
       <td>${esc(e.purpose)}</td>
-      <td>${esc(e.status)}</td>
-      <td>${esc(e.probative_force)}</td>
+      <td>${esc(EVIDENCE_STATUS_CN[e.status] || e.status)}</td>
+      <td>${esc(PROBATIVE_FORCE_CN[e.probative_force] || e.probative_force)}</td>
       <td>${esc(e.next_step || '')}</td>
     </tr>`).join('');
   return `
     <section class="la-section">
-      <h2>证据分析</h2>
-      <table class="la-evidence-table">
-        <thead><tr><th>证据</th><th>证明目的</th><th>状态</th><th>证明力</th><th>下一步</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <h3>证据分析</h3>
+      <div class="la-table-wrapper">
+        <table class="la-evidence-table">
+          <thead><tr><th>证据</th><th>证明目的</th><th>状态</th><th>证明力</th><th>下一步</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
     </section>`;
 }
 
@@ -148,11 +157,13 @@ function renderRisks(risks) {
   }).join('');
   return `
     <section class="la-section">
-      <h2>风险评估</h2>
-      <table class="la-risk-table">
-        <thead><tr><th>维度</th><th>等级</th><th>说明</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <h3>风险评估</h3>
+      <div class="la-table-wrapper">
+        <table class="la-risk-table">
+          <thead><tr><th>维度</th><th>等级</th><th>说明</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
     </section>`;
 }
 
@@ -178,7 +189,7 @@ function renderActionPlan(plan) {
     }).join('');
   return `
     <section class="la-section">
-      <h2>下一步行动</h2>
+      <h3>下一步行动</h3>
       ${blocks}
     </section>`;
 }
@@ -190,12 +201,12 @@ function renderCitations(citations) {
       <summary><strong>《${esc(c.full_name)}》${esc(c.article_number)}</strong></summary>
       <div class="la-citation-detail">
         <p>${esc(c.article_text)}</p>
-        <p><small>效力状态：${esc(c.status)}　来源：${esc(c.official_source || '官方数据库')}</small></p>
+        <p><small>效力状态：${esc(CITATION_STATUS_CN[c.status] || c.status)}　来源：${esc(c.official_source || '官方数据库')}</small></p>
       </div>
     </details>`).join('');
   return `
     <section class="la-section">
-      <h2>法律依据</h2>
+      <h3>法律依据</h3>
       ${items}
     </section>`;
 }
@@ -210,7 +221,7 @@ function renderUncertainties(uncertainties) {
     </li>`).join('');
   return `
     <section class="la-section la-uncertainties">
-      <h2>不确定性说明</h2>
+      <h3>不确定性说明</h3>
       <ul>${items}</ul>
     </section>`;
 }

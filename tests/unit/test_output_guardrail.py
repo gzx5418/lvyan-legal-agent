@@ -306,16 +306,16 @@ def test_route_retry_to_composer():
     assert route_after_output_guardrail(state) == "composer"
 
 
-def test_route_no_retry_to_end():
-    """output_retry_needed=False → route 返回 'end'。"""
+def test_route_no_retry_to_finalizer():
+    """output_retry_needed=False → route 返回 'legal_answer_finalizer'。"""
     state = {"output_retry_needed": False}
-    assert route_after_output_guardrail(state) == "end"
+    assert route_after_output_guardrail(state) == "legal_answer_finalizer"
 
 
-def test_route_default_to_end():
-    """output_retry_needed 未设置 → 默认返回 'end'。"""
+def test_route_default_to_finalizer():
+    """output_retry_needed 未设置 → 默认返回 'legal_answer_finalizer'。"""
     state = {}
-    assert route_after_output_guardrail(state) == "end"
+    assert route_after_output_guardrail(state) == "legal_answer_finalizer"
 
 
 # ---------------------------------------------------------------------------

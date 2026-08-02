@@ -880,22 +880,30 @@ def composer(state: CaseState) -> dict[str, Any]:
         output = output + _HIGH_RISK_DISCLAIMER
 
     # 4. 结构化输出：构建 LegalAnswerV1 并校验（与 final_output 并行）
+    # P0-2：document 模式不构建 legal_answer，避免结构化分析页覆盖文书输出。
+    #    document 模式的 Markdown 包含文书正文 + DOCX 信息，LegalAnswerV1
+    #    无法承载，应让前端继续展示 Markdown。
+    # P0-1：composer 在 output_guardrail 之前构建，此处的 legal_answer 是
+    #    未脱敏的初稿。真正的结构化输出由 legal_answer_finalizer 节点在
+    #    output_guardrail 之后重建。此处仍保留构建（供 checkpoint 恢复等
+    #    非标准路径兜底），但 finalizer 会覆盖它。
     legal_answer_dict: dict[str, Any] | None = None
-    try:
-        from lvyan.nodes.answer_builder import build_legal_answer
-        from lvyan.nodes.answer_validator import (
-            ValidationError as AVError,
-            validate_legal_answer,
-        )
+    if complexity != "document":
+        try:
+            from lvyan.nodes.answer_builder import build_legal_answer
+            from lvyan.nodes.answer_validator import (
+                ValidationError as AVError,
+                validate_legal_answer,
+            )
 
-        cs = state if isinstance(state, CaseState) else CaseState.model_validate(state)
-        answer = build_legal_answer(cs)
-        validate_legal_answer(answer)
-        legal_answer_dict = answer.model_dump(mode="json")
-    except AVError as exc:
-        _logger.warning("legal_answer 校验失败，仅返回 Markdown: %s", exc)
-    except Exception as exc:  # noqa: BLE001
-        _logger.warning("legal_answer 构建失败，仅返回 Markdown: %s", exc)
+            cs = state if isinstance(state, CaseState) else CaseState.model_validate(state)
+            answer = build_legal_answer(cs)
+            validate_legal_answer(answer)
+            legal_answer_dict = answer.model_dump(mode="json")
+        except AVError as exc:
+            _logger.warning("legal_answer 校验失败，仅返回 Markdown: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("legal_answer 构建失败，仅返回 Markdown: %s", exc)
 
     result: dict[str, Any] = {
         "final_output": output,

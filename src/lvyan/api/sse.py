@@ -488,6 +488,7 @@ class RunManager:
                 ctx.run_id,
                 status="completed",
                 final_output=ctx.final_output,
+                legal_answer=ctx.legal_answer,
                 completed_at=datetime.now(timezone.utc),
             )
             thread_marked = self._mark_thread_output(ctx.thread_id)
@@ -784,6 +785,7 @@ class RunManager:
                 ctx.run_id,
                 status="completed",
                 final_output=ctx.final_output,
+                legal_answer=ctx.legal_answer,
                 completed_at=datetime.now(timezone.utc),
             )
             thread_marked = self._mark_thread_output(ctx.thread_id)

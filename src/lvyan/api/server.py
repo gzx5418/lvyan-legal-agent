@@ -138,6 +138,7 @@ def _state_summary(state: Any) -> dict[str, Any]:
         "confidence": state.confidence,
         "iteration": state.iteration,
         "final_output": state.final_output,
+        "legal_answer": getattr(state, "legal_answer", None),
         "facts_count": len(state.facts),
         "statutes_count": len(state.statutes),
         "cases_count": len(state.cases),
@@ -778,12 +779,14 @@ def create_app(
 
             async def durable_event_generator():
                 if status == "completed":
-                    yield format_sse_event(
-                        {
-                            "event": "final_output",
-                            "output": durable_run.get("final_output") or "",
-                        }
-                    )
+                    final_md = durable_run.get("final_output") or ""
+                    legal_answer = durable_run.get("legal_answer")
+                    event: dict[str, Any] = {"event": "final_output", "output": final_md}
+                    if legal_answer:
+                        event["schema_version"] = legal_answer.get("schema_version", "legal_answer_v1")
+                        event["answer"] = legal_answer
+                        event["markdown_fallback"] = final_md
+                    yield format_sse_event(event)
                 elif status == "failed":
                     yield format_sse_event(
                         {

@@ -61,6 +61,7 @@ from lvyan.nodes.composer import composer
 from lvyan.nodes.critic import critic
 from lvyan.nodes.evidence_analyzer import authority_resolver
 from lvyan.nodes.fact_extractor import fact_extractor
+from lvyan.nodes.legal_answer_finalizer import legal_answer_finalizer
 from lvyan.nodes.legal_reasoner import legal_reasoner
 from lvyan.nodes.output_guardrail import output_guardrail
 from lvyan.nodes.planner import missing_fact_assessor, planner
@@ -92,6 +93,7 @@ NODE_NAMES: tuple[str, ...] = (
     "citation_verifier",
     "composer",
     "output_guardrail",
+    "legal_answer_finalizer",
 )
 
 
@@ -109,6 +111,7 @@ def _register_nodes(graph: StateGraph) -> None:
     graph.add_node("citation_verifier", citation_verifier)
     graph.add_node("composer", composer)
     graph.add_node("output_guardrail", output_guardrail)
+    graph.add_node("legal_answer_finalizer", legal_answer_finalizer)
 
 
 def _wire_edges(graph: StateGraph) -> None:
@@ -163,13 +166,16 @@ def _wire_edges(graph: StateGraph) -> None:
     )
 
     # output_guardrail → (route_after_output_guardrail)
-    #   ├─ "composer" → 回退 composer 重新生成（受 MAX_OUTPUT_ITERATIONS 约束）
-    #   └─ "end"      → END
+    #   ├─ "composer"              → 回退 composer 重新生成
+    #   └─ "legal_answer_finalizer" → 重建结构化输出后结束
     graph.add_conditional_edges(
         "output_guardrail",
         route_after_output_guardrail,
-        {"composer": "composer", "end": END},
+        {"composer": "composer", "legal_answer_finalizer": "legal_answer_finalizer"},
     )
+
+    # legal_answer_finalizer → END
+    graph.add_edge("legal_answer_finalizer", END)
 
 
 def _build_graph_with_checkpointer(checkpointer: Any) -> Any:

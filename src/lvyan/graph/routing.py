@@ -126,11 +126,11 @@ def route_after_output_guardrail(state: Any) -> str:
     - 若 ``state.output_retry_needed`` 为 True → 返回 ``"composer"``，
       回退 ``composer`` 重新生成（受 ``MAX_OUTPUT_ITERATIONS`` 约束，
       上限判断由 ``output_guardrail`` 节点内部完成）。
-    - 否则 → 返回 ``"end"``，结束流程。
+    - 否则 → 返回 ``"legal_answer_finalizer"``，重建结构化输出后结束。
 
     ``output_retry_needed`` 缺省为 False（字段未初始化时按不回退处理）。
     """
     retry_needed = _get(state, "output_retry_needed", False)
     if bool(retry_needed):
         return "composer"
-    return "end"
+    return "legal_answer_finalizer"

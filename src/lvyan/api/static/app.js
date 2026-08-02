@@ -902,6 +902,7 @@ function captureConversation() {
         msg.classList.contains('msg-user') ? 'user' : 'assistant'
       ),
       content: msg.dataset.content || '',
+      structured_answer: msg.dataset.structuredAnswer ? JSON.parse(msg.dataset.structuredAnswer) : null,
       attachments: JSON.parse(msg.dataset.attachments || '[]'),
       created_at: Date.now() / 1000,
     }))
@@ -1104,6 +1105,15 @@ function renderConversation(messages) {
       false,
       Array.isArray(message.attachments) ? message.attachments : [],
     );
+    // 恢复结构化法律分析视图
+    if (message.structured_answer && role === 'agent' && window.renderLegalAnswer) {
+      const lastAgent = els.messages.querySelector('.msg-agent:last-child .msg-content');
+      if (lastAgent) {
+        const lastMsg = els.messages.querySelector('.msg-agent:last-child');
+        lastMsg.dataset.structuredAnswer = JSON.stringify(message.structured_answer);
+        lastAgent.innerHTML = window.renderLegalAnswer(message.structured_answer);
+      }
+    }
   });
 }
 
