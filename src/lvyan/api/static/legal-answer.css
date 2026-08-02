@@ -10,7 +10,7 @@
 /* --- 报告头 --- */
 .la-report-header {
   padding: 28px 32px 20px;
-  background: linear-gradient(135deg, #ffffff 0%, #f7fafc 100%);
+  background: linear-gradient(135deg, #1a1d27 0%, #222633 100%);
   border-bottom: 1px solid var(--la-border);
 }
 .la-report-eyebrow {

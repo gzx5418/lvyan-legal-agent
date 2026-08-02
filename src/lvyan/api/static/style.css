@@ -27,29 +27,29 @@
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
 
-  /* --- P0：浅色工作区 + 白色法律报告（分层设计语言） --- */
-  --app-bg: #f3f5f8;
-  --surface: #ffffff;
-  --surface-subtle: #f8fafc;
+  /* --- 全暗色主题：工作区 + 法律报告卡片统一暗色 --- */
+  --app-bg: #0f1117;
+  --surface: #1a1d27;
+  --surface-subtle: #222633;
 
-  --text-primary: #172033;
-  --text-secondary: #475467;
-  --text-muted: #667085;
+  --text-primary: #e4e6eb;
+  --text-secondary: #b4b8c5;
+  --text-muted: #8a8f9e;
 
-  --la-primary: #214f7b;
-  --la-primary-soft: #edf4fb;
-  --la-success: #287a5b;
-  --la-success-soft: #edf8f3;
-  --la-warning: #a96712;
-  --la-warning-soft: #fff7e8;
-  --la-danger: #b42318;
-  --la-danger-soft: #fef3f2;
-  --la-inferred: #6655a5;
-  --la-inferred-soft: #f4f1fb;
+  --la-primary: #6ba4d9;
+  --la-primary-soft: #1e2a3d;
+  --la-success: #4cae7f;
+  --la-success-soft: #1c2e28;
+  --la-warning: #d4a14a;
+  --la-warning-soft: #2e2618;
+  --la-danger: #e0655a;
+  --la-danger-soft: #2e1a18;
+  --la-inferred: #9888d4;
+  --la-inferred-soft: #24203a;
 
-  --la-border: #e4e7ec;
-  --la-border-strong: #d0d5dd;
-  --la-shadow-paper: 0 1px 2px rgb(16 24 40 / 4%), 0 10px 28px rgb(16 24 40 / 7%);
+  --la-border: #2d3140;
+  --la-border-strong: #3a3f50;
+  --la-shadow-paper: 0 1px 2px rgb(0 0 0 / 30%), 0 10px 28px rgb(0 0 0 / 45%);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
