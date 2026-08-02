@@ -1,25 +1,242 @@
-/* 法律分析结构化输出样式 */
-.legal-answer { max-width: 880px; line-height: 1.75; font-size: 16px; }
-.la-section { margin: 24px 0; padding: 16px 0; border-bottom: 1px solid #e4e7ec; }
-.la-meta { margin-bottom: 8px; }
-.la-title { color: #1F4B7A; font-size: 22px; margin: 0 0 12px; }
-.la-meta-grid { display: flex; flex-wrap: wrap; gap: 12px; color: #667085; font-size: 14px; }
-.la-conclusion { font-size: 17px; font-weight: 500; color: #1F4B7A; }
-.la-facts { list-style: none; padding: 0; }
-.la-fact { padding: 8px 12px; margin: 6px 0; background: #f9fafb; }
-.la-fact-icon, .la-fact-tag { font-weight: 600; margin-right: 6px; }
-.la-issue { margin: 16px 0; padding: 12px; background: #f9fafb; border-radius: 4px; }
-.la-counter { color: #B7791F; }
-.la-table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-.la-evidence-table, .la-risk-table { width: 100%; border-collapse: collapse; }
-.la-evidence-table th, .la-risk-table th { background: #f2f4f7; text-align: left; padding: 8px; }
-.la-evidence-table td, .la-risk-table td { padding: 8px; border-bottom: 1px solid #e4e7ec; white-space: nowrap; }
-.la-evidence-table td:last-child, .la-risk-table td:last-child { white-space: normal; }
-.la-citation { margin: 8px 0; padding: 8px; background: #f9fafb; }
-.la-disclaimer { color: #667085; font-size: 13px; border-top: 2px solid #e4e7ec; }
-.la-action-phase { margin: 12px 0; }
+/* 法律分析结构化输出：白色纸张报告样式 */
+/* 所有颜色通过语义类名控制，components.js 不再写内联颜色 */
 
-@media print {
-  .legal-answer { max-width: 100%; }
-  .la-section { page-break-inside: avoid; }
+.legal-answer {
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 1.75;
+}
+
+/* --- 报告头 --- */
+.la-report-header {
+  padding: 28px 32px 20px;
+  background: linear-gradient(135deg, #ffffff 0%, #f7fafc 100%);
+  border-bottom: 1px solid var(--la-border);
+}
+.la-report-eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--la-primary);
+  font-weight: 600;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.la-report-title {
+  font-family: "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", serif;
+  font-size: 24px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  margin: 0 0 12px;
+  font-weight: 700;
+}
+.la-meta-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* --- 段落通用 --- */
+.la-section {
+  padding: 20px 32px;
+  border-bottom: 1px solid var(--la-border);
+}
+.la-section:last-child { border-bottom: 0; }
+.la-section h3 {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 12px;
+}
+
+/* --- 核心结论两栏 --- */
+.la-summary-grid {
+  display: grid;
+  grid-template-columns: 1fr 280px;
+  gap: 24px;
+}
+@media (max-width: 768px) {
+  .la-summary-grid { grid-template-columns: 1fr; }
+}
+.la-conclusion { font-size: 16px; color: var(--text-primary); font-weight: 500; }
+.la-reasons { margin: 12px 0 0; padding-left: 18px; color: var(--text-secondary); }
+.la-reasons li { margin-bottom: 4px; }
+.la-risk-panel {
+  background: var(--surface-subtle);
+  border-radius: 12px;
+  padding: 16px;
+}
+.la-risk-panel-item { margin-bottom: 12px; }
+.la-risk-panel-item:last-child { margin-bottom: 0; }
+.la-risk-panel-label { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
+.la-risk-panel-value { font-size: 15px; font-weight: 600; }
+
+/* --- 风险徽章 --- */
+.risk-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.risk-high { background: var(--la-danger-soft); color: var(--la-danger); }
+.risk-medium { background: var(--la-warning-soft); color: var(--la-warning); }
+.risk-low { background: var(--la-success-soft); color: var(--la-success); }
+
+/* --- 事实列表 --- */
+.la-facts { list-style: none; padding: 0; margin: 0; }
+.la-fact {
+  padding: 10px 14px;
+  margin: 6px 0;
+  background: var(--surface-subtle);
+  border-radius: 8px;
+  border-left: 3px solid var(--la-border-strong);
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.la-fact.fact-confirmed { border-left-color: var(--la-success); }
+.la-fact.fact-claimed { border-left-color: var(--text-muted); }
+.la-fact.fact-inferred { border-left-color: var(--la-inferred); }
+.la-fact.fact-missing { border-left-color: var(--la-warning); }
+.la-fact-tag {
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+  padding: 1px 8px;
+  border-radius: 4px;
+}
+.fact-confirmed .la-fact-tag { background: var(--la-success-soft); color: var(--la-success); }
+.fact-claimed .la-fact-tag { background: var(--surface-subtle); color: var(--text-muted); }
+.fact-inferred .la-fact-tag { background: var(--la-inferred-soft); color: var(--la-inferred); }
+.fact-missing .la-fact-tag { background: var(--la-warning-soft); color: var(--la-warning); }
+.la-fact-content { color: var(--text-primary); }
+
+/* --- 争议焦点折叠卡片 --- */
+.la-issue {
+  margin: 12px 0;
+  background: var(--surface-subtle);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.la-issue-toggle {
+  width: 100%;
+  text-align: left;
+  padding: 14px 16px;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.la-issue-toggle .la-issue-arrow { transition: transform 0.2s; color: var(--text-muted); }
+.la-issue.open .la-issue-arrow { transform: rotate(180deg); }
+.la-issue-body {
+  display: none;
+  padding: 0 16px 14px;
+}
+.la-issue.open .la-issue-body { display: block; }
+.la-issue-body p { margin: 8px 0; color: var(--text-secondary); }
+.la-issue-body strong { color: var(--text-primary); }
+.la-counter { color: var(--la-warning); }
+.la-issue-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.la-rule-chip {
+  font-size: 12px;
+  padding: 2px 8px;
+  background: var(--la-primary-soft);
+  color: var(--la-primary);
+  border-radius: 4px;
+}
+
+/* --- 表格 + 横向滚动 --- */
+.la-table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.la-evidence-table, .la-risk-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.la-evidence-table th, .la-risk-table th {
+  background: var(--surface-subtle);
+  text-align: left;
+  padding: 10px 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 13px;
+  border-bottom: 1px solid var(--la-border);
+}
+.la-evidence-table td, .la-risk-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--la-border);
+  color: var(--text-secondary);
+}
+.la-evidence-table td:first-child, .la-risk-table td:first-child {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* --- 行动建议 --- */
+.la-action-phase { margin: 12px 0; }
+.la-action-phase h4 { font-size: 14px; color: var(--text-primary); margin: 0 0 8px; }
+.la-action-phase ol { margin: 0; padding-left: 20px; color: var(--text-secondary); }
+.la-action-phase li { margin-bottom: 6px; }
+
+/* --- 法条引用抽屉 --- */
+.la-citation {
+  margin: 8px 0;
+  padding: 12px 14px;
+  background: var(--surface-subtle);
+  border-radius: 8px;
+  border-left: 3px solid var(--la-primary);
+}
+.la-citation summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+.la-citation-level {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-right: 6px;
+  font-weight: 500;
+}
+.level-law { background: var(--la-primary-soft); color: var(--la-primary); }
+.level-regulation { background: var(--surface-subtle); color: var(--text-muted); }
+.level-judicial_interpretation { background: var(--la-primary-soft); color: var(--la-primary); }
+.level-guiding_case { background: var(--la-inferred-soft); color: var(--la-inferred); }
+.level-reference_case { background: var(--surface-subtle); color: var(--text-muted); }
+.level-normative { background: var(--surface-subtle); color: var(--text-muted); }
+.la-citation-detail { margin-top: 8px; color: var(--text-secondary); font-size: 14px; }
+.la-citation-detail small { color: var(--text-muted); }
+
+/* --- 不确定性 --- */
+.la-uncertainties ul { list-style: none; padding: 0; }
+.la-uncertainties li { padding: 8px 0; border-bottom: 1px solid var(--la-border); }
+.la-uncertainties li:last-child { border-bottom: 0; }
+
+/* --- 免责声明 --- */
+.la-disclaimer {
+  color: var(--text-muted);
+  font-size: 13px;
+  background: var(--surface-subtle);
+  padding: 16px 32px;
 }

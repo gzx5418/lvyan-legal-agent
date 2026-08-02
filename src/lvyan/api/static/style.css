@@ -26,6 +26,30 @@
   --topbar-h: 52px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+
+  /* --- P0：浅色工作区 + 白色法律报告（分层设计语言） --- */
+  --app-bg: #f3f5f8;
+  --surface: #ffffff;
+  --surface-subtle: #f8fafc;
+
+  --text-primary: #172033;
+  --text-secondary: #475467;
+  --text-muted: #667085;
+
+  --la-primary: #214f7b;
+  --la-primary-soft: #edf4fb;
+  --la-success: #287a5b;
+  --la-success-soft: #edf8f3;
+  --la-warning: #a96712;
+  --la-warning-soft: #fff7e8;
+  --la-danger: #b42318;
+  --la-danger-soft: #fef3f2;
+  --la-inferred: #6655a5;
+  --la-inferred-soft: #f4f1fb;
+
+  --la-border: #e4e7ec;
+  --la-border-strong: #d0d5dd;
+  --la-shadow-paper: 0 1px 2px rgb(16 24 40 / 4%), 0 10px 28px rgb(16 24 40 / 7%);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -362,6 +386,35 @@ body.sidebar-collapsed #main { margin-left: 0; }
   border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-soft);
+}
+
+/* --- P0：浅色工作区模式（结构化报告激活时） --- */
+.chat-area.la-active {
+  background: var(--app-bg);
+}
+.chat-area.la-active .messages {
+  max-width: 1180px;
+}
+.chat-area.la-active .msg-agent.msg-structured {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+}
+.chat-area.la-active .msg-agent.msg-structured .msg-avatar,
+.chat-area.la-active .msg-agent.msg-structured .msg-name {
+  display: none;
+}
+.chat-area.la-active .msg-agent.msg-structured .msg-body {
+  width: 100%;
+}
+.chat-area.la-active .msg-agent.msg-structured .msg-content {
+  background: var(--surface);
+  border: 1px solid var(--la-border);
+  border-radius: 16px;
+  box-shadow: var(--la-shadow-paper);
+  color: var(--text-primary);
+  padding: 0;
+  overflow: hidden;
 }
 
 /* 消息列表 */
@@ -883,6 +936,7 @@ textarea:focus-visible {
   }
   .welcome { padding: 20px; }
   .welcome h1 { font-size: 22px; }
+  .msg-actions { opacity: 1 !important; }
 }
 
 @media (prefers-reduced-motion: reduce) {

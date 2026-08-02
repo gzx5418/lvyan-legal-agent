@@ -1,0 +1,40 @@
+/* 打印与 PDF 导出专用样式 */
+@media print {
+  #sidebar,
+  #topbar,
+  .input-area,
+  .msg-actions,
+  .progress-bar,
+  .hitl-panel,
+  #toast,
+  .msg-avatar,
+  .msg-name {
+    display: none !important;
+  }
+
+  html, body {
+    overflow: visible;
+    background: white;
+    color: black;
+  }
+
+  .chat-area, .messages, .legal-answer {
+    max-width: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .msg-agent.msg-structured .msg-content {
+    box-shadow: none;
+    border: 0;
+  }
+
+  .la-section, .la-citation[open] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .la-report-header {
+    background: white;
+  }
+}

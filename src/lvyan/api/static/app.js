@@ -782,6 +782,8 @@ function updateLastAgentMessageStructured(answer, markdownFallback) {
   lastMsg.dataset.content = markdownFallback || '';
   lastMsg.dataset.structuredAnswer = JSON.stringify(answer);
   contentDiv.innerHTML = window.renderLegalAnswer(answer);
+  lastMsg.classList.add('msg-structured');
+  els.chatArea.classList.add('la-active');
 
   if (!lastMsg.querySelector('.msg-actions')) {
     const body = lastMsg.querySelector('.msg-body');
@@ -1097,6 +1099,7 @@ async function loadThreadState(threadId, item) {
 
 function renderConversation(messages) {
   els.messages.innerHTML = '';
+  els.chatArea.classList.remove('la-active');
   messages.forEach(message => {
     const role = message.role === 'assistant' ? 'agent' : 'user';
     addMessage(
@@ -1107,11 +1110,13 @@ function renderConversation(messages) {
     );
     // 恢复结构化法律分析视图
     if (message.structured_answer && role === 'agent' && window.renderLegalAnswer) {
-      const lastAgent = els.messages.querySelector('.msg-agent:last-child .msg-content');
-      if (lastAgent) {
-        const lastMsg = els.messages.querySelector('.msg-agent:last-child');
+      const lastMsg = els.messages.querySelector('.msg-agent:last-child');
+      const lastContent = lastMsg ? lastMsg.querySelector('.msg-content') : null;
+      if (lastMsg && lastContent) {
         lastMsg.dataset.structuredAnswer = JSON.stringify(message.structured_answer);
-        lastAgent.innerHTML = window.renderLegalAnswer(message.structured_answer);
+        lastContent.innerHTML = window.renderLegalAnswer(message.structured_answer);
+        lastMsg.classList.add('msg-structured');
+        els.chatArea.classList.add('la-active');
       }
     }
   });
@@ -1213,6 +1218,7 @@ function startNewChat() {
   els.welcome.style.display = 'flex';
   els.messages.style.display = 'none';
   els.messages.innerHTML = '';
+  els.chatArea.classList.remove('la-active');
   els.threadLabel.textContent = '新对话';
   els.progressBar.style.display = 'none';
   els.hitlPanel.style.display = 'none';
