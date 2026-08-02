@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from lvyan.config import AGENT_DIR, settings
 
@@ -62,7 +62,9 @@ class RunMetadataStore(Protocol):
 
     def claim_hitl_run(self, run_id: str, user_id: str) -> dict[str, Any] | None: ...
 
-    def request_cancel(self, run_id: str, user_id: str) -> bool: ...
+    def request_cancel(
+        self, run_id: str, user_id: str
+    ) -> Literal["cancelled_immediately", "cancel_requested", "not_found"]: ...
 
     def is_cancel_requested(self, run_id: str, user_id: str) -> bool: ...
 
@@ -461,53 +463,56 @@ class PostgresRunMetadataStore:
                 cur.execute("UPDATE agent_runs SET status = status WHERE FALSE")
         return True
 
-    def request_cancel(self, run_id: str, user_id: str) -> bool:
+    def request_cancel(
+        self, run_id: str, user_id: str
+    ) -> Literal["cancelled_immediately", "cancel_requested", "not_found"]:
         """P1-2：跨实例取消的请求侧。
 
-        P1-1 改进：``awaiting_hitl`` 状态下没有 worker 轮询，无法通过协作取消
-        终结。因此对 ``awaiting_hitl`` 直接原子地置为 ``cancelled`` 终态；
-        对 ``started/running`` 仍只设置 ``cancel_requested_at``，由 owner 实例
-        的 worker 轮询发现后停止。
+        P1-1 改进：使用单条原子 SQL 消除两条语句间的状态切换竞态。
+        原实现先尝试 awaiting_hitl→cancelled，再尝试 started/running→cancel_requested_at，
+        两条 SQL 在 autocommit 下非原子，可能在状态切换窗口期都未命中。
+
+        P0-1 改进：返回三态结果而非 bool，让调用方区分：
+        - ``cancelled_immediately``：awaiting_hitl 已直接终结为 cancelled（无 worker 轮询）
+        - ``cancel_requested``：started/running 已设置 cancel_requested_at（worker 将轮询停止）
+        - ``not_found``：run 不存在、不属于该用户、或已处于终态
 
         Returns:
-            ``True`` 表示成功记录取消请求（或直接终结）；``False`` 表示 run
-            不存在、不属于该用户、或已处于终态不可取消。
+            上述三态字符串之一。
         """
         with self._connect() as conn:
             self._ensure_schema(conn)
             with conn.cursor() as cur:
-                # P1-1：awaiting_hitl 直接终结（无 worker 轮询）
+                # P1-1：单条原子 SQL，CASE 在同一行内求值，无竞态窗口
                 cur.execute(
                     """
                     UPDATE agent_runs
-                    SET status = 'cancelled',
+                    SET
+                        status = CASE
+                            WHEN status = 'awaiting_hitl' THEN 'cancelled'
+                            ELSE status
+                        END,
                         cancel_requested_at = now(),
-                        completed_at = now(),
-                        error = '用户已停止生成'
+                        completed_at = CASE
+                            WHEN status = 'awaiting_hitl' THEN now()
+                            ELSE completed_at
+                        END,
+                        error = CASE
+                            WHEN status = 'awaiting_hitl' THEN '用户已停止生成'
+                            ELSE error
+                        END
                     WHERE run_id = %s
                       AND user_id = %s
-                      AND status = 'awaiting_hitl'
-                    RETURNING run_id
+                      AND status IN ('started', 'running', 'awaiting_hitl')
+                    RETURNING status
                     """,
                     (run_id, user_id),
                 )
                 row = cur.fetchone()
-                if row is not None:
-                    return True
-                # started/running：协作取消（worker 轮询发现后停止）
-                cur.execute(
-                    """
-                    UPDATE agent_runs
-                    SET cancel_requested_at = now()
-                    WHERE run_id = %s
-                      AND user_id = %s
-                      AND status IN ('started', 'running')
-                    RETURNING run_id
-                    """,
-                    (run_id, user_id),
-                )
-                row = cur.fetchone()
-        return row is not None
+        if row is None:
+            return "not_found"
+        # RETURNING 返回更新后的 status
+        return "cancelled_immediately" if row["status"] == "cancelled" else "cancel_requested"
 
     def is_cancel_requested(self, run_id: str, user_id: str) -> bool:
         """P1-2：worker 侧协作取消轮询。``cancel_requested_at`` 非空即已请求取消。"""

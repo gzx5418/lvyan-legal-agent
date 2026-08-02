@@ -321,6 +321,60 @@ def persistence_required() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def durable_runtime_required() -> bool:
+    """P1-3：是否需要持久化运行时（checkpointer + metadata store 都必须可用）。
+
+    当以下任一为 true 时返回 True：
+    - ``persistence_required()``（生产模式或显式 PERSISTENCE_REQUIRED=true）
+    - ``CHECKPOINTER_BACKEND=postgres``（显式要求 PG checkpointer）
+    """
+    import os
+
+    if persistence_required():
+        return True
+    backend = os.getenv("CHECKPOINTER_BACKEND", settings.checkpointer_backend).strip().lower()
+    return backend == "postgres"
+
+
+def validate_runtime_config() -> None:
+    """P1-2 / P1-4：启动期验证运行时配置，非法值直接启动失败。
+
+    - ``CHECKPOINTER_BACKEND`` 只允许 ``memory`` / ``postgres`` / ``auto``；
+    - ``PERSISTENCE_REQUIRED=true`` + ``CHECKPOINTER_BACKEND=memory`` 冲突；
+    - 生产模式 + ``AUTH_ENABLED=true`` + ``AUTH_MODE=auto`` 冲突。
+    """
+    import os
+
+    backend = os.getenv("CHECKPOINTER_BACKEND", settings.checkpointer_backend).strip().lower()
+    if backend not in {"memory", "postgres", "auto"}:
+        raise RuntimeError(
+            f"CHECKPOINTER_BACKEND='{backend}' 非法；"
+            f"允许值: memory / postgres / auto"
+        )
+    if backend == "memory" and persistence_required():
+        raise RuntimeError(
+            "PERSISTENCE_REQUIRED=true 时禁止 CHECKPOINTER_BACKEND=memory"
+        )
+    # P1-4：生产认证配置校验
+    if is_production() and is_auth_enabled_env():
+        auth_mode = os.getenv("AUTH_MODE", "auto").strip().lower()
+        if auth_mode == "auto":
+            raise RuntimeError(
+                "AUTH_MODE=auto 在生产模式下被禁止；"
+                "请设置 AUTH_MODE=jwt 或 AUTH_MODE=trusted_proxy"
+            )
+
+
+def is_auth_enabled_env() -> bool:
+    """从环境变量读取 AUTH_ENABLED（供 validate_runtime_config 使用）。"""
+    import os
+
+    raw = os.getenv("AUTH_ENABLED")
+    if raw is None:
+        return settings.auth_enabled
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 __all__ = [
     "AGENT_DIR",
     "REPO_ROOT",
@@ -331,4 +385,7 @@ __all__ = [
     "is_official_db_available",
     "is_production",
     "persistence_required",
+    "durable_runtime_required",
+    "validate_runtime_config",
+    "is_auth_enabled_env",
 ]

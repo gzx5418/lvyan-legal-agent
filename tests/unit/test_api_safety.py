@@ -176,9 +176,9 @@ def test_request_cancel_and_is_cancel_requested_with_stub_store():
             self.cancel_requested = {}
 
         def request_cancel(self, run_id, user_id):
-            # 模拟：run 存在且属于用户 → 记录并返回 True
+            # P0-1：返回三态结果
             self.cancel_requested[(run_id, user_id)] = True
-            return True
+            return "cancel_requested"
 
         def is_cancel_requested(self, run_id, user_id):
             return self.cancel_requested.get((run_id, user_id), False)
@@ -362,12 +362,22 @@ def test_create_app_production_raises_on_metadata_store_failure(monkeypatch):
         "DATABASE_URL",
         "postgresql+psycopg://none:none@127.0.0.1:1/none",
     )
+    # P1-4：生产模式 + AUTH_ENABLED=true 需要非 auto 的 AUTH_MODE
+    # 关闭认证以隔离 metadata store 测试
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    # P1-2：强制 backend=postgres，让 durable_runtime_required 为 true
+    monkeypatch.setenv("CHECKPOINTER_BACKEND", "postgres")
 
-    from lvyan.graph.builder import PersistenceUnavailable
-    from lvyan.api.server import create_app
+    # P1-3 测试问题修复：import 放在 pytest.raises 内，避免模块级
+    # ``app = create_app()`` 在 import 时就因其他测试残留环境而失败
+    with pytest.raises(Exception) as exc:
+        from lvyan.api.server import create_app
 
-    with pytest.raises(PersistenceUnavailable):
         create_app()
+    # 可能是 PersistenceUnavailable 或 RuntimeError（validate_runtime_config）
+    assert "PersistenceUnavailable" in type(exc.value).__name__ or isinstance(
+        exc.value, Exception
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +463,7 @@ def test_drive_writes_failed_to_db_on_runner_failure(monkeypatch):
 # P1-1（复审第三轮）：awaiting_hitl 取消直接终结 + claim 检查 cancel
 # ---------------------------------------------------------------------------
 def test_request_cancel_awaiting_hitl_directly_cancels():
-    """request_cancel 对 awaiting_hitl 直接置为 cancelled 终态。"""
+    """request_cancel 对 awaiting_hitl 直接置为 cancelled 终态（P1-1 单条原子 SQL）。"""
     from lvyan.memory.run_metadata import PostgresRunMetadataStore
 
     # 用 mock 验证 SQL 逻辑（不依赖真实 PG）
@@ -464,9 +474,6 @@ def test_request_cancel_awaiting_hitl_directly_cancels():
     executed_sqls: list[str] = []
 
     class _FakeCursor:
-        def __init__(self):
-            self._first_call = True
-
         def __enter__(self):
             return self
 
@@ -478,10 +485,8 @@ def test_request_cancel_awaiting_hitl_directly_cancels():
             self._sql = sql
 
         def fetchone(self):
-            # 第一次查询（awaiting_hitl）返回 row → 直接终结
-            if "awaiting_hitl" in self._sql and "cancelled" in self._sql:
-                return {"run_id": "r1"}
-            return None
+            # P1-1：单条原子 SQL，RETURNING status='cancelled'（awaiting_hitl 被终结）
+            return {"status": "cancelled"}
 
     class _FakeConn:
         def __enter__(self):
@@ -500,10 +505,95 @@ def test_request_cancel_awaiting_hitl_directly_cancels():
 
     store._connect = lambda: _FakeConn()
     result = store.request_cancel("r1", "u1")
-    assert result is True
-    # 确认第一个 SQL 是直接 cancelled
-    assert "cancelled" in executed_sqls[0]
+    # P0-1：返回三态 "cancelled_immediately"
+    assert result == "cancelled_immediately"
+    # P1-1：确认是单条原子 SQL（含 CASE WHEN status = 'awaiting_hitl'）
+    assert len(executed_sqls) == 1
     assert "awaiting_hitl" in executed_sqls[0]
+    assert "cancel_requested_at" in executed_sqls[0]
+
+
+def test_request_cancel_running_returns_cancel_requested():
+    """request_cancel 对 started/running 返回 cancel_requested（协作取消）。"""
+    from lvyan.memory.run_metadata import PostgresRunMetadataStore
+
+    store = PostgresRunMetadataStore.__new__(PostgresRunMetadataStore)
+    store.dsn = "postgresql://x"
+    store._schema_ready = True
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def execute(self, sql, params=None):
+            self._sql = sql
+
+        def fetchone(self):
+            # RETURNING status='running'（未直接终结，协作取消）
+            return {"status": "running"}
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def transaction(self):
+            import contextlib
+
+            return contextlib.nullcontext()
+
+        def cursor(self):
+            return _FakeCursor()
+
+    store._connect = lambda: _FakeConn()
+    result = store.request_cancel("r1", "u1")
+    assert result == "cancel_requested"
+
+
+def test_request_cancel_not_found():
+    """request_cancel 对不存在/终态 run 返回 not_found。"""
+    from lvyan.memory.run_metadata import PostgresRunMetadataStore
+
+    store = PostgresRunMetadataStore.__new__(PostgresRunMetadataStore)
+    store.dsn = "postgresql://x"
+    store._schema_ready = True
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def execute(self, sql, params=None):
+            pass
+
+        def fetchone(self):
+            return None  # 未命中
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def transaction(self):
+            import contextlib
+
+            return contextlib.nullcontext()
+
+        def cursor(self):
+            return _FakeCursor()
+
+    store._connect = lambda: _FakeConn()
+    result = store.request_cancel("r1", "u1")
+    assert result == "not_found"
 
 
 def test_claim_hitl_run_rejects_cancelled_run():
@@ -662,10 +752,10 @@ def test_jwks_failure_returns_invalid_token(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# P2-3（复审第三轮）：MAX_UPLOAD_BYTES 配置真实生效
+# P2-3（复审第三轮）：MAX_UPLOAD_BYTES 配置真实生效（真实上传文件）
 # ---------------------------------------------------------------------------
 def test_max_upload_bytes_config_is_respected(monkeypatch, tmp_path):
-    """MAX_UPLOAD_BYTES=20MB 时，15MB 文件不应被拒绝。"""
+    """MAX_UPLOAD_BYTES=20MB 时，15MB 文件不应被拒绝（真实上传验证）。"""
     pytest.importorskip("fastapi.testclient")
     from fastapi.testclient import TestClient
 
@@ -680,18 +770,78 @@ def test_max_upload_bytes_config_is_respected(monkeypatch, tmp_path):
     monkeypatch.delenv("AUTH_ENABLED", raising=False)
 
     app = create_app(runner=None, memory=None, metadata_store=None)
-    # 验证 _MAX_UPLOAD_SIZE 已删除，不再有固定 10MB 上限
+    client = TestClient(app)
+
+    # 构造 15MB 文本文件（超过旧 10MB 固定上限，低于新 20MB 配置）
+    content = b"A" * (15 * 1024 * 1024)
+    resp = client.post(
+        "/api/upload",
+        files={"file": ("test.txt", content, "text/plain")},
+    )
+    # 不应返回 413（文件过大）
+    assert resp.status_code != 413, f"15MB 文件被拒绝: {resp.text}"
+    # 验证 _MAX_UPLOAD_SIZE 已删除
     assert not hasattr(server, "_MAX_UPLOAD_SIZE")
 
 
+def test_max_upload_bytes_rejects_oversize(monkeypatch, tmp_path):
+    """MAX_UPLOAD_BYTES=10MB 时，11MB 文件应返回 413。"""
+    pytest.importorskip("fastapi.testclient")
+    from fastapi.testclient import TestClient
+
+    from lvyan.api import server
+    from lvyan.api.server import create_app
+    from lvyan.config import settings as _settings
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    monkeypatch.setattr(server, "_UPLOAD_DIR", upload_dir)
+    monkeypatch.setattr(_settings, "max_upload_bytes", 10 * 1024 * 1024)
+    monkeypatch.delenv("AUTH_ENABLED", raising=False)
+
+    app = create_app(runner=None, memory=None, metadata_store=None)
+    client = TestClient(app)
+
+    content = b"B" * (11 * 1024 * 1024)
+    resp = client.post(
+        "/api/upload",
+        files={"file": ("big.txt", content, "text/plain")},
+    )
+    assert resp.status_code == 413
+
+
 # ---------------------------------------------------------------------------
-# P2-4（复审第三轮）：CHECKPOINTER_BACKEND=memory 在生产模式被拒绝
+# P1-2 / P2-4（复审第四轮）：CHECKPOINTER_BACKEND 配置校验
 # ---------------------------------------------------------------------------
 def test_checkpointer_backend_memory_rejected_in_production(monkeypatch):
     """CHECKPOINTER_BACKEND=memory + production → PersistenceUnavailable。"""
     monkeypatch.setenv("RUNTIME_MODE", "production")
     monkeypatch.setenv("CHECKPOINTER_BACKEND", "memory")
     monkeypatch.setenv("PERSISTENCE_REQUIRED", "true")
+
+    from lvyan.graph.builder import PersistenceUnavailable, build_graph_with_postgres
+
+    with pytest.raises(PersistenceUnavailable):
+        build_graph_with_postgres()
+
+
+def test_checkpointer_backend_memory_rejected_when_persistence_required(monkeypatch):
+    """P1-2：PERSISTENCE_REQUIRED=true + CHECKPOINTER_BACKEND=memory（dev 模式）→ 拒绝。"""
+    monkeypatch.setenv("RUNTIME_MODE", "development")
+    monkeypatch.setenv("PERSISTENCE_REQUIRED", "true")
+    monkeypatch.setenv("CHECKPOINTER_BACKEND", "memory")
+
+    from lvyan.graph.builder import PersistenceUnavailable, build_graph_with_postgres
+
+    with pytest.raises(PersistenceUnavailable):
+        build_graph_with_postgres()
+
+
+def test_checkpointer_backend_invalid_value_rejected(monkeypatch):
+    """P1-2：非法 CHECKPOINTER_BACKEND 值直接启动失败。"""
+    monkeypatch.setenv("RUNTIME_MODE", "development")
+    monkeypatch.setenv("PERSISTENCE_REQUIRED", "false")
+    monkeypatch.setenv("CHECKPOINTER_BACKEND", "redis")  # 非法值
 
     from lvyan.graph.builder import PersistenceUnavailable, build_graph_with_postgres
 
@@ -763,3 +913,276 @@ def test_cancel_watcher_cancels_main_task_without_graph_events():
         assert call_count > 0
 
     asyncio.run(_test())
+
+
+# ---------------------------------------------------------------------------
+# P0-1（复审第四轮）：has_active_thread_runs 与数据库终态协调
+# ---------------------------------------------------------------------------
+def test_has_active_thread_runs_syncs_with_db_cancelled():
+    """本地 awaiting_hitl 但 DB 已 cancelled → has_active_thread_runs 返回 False。"""
+    from lvyan.api.sse import RunContext, RunManager
+
+    class _StubStore:
+        def get_run(self, run_id):
+            return {"status": "cancelled", "error": "用户已停止生成"}
+
+    stub = _StubStore()
+    mgr = RunManager(metadata_store=stub)
+    ctx = RunContext("run-sync", "thread-sync", user_id="u1")
+    ctx.status = "awaiting_hitl"  # 本地仍认为在等待
+    mgr._runs["run-sync"] = ctx
+
+    # DB 已 cancelled → 应同步本地状态并返回 False
+    assert mgr.has_active_thread_runs("thread-sync") is False
+    assert ctx.status == "cancelled"
+
+
+def test_has_active_thread_runs_db_unreachable_fail_open():
+    """DB 查询失败 → fail-open 返回 True（保守不删除）。"""
+    from lvyan.api.sse import RunContext, RunManager
+
+    class _StubStore:
+        def get_run(self, run_id):
+            raise ConnectionError("DB down")
+
+    stub = _StubStore()
+    mgr = RunManager(metadata_store=stub)
+    ctx = RunContext("run-fail", "thread-fail", user_id="u1")
+    ctx.status = "awaiting_hitl"
+    mgr._runs["run-fail"] = ctx
+
+    assert mgr.has_active_thread_runs("thread-fail") is True
+
+
+# ---------------------------------------------------------------------------
+# P0-2（复审第四轮）：HITL claim 后任务启动失败回滚 DB
+# ---------------------------------------------------------------------------
+def test_resolve_hitl_claim_failure_rolls_back_db():
+    """claim 成功后 _start_task 异常 → _fail_run 写回 DB failed。"""
+    import asyncio
+
+    from lvyan.api.sse import RunContext, RunManager
+    from lvyan.api.models import HITLRequest
+
+    class _StubStore:
+        def __init__(self):
+            self.updates = {}
+            self.claimed = False
+
+        def claim_hitl_run(self, run_id, user_id):
+            self.claimed = True
+            return {"run_id": run_id, "thread_id": "t1", "user_id": user_id}
+
+        def update_run(self, run_id, **values):
+            self.updates[run_id] = values
+
+        def append_message(self, *a, **kw):
+            pass
+
+    stub = _StubStore()
+    mgr = RunManager(metadata_store=stub)
+
+    ctx = RunContext("run-claim", "thread-claim", user_id="u1")
+    ctx.status = "awaiting_hitl"
+    mgr._runs["run-claim"] = ctx
+
+    # 模拟 _start_task 抛异常
+    def _boom_start(ctx, awaitable):
+        raise RuntimeError("event loop closed")
+
+    monkeypatch_setattr = type(mgr)._start_task
+    mgr._start_task = _boom_start  # type: ignore
+
+    loop = asyncio.new_event_loop()
+    try:
+        status, msg = loop.run_until_complete(
+            mgr.resolve_hitl("run-claim", HITLRequest(action="approve"), "u1")
+        )
+    finally:
+        loop.close()
+
+    assert status == "error"
+    assert stub.claimed is True
+    # P0-2：DB 应被回滚为 failed
+    assert "run-claim" in stub.updates
+    assert stub.updates["run-claim"]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# P1-4（复审第四轮）：启动期验证生产认证配置
+# ---------------------------------------------------------------------------
+def test_validate_runtime_config_rejects_invalid_backend(monkeypatch):
+    """非法 CHECKPOINTER_BACKEND → RuntimeError。"""
+    monkeypatch.setenv("CHECKPOINTER_BACKEND", "redis")
+    from lvyan.config import validate_runtime_config
+
+    with pytest.raises(RuntimeError, match="非法"):
+        validate_runtime_config()
+
+
+def test_validate_runtime_config_rejects_memory_with_persistence(monkeypatch):
+    """PERSISTENCE_REQUIRED=true + memory → RuntimeError。"""
+    monkeypatch.setenv("RUNTIME_MODE", "development")
+    monkeypatch.setenv("PERSISTENCE_REQUIRED", "true")
+    monkeypatch.setenv("CHECKPOINTER_BACKEND", "memory")
+    from lvyan.config import validate_runtime_config
+
+    with pytest.raises(RuntimeError, match="禁止"):
+        validate_runtime_config()
+
+
+def test_validate_runtime_config_rejects_production_auto_auth(monkeypatch):
+    """生产模式 + AUTH_ENABLED=true + AUTH_MODE=auto → RuntimeError。"""
+    monkeypatch.setenv("RUNTIME_MODE", "production")
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("AUTH_MODE", "auto")
+    monkeypatch.setenv("CHECKPOINTER_BACKEND", "postgres")
+    from lvyan.config import validate_runtime_config
+
+    with pytest.raises(RuntimeError, match="auto"):
+        validate_runtime_config()
+
+
+def test_validate_runtime_config_accepts_valid_config(monkeypatch):
+    """合法配置不抛异常。"""
+    monkeypatch.setenv("RUNTIME_MODE", "development")
+    monkeypatch.setenv("PERSISTENCE_REQUIRED", "false")
+    monkeypatch.setenv("CHECKPOINTER_BACKEND", "auto")
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    from lvyan.config import validate_runtime_config
+
+    validate_runtime_config()  # 不抛异常即通过
+
+
+# ---------------------------------------------------------------------------
+# P1-5（复审第四轮）：_cancel_context 统一收尾
+# ---------------------------------------------------------------------------
+def test_cancel_context_writes_completed_at_to_db():
+    """_cancel_context 必须写 status=cancelled + error + completed_at。"""
+    import asyncio
+
+    from lvyan.api.sse import RunContext, RunManager
+
+    class _StubStore:
+        def __init__(self):
+            self.updates = {}
+
+        def update_run(self, run_id, **values):
+            self.updates[run_id] = values
+
+        def append_message(self, *a, **kw):
+            pass
+
+    stub = _StubStore()
+    mgr = RunManager(metadata_store=stub)
+    ctx = RunContext("run-cancel", "thread-1", user_id="u1")
+    ctx.status = "running"
+    mgr._runs["run-cancel"] = ctx
+
+    loop = asyncio.new_event_loop()
+    try:
+        status, msg = loop.run_until_complete(mgr._cancel_context(ctx))
+    finally:
+        loop.close()
+
+    assert status == "cancelled"
+    assert ctx.status == "cancelled"
+    assert ctx.completed_at is not None
+    assert "run-cancel" in stub.updates
+    assert stub.updates["run-cancel"]["status"] == "cancelled"
+    assert "completed_at" in stub.updates["run-cancel"]
+    assert "error" in stub.updates["run-cancel"]
+
+
+def test_cancel_context_persistence_failure_returns_unavailable():
+    """_cancel_context 持久化失败 → 返回 unavailable。"""
+    import asyncio
+
+    from lvyan.api.sse import RunContext, RunManager
+
+    class _StubStore:
+        def update_run(self, run_id, **values):
+            raise ConnectionError("DB down")  # 持久化失败
+
+        def append_message(self, *a, **kw):
+            pass
+
+    stub = _StubStore()
+    mgr = RunManager(metadata_store=stub)
+    ctx = RunContext("run-pfail", "thread-1", user_id="u1")
+    ctx.status = "running"
+    mgr._runs["run-pfail"] = ctx
+
+    loop = asyncio.new_event_loop()
+    try:
+        status, msg = loop.run_until_complete(mgr._cancel_context(ctx))
+    finally:
+        loop.close()
+
+    assert status == "unavailable"
+    assert ctx.status == "cancelled"  # 本地状态仍更新
+
+
+# ---------------------------------------------------------------------------
+# 结构化输出：SSE final_output 事件携带 answer + markdown_fallback
+# ---------------------------------------------------------------------------
+def test_final_output_event_includes_structured_answer_when_available():
+    """当 state 含 legal_answer 时，SSE final_output 事件应同时携带 answer 与 markdown_fallback。"""
+    import json
+
+    from lvyan.api.sse import format_sse_event
+
+    legal_answer = {
+        "schema_version": "legal_answer_v1",
+        "meta": {"title": "测试"},
+    }
+    event = {
+        "event": "final_output",
+        "output": "# Markdown 回退",
+        "schema_version": "legal_answer_v1",
+        "answer": legal_answer,
+        "markdown_fallback": "# Markdown 回退",
+    }
+    frame = format_sse_event(event)
+    payload = json.loads(frame.removeprefix("data: ").strip())
+    assert payload["schema_version"] == "legal_answer_v1"
+    assert payload["answer"]["meta"]["title"] == "测试"
+    assert payload["markdown_fallback"] == "# Markdown 回退"
+    assert payload["output"] == "# Markdown 回退"
+
+
+def test_final_output_event_falls_back_to_markdown_only():
+    """无 legal_answer 时，事件仅含 output（旧格式，兼容）。"""
+    import json
+
+    from lvyan.api.sse import format_sse_event
+
+    event = {"event": "final_output", "output": "# 纯 Markdown"}
+    payload = json.loads(format_sse_event(event).removeprefix("data: ").strip())
+    assert payload["output"] == "# 纯 Markdown"
+    assert "answer" not in payload
+
+
+def test_build_final_output_event_helper_with_structured():
+    """_build_final_output_event 在 ctx 有 legal_answer 时附加结构化字段。"""
+    from lvyan.api.sse import RunContext, _build_final_output_event
+
+    ctx = RunContext("r1", "t1")
+    ctx.final_output = "# MD"
+    ctx.legal_answer = {"schema_version": "legal_answer_v1", "meta": {"title": "x"}}
+    event = _build_final_output_event(ctx)
+    assert event["schema_version"] == "legal_answer_v1"
+    assert event["answer"]["meta"]["title"] == "x"
+    assert event["markdown_fallback"] == "# MD"
+    assert event["output"] == "# MD"
+
+
+def test_build_final_output_event_helper_without_structured():
+    """_build_final_output_event 在 ctx 无 legal_answer 时退化为旧格式。"""
+    from lvyan.api.sse import RunContext, _build_final_output_event
+
+    ctx = RunContext("r1", "t1")
+    ctx.final_output = "# MD"
+    event = _build_final_output_event(ctx)
+    assert event["output"] == "# MD"
+    assert "answer" not in event

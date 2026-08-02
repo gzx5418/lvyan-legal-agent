@@ -428,18 +428,23 @@ def create_app(
         memory: 可注入的 CaseMemory 实例；None 时使用共享实例（绑定共享图）。
     """
     app = FastAPI(title="律言法律智能体 API", version="0.2.0")
+
+    # P1-2 / P1-4：启动期验证运行时配置（非法 backend、冲突组合、生产认证）
+    from lvyan.config import validate_runtime_config
+
+    validate_runtime_config()
+
     if metadata_store is None and runner is None and memory is None:
-        from lvyan.config import persistence_required
+        from lvyan.config import durable_runtime_required
 
         try:
             metadata_store = PostgresRunMetadataStore()
             # 做一次轻量探测，确认数据库可达。
             metadata_store.healthcheck()
         except Exception as exc:
-            # P0-1：生产/强制持久化模式下，metadata store 初始化失败必须让服务
-            # 启动失败，绝不静默降级到 None（否则 run/HITL 元数据无持久化，
-            # 而 checkpointer 可能正常，形成「半持久化」状态）。
-            if persistence_required():
+            # P0-1 / P1-3：durable_runtime_required（含 CHECKPOINTER_BACKEND=postgres）
+            # 时，metadata store 初始化失败必须让服务启动失败。
+            if durable_runtime_required():
                 from lvyan.graph.builder import PersistenceUnavailable
 
                 raise PersistenceUnavailable(
@@ -505,7 +510,7 @@ def create_app(
         gw = _check_model_gateway_ready()
 
         # P0-1：暴露实际 checkpointer 类型；生产模式下 memory = 降级
-        from lvyan.config import is_production
+        from lvyan.config import durable_runtime_required, is_production, is_auth_enabled_env
         from lvyan.runtime import get_checkpointer_kind
 
         cp_kind = get_checkpointer_kind()
@@ -515,16 +520,26 @@ def create_app(
         elif is_production() and cp_kind != "postgres":
             cp_status = "degraded"
 
-        # P0-1：生产模式下 metadata store 为 None（降级）→ not-ready
+        # P0-1 / P1-3：durable_runtime_required 时 metadata store 为 None → not-ready
         metadata_status = "ok" if metadata_store is not None else "unavailable"
-        if is_production() and metadata_store is None:
+        if durable_runtime_required() and metadata_store is None:
             metadata_status = "degraded"
+
+        # P1-4：认证配置状态（生产模式 + AUTH_MODE=auto = misconfigured）
+        auth_status = "ok"
+        if is_auth_enabled_env() and is_production():
+            import os
+
+            auth_mode = os.getenv("AUTH_MODE", "auto").strip().lower()
+            if auth_mode == "auto":
+                auth_status = "misconfigured"
 
         ready = (
             db == "ok"
             and ret == "ok"
             and cp_status != "degraded"
             and metadata_status != "degraded"
+            and auth_status != "misconfigured"
         )
         # model_gateway 不可用不阻断 ready（可降级到规则路径）
         return JSONResponse(
@@ -537,6 +552,7 @@ def create_app(
                 "checkpointer": cp_kind,
                 "checkpointer_status": cp_status,
                 "metadata_store": metadata_status,
+                "authentication": auth_status,
                 "object_storage": "unknown",
             },
         )

@@ -54,6 +54,8 @@ class RunContext:
         self.status: str = "started"
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
         self.final_output: str | None = None
+        # 结构化法律输出（LegalAnswerV1 dict），与 final_output 并行
+        self.legal_answer: dict[str, Any] | None = None
         self.error: str | None = None
         self.non_recoverable: bool = False
         # HITL 中断信息（LangGraph interrupt 机制）
@@ -209,6 +211,42 @@ class RunManager:
                 }
             )
 
+    async def _cancel_context(
+        self,
+        ctx: RunContext,
+        *,
+        code: str = "cancelled",
+        message: str = "用户已停止生成",
+    ) -> tuple[str, str]:
+        """P1-5 / P0-1：统一取消收尾。
+
+        确保所有取消路径（``_drive`` 的 CancelledError、``_resume_drive`` 的
+        CancelledError、``cancel_run`` 的本地手动取消、``awaiting_hitl`` 远端
+        取消同步）都：
+        1. 设置 ``ctx.status = "cancelled"`` + ``completed_at``；
+        2. 写回数据库终态（``status='cancelled'`` + ``error`` + ``completed_at``）；
+        3. 推送 ``cancelled`` SSE 事件并关闭队列；
+        4. 返回 ``(status, message)``，持久化失败时返回 ``unavailable``。
+        """
+        ctx.status = "cancelled"
+        ctx.error = message
+        ctx.completed_at = time.time()
+        persisted = self._update_metadata(
+            ctx.run_id,
+            status="cancelled",
+            error=message,
+            completed_at=datetime.now(timezone.utc),
+        )
+        self._append_message(ctx, "assistant", message)
+        await ctx.publish({"event": "cancelled", "message": message})
+        await ctx.queue.put(None)
+        if not persisted:
+            return (
+                "unavailable",
+                "运行已停止，但持久化失败；重启后状态可能不一致",
+            )
+        return ("cancelled", "已停止生成")
+
     def _claim_hitl(
         self,
         run_id: str,
@@ -313,11 +351,36 @@ class RunManager:
             watcher.cancel()
 
     def has_active_thread_runs(self, thread_id: str) -> bool:
-        """Return whether this process still owns an active run for a thread."""
-        return any(
-            ctx.thread_id == thread_id and ctx.status in {"started", "running", "awaiting_hitl"}
-            for ctx in self._runs.values()
-        )
+        """Return whether this process still owns an active run for a thread.
+
+        P0-1：本地 ``ctx.status`` 可能与数据库终态不一致（远端实例已把
+        ``awaiting_hitl`` 直接终结为 ``cancelled``，但本地仍为
+        ``awaiting_hitl``）。在判断前先与数据库协调：若数据库已为终态，
+        同步本地状态并返回 False。
+        """
+        for ctx in list(self._runs.values()):
+            if ctx.thread_id != thread_id:
+                continue
+            if ctx.status not in {"started", "running", "awaiting_hitl"}:
+                continue
+            # P0-1：与数据库协调，检测远端取消
+            if self._metadata_store is not None:
+                try:
+                    run_meta = self._metadata_store.get_run(ctx.run_id)
+                except Exception as exc:  # noqa: BLE001
+                    _logger.debug("has_active_thread_runs 查询失败: %s", exc)
+                    return True  # fail-open：DB 不可达时保守返回 True
+                if run_meta is not None:
+                    db_status = run_meta.get("status")
+                    if db_status in {"cancelled", "failed", "completed", "abandoned"}:
+                        # 同步本地终态
+                        ctx.status = db_status
+                        if db_status == "cancelled":
+                            ctx.error = run_meta.get("error") or "用户已停止生成"
+                        ctx.completed_at = time.time()
+                        continue
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # 运行生命周期
@@ -441,23 +504,20 @@ class RunManager:
                         "message": "结果已生成，但持久化失败，请保存当前内容",
                     }
                 )
-            await ctx.publish({"event": "final_output", "output": ctx.final_output})
+            await ctx.publish(_build_final_output_event(ctx))
         except Exception as exc:  # noqa: BLE001 入口层需宽口径捕获
             await self._fail_run(ctx, code="run_exception", message=str(exc))
             self._append_message(ctx, "assistant", f"运行错误：{ctx.error}")
             _logger.exception("Agent run %s failed", ctx.run_id)
         except asyncio.CancelledError:
-            ctx.status = "cancelled"
-            ctx.error = "用户已停止生成"
-            self._update_metadata(ctx.run_id, status="cancelled", error=ctx.error)
-            self._append_message(ctx, "assistant", ctx.error)
-            await ctx.publish({"event": "cancelled", "message": ctx.error})
+            # P1-5：统一取消收尾，确保 DB 写入 completed_at
+            await self._cancel_context(ctx, message="用户已停止生成")
             raise
         finally:
             # P1-4：停止 cancel watcher
             self._stop_cancel_watcher(cancel_watcher)
-            # 仅在非中断时关闭 SSE 流；HITL 由 _resume_drive 收尾
-            if not interrupted:
+            # 仅在非中断且未取消时关闭 SSE 流（取消路径由 _cancel_context 关闭）
+            if not interrupted and ctx.status not in {"cancelled", "failed"}:
                 await ctx.queue.put(None)
 
     # ------------------------------------------------------------------
@@ -509,6 +569,7 @@ class RunManager:
         if ctx.status != "awaiting_hitl":
             return ("error", f"run {run_id} 不在等待 HITL 状态（当前: {ctx.status}）")
 
+        claimed = False  # P0-2：追踪 claim 是否成功，用于异常回滚
         try:
             # 通过 LangGraph Command(resume=...) 恢复执行
             from langgraph.types import Command
@@ -529,6 +590,8 @@ class RunManager:
             if claim_status == "unavailable":
                 return ("unavailable", f"run {run_id} 的审批状态暂时不可用")
 
+            # P0-2：claim 已成功（DB: awaiting_hitl→running），后续启动失败必须回滚 DB
+            claimed = True
             # 恢复执行并继续流式推送
             ctx.status = "running"
             self._start_task(
@@ -537,8 +600,17 @@ class RunManager:
             )
             return ("resolved", f"已收到 {request.action} 决策，Agent 正在恢复执行")
         except Exception as exc:  # noqa: BLE001
-            ctx.status = "failed"
             _logger.exception("HITL 恢复失败 run %s", ctx.run_id)
+            # P0-2：claim 成功后启动失败 → 统一回滚 DB 终态
+            if claimed:
+                await self._fail_run(
+                    ctx,
+                    code="hitl_resume_start_failed",
+                    message=str(exc),
+                    publish=False,
+                )
+            else:
+                ctx.status = "failed"
             return ("error", f"恢复失败: {exc}")
 
     async def _resolve_hitl_from_checkpoint(
@@ -583,6 +655,7 @@ class RunManager:
                 # 本地开发兼容路径；生产实例必须注入 PostgreSQL metadata store。
                 thread_candidates = _get_case_memory().list_threads()
 
+            claimed = False  # P0-2：追踪 claim 是否成功
             for thread_id, meta in thread_candidates:
                 config = {"configurable": {"thread_id": thread_id}}
                 interrupt_info = _check_interrupt(graph, config)
@@ -631,6 +704,8 @@ class RunManager:
                     self._runs.pop(run_id, None)
                     return ("unavailable", f"run {run_id} 的审批状态暂时不可用")
 
+                # P0-2：claim 成功，后续启动失败必须回滚 DB
+                claimed = True
                 ctx.status = "running"
                 self._start_task(
                     ctx,
@@ -641,6 +716,14 @@ class RunManager:
             return ("not_found", f"run {run_id} 不存在（进程内和 checkpoint 均未找到）")
         except Exception as exc:  # noqa: BLE001
             _logger.exception("HITL checkpoint 恢复失败 run %s", run_id)
+            # P0-2：claim 成功后启动失败 → 统一回滚 DB 终态
+            if claimed and ctx is not None:
+                await self._fail_run(
+                    ctx,
+                    code="hitl_resume_start_failed",
+                    message=str(exc),
+                    publish=False,
+                )
             return ("error", f"checkpoint 恢复失败: {exc}")
 
     async def _resume_drive(self, ctx: RunContext, command: Any, config: dict[str, Any]) -> None:
@@ -655,13 +738,14 @@ class RunManager:
             graph = _get_graph()
             final_output = ctx.final_output or ""
 
-            final_output = await _stream_graph_events(
+            final_output, legal_answer = await _stream_graph_events(
                 graph,
                 command,
                 config,
                 ctx,
                 final_output=final_output,
             )
+            ctx.legal_answer = legal_answer
 
             # 再次检查是否还有中断 —— P0-2 三态 fail-closed
             icr = _check_interrupt_status(graph, config)
@@ -724,22 +808,20 @@ class RunManager:
             except Exception:  # noqa: BLE001
                 pass
 
-            await ctx.publish({"event": "final_output", "output": ctx.final_output})
+            await ctx.publish(_build_final_output_event(ctx))
         except Exception as exc:  # noqa: BLE001
             await self._fail_run(ctx, code="hitl_resume_exception", message=str(exc))
             self._append_message(ctx, "assistant", f"运行错误：{ctx.error}")
             _logger.exception("HITL 恢复执行失败 run %s", ctx.run_id)
         except asyncio.CancelledError:
-            ctx.status = "cancelled"
-            ctx.error = "用户已停止生成"
-            self._update_metadata(ctx.run_id, status="cancelled", error=ctx.error)
-            self._append_message(ctx, "assistant", ctx.error)
-            await ctx.publish({"event": "cancelled", "message": ctx.error})
+            # P1-5：统一取消收尾，确保 DB 写入 completed_at
+            await self._cancel_context(ctx, message="用户已停止生成")
             raise
         finally:
             # P1-4：停止 cancel watcher
             self._stop_cancel_watcher(cancel_watcher)
-            if not interrupted:
+            # 仅在非中断且未取消时关闭 SSE 流（取消路径由 _cancel_context 关闭）
+            if not interrupted and ctx.status not in {"cancelled", "failed"}:
                 await ctx.queue.put(None)
 
     async def cancel_run(
@@ -754,6 +836,11 @@ class RunManager:
           不再吞掉 ``_update_metadata`` 的返回值。
         - 本实例无该 run 时，尝试在 metadata store 中写入 ``cancel_requested``
           标记，供运行该 run 的远端实例协作取消（跨实例取消的请求侧）。
+
+        P0-1 改进：
+        - ``request_cancel`` 返回三态；``cancelled_immediately`` 表示远端已把
+          ``awaiting_hitl`` 直接终结。若本地仍持有该 RunContext（awaiting_hitl），
+          需同步本地状态、推送 cancelled SSE、关闭队列，避免前端永久等待。
         """
         ctx = self._runs.get(run_id)
 
@@ -761,18 +848,23 @@ class RunManager:
         if ctx is None:
             if self._metadata_store is not None:
                 try:
-                    requested = self._metadata_store.request_cancel(
+                    result = self._metadata_store.request_cancel(
                         run_id, current_user_id
                     )
                 except Exception as exc:  # noqa: BLE001
                     _logger.warning("request_cancel 持久化失败 run %s: %s", run_id, exc)
                     return ("unavailable", f"无法记录取消请求：{exc}")
-                if requested:
+                if result == "cancelled_immediately":
+                    return (
+                        "cancelled",
+                        f"run {run_id} 已直接取消（awaiting_hitl 远端终结）",
+                    )
+                if result == "cancel_requested":
                     return (
                         "cancel_requested",
                         f"已请求取消 run {run_id}，远端实例将在下个轮询周期停止",
                     )
-                # request_cancel 返回 False：run 不存在或不属于该用户
+                # not_found：run 不存在或不属于该用户
                 return ("not_found", f"run {run_id} 不存在或不属于当前用户")
             return ("not_found", f"run {run_id} 不存在")
 
@@ -780,6 +872,10 @@ class RunManager:
             return ("forbidden", f"run {run_id} 不属于当前用户")
         if ctx.status not in {"started", "running", "awaiting_hitl"}:
             return ("conflict", f"run {run_id} 已处于 {ctx.status} 状态")
+
+        # P0-1：awaiting_hitl 状态下主任务已结束、watcher 已停止，需直接同步本地
+        if ctx.status == "awaiting_hitl":
+            return await self._cancel_context(ctx, code="cancelled")
 
         task = self._tasks.get(run_id)
         if task is not None and not task.done():
@@ -789,27 +885,27 @@ class RunManager:
             except asyncio.CancelledError:
                 pass
         if ctx.status != "cancelled":
-            ctx.status = "cancelled"
-            ctx.error = "用户已停止生成"
-            ctx.completed_at = time.time()
-            # P1-2：检查持久化结果；失败时返回 unavailable（API 层 → 503）
-            persisted = self._update_metadata(
-                run_id, status="cancelled", error=ctx.error
-            )
-            self._append_message(ctx, "assistant", ctx.error)
-            await ctx.publish({"event": "cancelled", "message": ctx.error})
-            await ctx.queue.put(None)
-            if not persisted:
-                return (
-                    "unavailable",
-                    "运行已在本实例停止，但持久化失败；重启后状态可能不一致",
-                )
+            return await self._cancel_context(ctx, code="cancelled")
         return ("cancelled", "已停止生成")
 
 
 # ---------------------------------------------------------------------------
 # SSE 格式化
 # ---------------------------------------------------------------------------
+def _build_final_output_event(ctx: "RunContext") -> dict[str, Any]:
+    """构建 final_output 事件，同时携带结构化 answer 与 markdown 回退。
+
+    兼容设计：旧前端读取 ``output`` 字段（Markdown），新前端读取 ``answer``
+    （LegalAnswerV1 dict）。无结构化输出时退化为旧格式。
+    """
+    event: dict[str, Any] = {"event": "final_output", "output": ctx.final_output}
+    if ctx.legal_answer:
+        event["schema_version"] = ctx.legal_answer.get("schema_version", "legal_answer_v1")
+        event["answer"] = ctx.legal_answer
+        event["markdown_fallback"] = ctx.final_output
+    return event
+
+
 def format_sse_event(event: dict[str, Any]) -> str:
     """将事件字典格式化为 SSE 数据帧字符串。
 
@@ -828,7 +924,7 @@ async def _stream_graph_events(
     *,
     final_output: str = "",
     collect_state: dict[str, Any] | None = None,
-) -> str:
+) -> tuple[str, dict[str, Any] | None]:
     """统一处理 ``graph.astream`` 的事件流，推送 node_start/end/error 事件。
 
     被 ``default_runner``（source=initial_state）与 ``_resume_drive``
@@ -844,9 +940,11 @@ async def _stream_graph_events(
             用于 fallback 输出生成）。
 
     Returns:
-        流式过程中累积的 ``final_output``。
+        ``(final_output, legal_answer)``：流式过程中累积的 Markdown 输出与
+        结构化 LegalAnswerV1 dict（若 composer 已写入）。
     """
     pending_starts: dict[str, float] = {}
+    legal_answer: dict[str, Any] | None = None
 
     async for part in graph.astream(
         source,
@@ -906,8 +1004,11 @@ async def _stream_graph_events(
                     out = update.get("final_output")
                     if out:
                         final_output = out
+                    la = update.get("legal_answer")
+                    if la:
+                        legal_answer = la
 
-    return final_output
+    return final_output, legal_answer
 
 
 def _get_graph() -> Any:
@@ -1085,7 +1186,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
         # v1 多 stream mode 返回 (mode, data) 元组，会被 isinstance(dict) 跳过。
         # "tasks" 流提供节点任务的开始/完成/错误事件，比 "debug" 更语义化。
         try:
-            final_output = await _stream_graph_events(
+            final_output, legal_answer = await _stream_graph_events(
                 graph,
                 initial.model_dump(),
                 config,
@@ -1093,6 +1194,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
                 final_output=final_output,
                 collect_state=last_state,
             )
+            ctx.legal_answer = legal_answer
         except TypeError as exc:  # v2 参数不兼容 → 回退 v1 updates
             if "version" not in str(exc):
                 raise
@@ -1105,6 +1207,9 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
                         out = update.get("final_output")
                         if out:
                             final_output = out
+                        la = update.get("legal_answer")
+                        if la:
+                            ctx.legal_answer = la
 
         # 检查是否有 LangGraph interrupt（HITL）—— P0-2 三态 fail-closed
         icr = _check_interrupt_status(graph, config)

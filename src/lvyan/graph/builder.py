@@ -236,13 +236,18 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
     # 不依赖 settings 单例（可能已在 import 时冻结）。
     backend = os.getenv("CHECKPOINTER_BACKEND", settings.checkpointer_backend).strip().lower()
 
+    # P1-2：非法 backend 值直接启动失败，不静默按 auto 处理
+    if backend not in {"memory", "postgres", "auto"}:
+        raise PersistenceUnavailable(
+            f"CHECKPOINTER_BACKEND='{backend}' 非法；允许值: memory / postgres / auto"
+        )
+
     # P2-4：显式选择 memory
     if backend == "memory":
-        from lvyan.config import is_production
-
-        if is_production():
+        # P1-2：PERSISTENCE_REQUIRED=true 也禁止 MemorySaver（不只生产模式）
+        if _persistence_required():
             raise PersistenceUnavailable(
-                "CHECKPOINTER_BACKEND=memory 在生产模式下被拒绝；请使用 postgres"
+                "PERSISTENCE_REQUIRED=true 时禁止使用 MemorySaver；请使用 postgres"
             )
         return build_graph()
 
