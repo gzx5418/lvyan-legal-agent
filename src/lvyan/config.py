@@ -157,7 +157,7 @@ class Settings(BaseModel):
     lawtext_dir: Path = Field(default_factory=lambda: LAWTEXT_DIR)
 
     # --- 运行时策略守卫 ---
-    max_retrieval_iterations: int = Field(default=3, description="Citation Verifier 最大重检索次数")
+    max_retrieval_iterations: int = Field(default=1, description="Citation Verifier 最大重检索次数（降低以减少 LLM 调用放大）")
     max_cost_budget_usd: float = Field(default=2.0, description="单次 run 最大成本预算（美元）")
     hitl_enabled: bool = Field(
         default=True, description="是否启用 Human-in-the-loop 不可逆操作审批"
@@ -208,8 +208,8 @@ class Settings(BaseModel):
 
     # --- Legal Reasoner 迭代守卫 ---
     max_legal_reasoner_iterations: int = Field(
-        default=2,
-        description="Critic 不通过时回退 legal_reasoner 的最大重试次数",
+        default=1,
+        description="Critic 不通过时回退 legal_reasoner 的最大重试次数（降低以减少 LLM 调用放大）",
     )
 
 
@@ -266,7 +266,7 @@ def _build_settings() -> Settings:
         langfuse_secret_key=_get("LANGFUSE_SECRET_KEY", ""),
         knowledge_dir=KNOWLEDGE_DIR,
         lawtext_dir=LAWTEXT_DIR,
-        max_retrieval_iterations=_get_int("MAX_RETRIEVAL_ITERATIONS", 3),
+        max_retrieval_iterations=_get_int("MAX_RETRIEVAL_ITERATIONS", 1),
         max_cost_budget_usd=_get_float("MAX_COST_BUDGET_USD", 2.0),
         hitl_enabled=_get_bool("HITL_ENABLED", True),
         runtime_mode=_get("RUNTIME_MODE", "development").strip().lower(),
@@ -282,7 +282,7 @@ def _build_settings() -> Settings:
             "DOCUMENT_CONVERSION_TIMEOUT_SECONDS", 60.0
         ),
         zip_uncompressed_bytes_limit=_get_int("ZIP_UNCOMPRESSED_BYTES_LIMIT", 100 * 1024 * 1024),
-        max_legal_reasoner_iterations=_get_int("MAX_LEGAL_REASONER_ITERATIONS", 2),
+        max_legal_reasoner_iterations=_get_int("MAX_LEGAL_REASONER_ITERATIONS", 1),
     )
 
 

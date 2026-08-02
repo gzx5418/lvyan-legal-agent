@@ -405,8 +405,10 @@ def test_citation_verifier_never_exceeds_two_reretrievals(
 # ---------------------------------------------------------------------------
 def test_critic_iteration_capped(monkeypatch: pytest.MonkeyPatch):
     """critic 始终不通过：iteration 不超过 MAX_LEGAL_REASONER_ITERATIONS。"""
-    monkeypatch.setattr(settings, "max_legal_reasoner_iterations", 2)
-    assert MAX_LEGAL_REASONER_ITERATIONS == 2
+    # 保留测试意图：允许 2 次回退（默认值已降为 1 以减少 LLM 调用）
+    monkeypatch.setattr("lvyan.nodes.critic.MAX_LEGAL_REASONER_ITERATIONS", 2)
+    from lvyan.nodes.critic import MAX_LEGAL_REASONER_ITERATIONS as _max_iter
+    assert _max_iter == 2
 
     # reasoning_result=None → critic 必然不通过
     state_0 = _critic_state(reasoning_result=None, iteration=0)
@@ -430,7 +432,8 @@ def test_critic_iteration_capped(monkeypatch: pytest.MonkeyPatch):
 
 def test_critic_iteration_never_exceeds_max(monkeypatch: pytest.MonkeyPatch):
     """连续模拟多次 critic，iteration 始终 <= MAX_LEGAL_REASONER_ITERATIONS。"""
-    monkeypatch.setattr(settings, "max_legal_reasoner_iterations", 2)
+    monkeypatch.setattr("lvyan.nodes.critic.MAX_LEGAL_REASONER_ITERATIONS", 2)
+    from lvyan.nodes.critic import MAX_LEGAL_REASONER_ITERATIONS as _max_iter
 
     max_iteration = 0
     for start_iter in range(5):
@@ -439,12 +442,12 @@ def test_critic_iteration_never_exceeds_max(monkeypatch: pytest.MonkeyPatch):
         if "iteration" in result:
             max_iteration = max(max_iteration, result["iteration"])
         # 强制通过时不返回 iteration，说明已达上限
-    assert max_iteration <= MAX_LEGAL_REASONER_ITERATIONS
+    assert max_iteration <= _max_iter
 
 
 def test_critic_passes_when_reasoning_present(monkeypatch: pytest.MonkeyPatch, make_reasoning_result):
     """critic 对正常 reasoning_result（无遗漏/过度推断/冲突）→ 通过。"""
-    monkeypatch.setattr(settings, "max_legal_reasoner_iterations", 2)
+    monkeypatch.setattr("lvyan.nodes.critic.MAX_LEGAL_REASONER_ITERATIONS", 2)
     rr = make_reasoning_result()
     state = _critic_state(reasoning_result=rr, iteration=0)
     result = critic(state)

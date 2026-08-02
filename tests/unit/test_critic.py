@@ -352,8 +352,10 @@ def test_critic_iteration_increments_on_failure():
     assert len(result["critic_feedback"]) > 0
 
 
-def test_critic_feedback_accumulates():
+def test_critic_feedback_accumulates(monkeypatch: pytest.MonkeyPatch):
     """多次回退时 critic_feedback 应累积（去重）。"""
+    # 保留测试意图：允许 2 次回退
+    monkeypatch.setattr("lvyan.nodes.critic.MAX_LEGAL_REASONER_ITERATIONS", 2)
     rr = _make_reasoning_result(
         defendant_arguments=[],  # 触发失败
         judicial_tendency="somewhat_favorable",

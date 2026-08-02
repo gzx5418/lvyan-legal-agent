@@ -129,7 +129,8 @@ def test_route_after_citation_failed_within_budget_returns_reretrieve():
         unsupported=0,
         details=[],
     )
-    state = _state(citation_audit=audit, iteration=1)
+    # iteration=0 仍在预算内（默认 max_retrieval_iterations=1）
+    state = _state(citation_audit=audit, iteration=0)
     assert route_after_citation(state) == "reretrieve"
 
 
@@ -143,7 +144,7 @@ def test_route_after_citation_failed_at_budget_cap_returns_compose():
         unsupported=0,
         details=[],
     )
-    # iteration 达到 MAX_RETRIEVAL_ITERATIONS(=3)，不再重检索
+    # iteration 达到 MAX_RETRIEVAL_ITERATIONS(=1)，不再重检索
     # P1-9b：路由目标改为 output_guardrail
     state = _state(citation_audit=audit, iteration=3)
     assert route_after_citation(state) == "output_guardrail"
@@ -180,7 +181,7 @@ def test_route_by_complexity_returns_expected_mode():
 # 4. PolicyViolationError 可被抛出和捕获
 # ---------------------------------------------------------------------------
 def test_policy_violation_raised_when_retrieval_budget_exhausted():
-    # iteration=99 远超 MAX_RETRIEVAL_ITERATIONS=3
+    # iteration=99 远超 MAX_RETRIEVAL_ITERATIONS=1
     with pytest.raises(PolicyViolationError) as exc_info:
         enforce_policies(_state(iteration=99))
     assert exc_info.value.kind == "retrieval_budget"

@@ -341,7 +341,8 @@ def test_citation_verifier_rewrite_query(
 def test_citation_verifier_iteration_increments(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """多次调用 citation_verifier，iteration 应递增。"""
+    """citation_verifier 失败时 iteration 递增（保留旧默认值验证多次递增）。"""
+    monkeypatch.setattr(settings, "max_retrieval_iterations", 3)
     monkeypatch.setattr(
         "lvyan.validators.citation.verify_statute_status",
         _mock_verify("effective"),
@@ -393,6 +394,7 @@ def test_citation_verifier_internal_cap_is_two(
         _mock_verify("effective"),
     )
     # 确保全局配置 > 2，以验证内部 min(, 2) 生效
+    monkeypatch.setattr(settings, "max_retrieval_iterations", 3)
     assert settings.max_retrieval_iterations >= 2
 
     rr = _make_reasoning_result(
@@ -415,12 +417,13 @@ def test_citation_verifier_internal_cap_is_two(
     assert "iteration" not in result
 
 
-def test_route_after_citation_internal_cap_is_two():
+def test_route_after_citation_internal_cap_is_two(monkeypatch: pytest.MonkeyPatch):
     """route_after_citation 与 citation_verifier 内部上限一致：iteration=2 → output_guardrail。
 
-    当 settings.max_retrieval_iterations=3（默认）时，iteration=2 已达内部上限
+    当 settings.max_retrieval_iterations=3（测试设置）时，iteration=2 已达内部上限
     min(3, 2)=2，路由应返回 output_guardrail 而非 reretrieve。
     """
+    monkeypatch.setattr(settings, "max_retrieval_iterations", 3)
     assert settings.max_retrieval_iterations >= 2
     state = {
         "citation_audit": {"passed": False},

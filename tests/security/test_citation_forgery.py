@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from lvyan.config import settings
 from lvyan.nodes.citation_verifier import citation_verifier
 from lvyan.schemas import Authority, ReasoningResult, RetrievalQuery
 from lvyan.validators.citation import validate_citations
@@ -296,12 +297,15 @@ def test_citation_verifier_node_force_pass_at_max_iterations(
 # 8. reretrieval_count 不超过上限（无限制循环防护）
 # ---------------------------------------------------------------------------
 def test_reretrieval_count_capped(
-    make_authority, make_reasoning_result, mock_statute_status_effective
+    make_authority, make_reasoning_result, mock_statute_status_effective,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """连续调用 citation_verifier：reretrieval_count 不超过 min(max_iter, 2)=2。
 
     模拟：iteration=0 → 1 → 2 → 强制通过。reretrieval_count 始终 <= 2。
+    保留旧默认值 max_retrieval_iterations=3 验证内部 min(,2) 上限。
     """
+    monkeypatch.setattr(settings, "max_retrieval_iterations", 3)
     rr = make_reasoning_result(
         key_factors=["依据《中华人民共和国虚构法》第一条"]
     )

@@ -659,7 +659,7 @@ def _try_llm_reasoning(state: CaseState) -> ReasoningResult | None:
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.2,
-        max_tokens=2000,
+        max_tokens=1500,
     )
     if result is None:
         return None
