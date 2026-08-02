@@ -233,6 +233,8 @@ class GraphState(TypedDict):
     # --- 迭代与产出（覆盖） ---
     iteration: int
     final_output: str | None
+    # LegalAnswerV1 结构化输出（与 final_output 并行，供前端组件化渲染）
+    legal_answer: dict | None
 
     # --- 输出守卫专用（覆盖） ---
     # 不可逆操作待人工审批（Human-in-the-loop），无待审批时为 None

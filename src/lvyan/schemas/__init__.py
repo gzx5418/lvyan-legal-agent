@@ -16,6 +16,20 @@ from .case import (
     TimelineEvent,
 )
 from .evidence import AuthorityConflict, CaseAuthority, EvidenceRequirement
+from .legal_answer import (
+    ActionItem,
+    AnswerMeta,
+    CitationLevel,
+    EvidenceItem as LegalEvidenceItem,
+    ExecutiveSummary,
+    FactItem,
+    FactStatus,
+    LegalAnswerV1,
+    LegalCitation,
+    LegalIssue,
+    RiskItem,
+    UncertaintyItem,
+)
 from .output import CitationAudit, CitationDetail, OutputMode, ReasoningResult
 
 __all__ = [
@@ -38,4 +52,17 @@ __all__ = [
     "CitationDetail",
     "ReasoningResult",
     "OutputMode",
+    # legal_answer.py
+    "LegalAnswerV1",
+    "AnswerMeta",
+    "ExecutiveSummary",
+    "FactItem",
+    "FactStatus",
+    "LegalIssue",
+    "LegalEvidenceItem",
+    "RiskItem",
+    "ActionItem",
+    "LegalCitation",
+    "CitationLevel",
+    "UncertaintyItem",
 ]

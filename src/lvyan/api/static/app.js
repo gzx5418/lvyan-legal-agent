@@ -443,7 +443,11 @@ function handleSSEEvent(event) {
         currentEventSource.close();
         currentEventSource = null;
       }
-      updateLastAgentMessage(event.output || '(无输出)');
+      if (event.answer && event.schema_version === 'legal_answer_v1' && window.renderLegalAnswer) {
+        updateLastAgentMessageStructured(event.answer, event.markdown_fallback || event.output || '');
+      } else {
+        updateLastAgentMessage(event.output || '(无输出)');
+      }
       finalizeRun();
       break;
 
@@ -764,6 +768,24 @@ function updateLastAgentMessage(content) {
   if (!lastMsg.querySelector('.msg-actions')) {
     const body = lastMsg.querySelector('.msg-body');
     body.appendChild(createMsgActions(content));
+  }
+
+  els.chatArea.scrollTop = els.chatArea.scrollHeight;
+}
+
+// 结构化法律分析渲染：使用 components.js 的 renderLegalAnswer 渲染 LegalAnswerV1
+function updateLastAgentMessageStructured(answer, markdownFallback) {
+  const agentMessages = els.messages.querySelectorAll('.msg-agent');
+  const lastMsg = agentMessages[agentMessages.length - 1];
+  if (!lastMsg) return;
+  const contentDiv = lastMsg.querySelector('.msg-content');
+  lastMsg.dataset.content = markdownFallback || '';
+  lastMsg.dataset.structuredAnswer = JSON.stringify(answer);
+  contentDiv.innerHTML = window.renderLegalAnswer(answer);
+
+  if (!lastMsg.querySelector('.msg-actions')) {
+    const body = lastMsg.querySelector('.msg-body');
+    body.appendChild(createMsgActions(markdownFallback));
   }
 
   els.chatArea.scrollTop = els.chatArea.scrollHeight;

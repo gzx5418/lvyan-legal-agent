@@ -21,12 +21,15 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from lvyan.config import AGENT_DIR
 from lvyan.schemas import CaseState
 from lvyan.tools.export import ExportResult, render_docx
+
+_logger = logging.getLogger("lvyan.nodes.composer")
 
 __all__ = ["composer"]
 
@@ -876,8 +879,27 @@ def composer(state: CaseState) -> dict[str, Any]:
     if risk_level == "high" and "高风险声明" not in output:
         output = output + _HIGH_RISK_DISCLAIMER
 
+    # 4. 结构化输出：构建 LegalAnswerV1 并校验（与 final_output 并行）
+    legal_answer_dict: dict[str, Any] | None = None
+    try:
+        from lvyan.nodes.answer_builder import build_legal_answer
+        from lvyan.nodes.answer_validator import (
+            ValidationError as AVError,
+            validate_legal_answer,
+        )
+
+        cs = state if isinstance(state, CaseState) else CaseState.model_validate(state)
+        answer = build_legal_answer(cs)
+        validate_legal_answer(answer)
+        legal_answer_dict = answer.model_dump(mode="json")
+    except AVError as exc:
+        _logger.warning("legal_answer 校验失败，仅返回 Markdown: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("legal_answer 构建失败，仅返回 Markdown: %s", exc)
+
     result: dict[str, Any] = {
         "final_output": output,
         "document_payload": document_payload,
+        "legal_answer": legal_answer_dict,
     }
     return result
