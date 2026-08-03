@@ -197,6 +197,9 @@ class GraphState(TypedDict):
     thread_id: str
     current_date: date
     user_goal: str
+    # P0 性能：附件按需检索后的紧凑上下文，替代「全文塞进 user_goal」。
+    # 由 attachment_retriever 节点写入（覆盖语义）；LLM 节点优先读取它。
+    relevant_attachment_context: str
 
     # --- 案件元信息（覆盖） ---
     jurisdiction: str | None

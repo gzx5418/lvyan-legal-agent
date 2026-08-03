@@ -348,7 +348,7 @@ def _assess_missing_facts(
 # LLM 增强抽取（PR2）
 # ---------------------------------------------------------------------------
 def _try_llm_extract_facts(
-    user_goal: str, case_type: str | None
+    user_goal: str, case_type: str | None, attachment_context: str = ""
 ) -> tuple[list[Fact], list[TimelineEvent]] | None:
     """尝试用 LLM 抽取结构化事实与时间线。
 

@@ -134,6 +134,7 @@ def _try_llm_plan(
     user_goal: str,
     case_type: str | None,
     facts: list[Any],
+    attachment_context: str = "",
 ) -> tuple[list[RetrievalQuery], list[PlanStep]] | None:
     """尝试用 LLM 生成 ReAct 风格检索计划。
 
@@ -255,9 +256,10 @@ def planner(state: CaseState) -> dict[str, Any]:
     user_goal = _get(state, "user_goal", "") or ""
     case_type = _get(state, "case_type", None)
     facts = _get(state, "facts", []) or []
+    attachment_context = _get(state, "relevant_attachment_context", "") or ""
 
     # --- 优先 LLM 计划生成 ---
-    llm_result = _try_llm_plan(user_goal, case_type, facts)
+    llm_result = _try_llm_plan(user_goal, case_type, facts, attachment_context)
     if llm_result is not None:
         queries, plan = llm_result
         return {

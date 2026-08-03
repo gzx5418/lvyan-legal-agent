@@ -107,6 +107,8 @@ class CaseState(BaseModel):
     thread_id: str
     current_date: date
     user_goal: str
+    # P0 性能：附件按需检索后的紧凑上下文（覆盖语义）
+    relevant_attachment_context: str = ""
     user_id: str = "anonymous"
     law_as_of_date: date | None = None
 
