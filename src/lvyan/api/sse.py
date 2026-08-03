@@ -45,6 +45,7 @@ class RunContext:
         user_id: str = "anonymous",
         law_as_of_date: date | None = None,
         attachment_refs: list[dict] | None = None,
+        load_history: Any = None,
     ) -> None:
         self.run_id = run_id
         self.thread_id = thread_id
@@ -53,6 +54,9 @@ class RunContext:
         self.law_as_of_date = law_as_of_date
         # P0 性能：附件以 DocumentRef dict 形式传入，不再拼进 user_goal
         self.attachment_refs: list[dict] = list(attachment_refs or [])
+        # 多轮记忆：由 RunManager 注入的回调，runner 调用它读取本 thread 历史。
+        # 签名：() -> list[dict]；为 None 表示无持久化存储（无历史可读）。
+        self.load_history: Any = load_history
         # 状态：started / running / awaiting_hitl / completed / failed / cancelled
         self.status: str = "started"
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -412,6 +416,7 @@ class RunManager:
                 user_id=user_id,
                 law_as_of_date=law_as_of_date,
                 attachment_refs=attachment_refs,
+                load_history=self._make_history_loader(resolved_thread_id, user_id),
             )
         )
         ctx.created_at = _time.time()
@@ -437,6 +442,25 @@ class RunManager:
         # 顺手做一次 TTL 清理
         self.gc_runs()
         return ctx
+
+    def _make_history_loader(self, thread_id: str, user_id: str) -> Any:
+        """构造读取本 thread 历史消息的闭包。
+
+        返回的 callable 签名 ``() -> list[dict]``；无 metadata_store 时返回
+        ``None``（runner 据此跳过历史注入）。
+        """
+        if self._metadata_store is None:
+            return None
+
+        store = self._metadata_store
+
+        def _load() -> list[dict]:
+            try:
+                return store.list_messages(thread_id, user_id)
+            except Exception:  # noqa: BLE001  历史读取失败不阻断主流程
+                return []
+
+        return _load
 
     async def _drive(self, ctx: RunContext, query: str, complexity: str) -> None:
         """驱动 runner 执行，捕获异常，最终推送 final_output 并关闭流。
