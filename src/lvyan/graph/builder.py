@@ -66,6 +66,7 @@ from lvyan.nodes.legal_reasoner import legal_reasoner
 from lvyan.nodes.output_guardrail import output_guardrail
 from lvyan.nodes.planner import missing_fact_assessor, planner
 from lvyan.nodes.preflight import preflight
+from lvyan.nodes.attachment_retriever import attachment_retriever
 from lvyan.nodes.retrieve_statutes import parallel_retrieval
 from lvyan.nodes.triage import jurisdiction_triage
 
@@ -79,9 +80,10 @@ from .state import GraphState
 
 __all__ = ["build_graph", "build_graph_with_postgres", "NODE_NAMES", "PersistenceUnavailable"]
 
-# 12 个节点名（注册顺序 = 主链顺序，不含 START/END）
+# 13 个节点名（注册顺序 = 主链顺序，不含 START/END）
 NODE_NAMES: tuple[str, ...] = (
     "preflight",
+    "attachment_retriever",
     "jurisdiction_triage",
     "fact_extractor",
     "missing_fact_assessor",
@@ -98,8 +100,9 @@ NODE_NAMES: tuple[str, ...] = (
 
 
 def _register_nodes(graph: StateGraph) -> None:
-    """向 StateGraph 注册全部 12 个节点。"""
+    """向 StateGraph 注册全部 13 个节点。"""
     graph.add_node("preflight", preflight)
+    graph.add_node("attachment_retriever", attachment_retriever)
     graph.add_node("jurisdiction_triage", jurisdiction_triage)
     graph.add_node("fact_extractor", fact_extractor)
     graph.add_node("missing_fact_assessor", missing_fact_assessor)
@@ -129,9 +132,10 @@ def _wire_edges(graph: StateGraph) -> None:
         ├─ composer（回退重写）
         └─ end → END
     """
-    # 主链：START → preflight → jurisdiction_triage → fact_extractor → missing_fact_assessor
+    # 主链：START → preflight → attachment_retriever → jurisdiction_triage → fact_extractor → missing_fact_assessor
     graph.add_edge(START, "preflight")
-    graph.add_edge("preflight", "jurisdiction_triage")
+    graph.add_edge("preflight", "attachment_retriever")
+    graph.add_edge("attachment_retriever", "jurisdiction_triage")
     graph.add_edge("jurisdiction_triage", "fact_extractor")
     graph.add_edge("fact_extractor", "missing_fact_assessor")
 
