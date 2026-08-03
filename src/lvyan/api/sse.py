@@ -1185,6 +1185,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
     from lvyan.observability.tracing import set_cost_thread
     from lvyan.runtime import get_case_memory
     from lvyan.schemas import CaseState, DocumentRef
+    from lvyan.tools.conversation_history import format_conversation_summary
 
     set_cost_thread(thread_id)
     try:
@@ -1209,6 +1210,12 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
             except Exception:  # noqa: BLE001
                 continue
 
+        # 多轮记忆：读取本 thread 历史，格式化为紧凑摘要注入初始 state。
+        history_msgs = ctx.load_history() if ctx.load_history else []
+        conversation_summary = (
+            format_conversation_summary(history_msgs) if history_msgs else ""
+        )
+
         initial = CaseState(
             run_id=ctx.run_id,
             thread_id=thread_id,
@@ -1218,6 +1225,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
             user_id=ctx.user_id,
             law_as_of_date=ctx.law_as_of_date,
             uploaded_documents=uploaded_docs,
+            conversation_summary=conversation_summary,
         )
         final_output = ""
         last_state: dict[str, Any] = {}
