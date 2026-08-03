@@ -624,6 +624,10 @@ def _try_llm_reasoning(state: CaseState) -> ReasoningResult | None:
     attachment_block = (
         f"\n相关材料摘要：\n{attachment_ctx}\n" if attachment_ctx.strip() else ""
     )
+    conversation_summary = _get(state, "conversation_summary", "") or ""
+    history_block = (
+        f"\n此前对话摘要：\n{conversation_summary}\n" if conversation_summary.strip() else ""
+    )
 
     system_prompt = (
         "你是法律推理助手。根据案情事实与检索到的法规，进行法律推理分析。"
@@ -632,7 +636,7 @@ def _try_llm_reasoning(state: CaseState) -> ReasoningResult | None:
     )
     user_prompt = (
         f"案由：{case_type}\n"
-        f"用户目标：{user_goal}\n{attachment_block}"
+        f"用户目标：{user_goal}\n{attachment_block}{history_block}"
         f"已知事实：{facts_summary}\n"
         f"检索法规：{statutes_summary}\n"
         f"类案参考：{cases_summary}\n"

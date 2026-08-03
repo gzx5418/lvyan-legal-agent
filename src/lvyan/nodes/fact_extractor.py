@@ -348,7 +348,10 @@ def _assess_missing_facts(
 # LLM 增强抽取（PR2）
 # ---------------------------------------------------------------------------
 def _try_llm_extract_facts(
-    user_goal: str, case_type: str | None, attachment_context: str = ""
+    user_goal: str,
+    case_type: str | None,
+    attachment_context: str = "",
+    conversation_summary: str = "",
 ) -> tuple[list[Fact], list[TimelineEvent]] | None:
     """尝试用 LLM 抽取结构化事实与时间线。
 
@@ -361,12 +364,18 @@ def _try_llm_extract_facts(
         return None
 
     case_hint = f"案由：{case_type}" if case_type else "案由待定"
+    context_block = (
+        f"\n相关材料摘要：\n{attachment_context}\n" if attachment_context.strip() else ""
+    )
+    history_block = (
+        f"\n此前对话摘要：\n{conversation_summary}\n" if conversation_summary.strip() else ""
+    )
     system_prompt = (
         "你是法律事实抽取助手。从用户描述中抽取结构化事实与时间线。"
         "只输出 JSON，不要解释。"
     )
     user_prompt = (
-        f"{case_hint}\n用户描述：{user_goal}\n\n"
+        f"{case_hint}\n用户描述：{user_goal}\n{context_block}{history_block}\n"
         "请抽取事实并输出 JSON，格式：\n"
         '{"facts": [{"category": "金额|时间|当事人|行为|其他", '
         '"content": "具体内容", "confidence": 0.0-1.0}], '
@@ -466,10 +475,14 @@ def fact_extractor(state: CaseState) -> dict[str, Any]:
     """
     user_goal = _get(state, "user_goal", "") or ""
     case_type = _get(state, "case_type", None)
+    attachment_context = _get(state, "relevant_attachment_context", "") or ""
+    conversation_summary = _get(state, "conversation_summary", "") or ""
     existing_facts = _get(state, "facts", []) or []
 
     # --- 优先 LLM 抽取 ---
-    llm_result = _try_llm_extract_facts(user_goal, case_type)
+    llm_result = _try_llm_extract_facts(
+        user_goal, case_type, attachment_context, conversation_summary
+    )
     if llm_result is not None:
         facts, timeline = llm_result
     else:

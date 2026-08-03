@@ -135,6 +135,7 @@ def _try_llm_plan(
     case_type: str | None,
     facts: list[Any],
     attachment_context: str = "",
+    conversation_summary: str = "",
 ) -> tuple[list[RetrievalQuery], list[PlanStep]] | None:
     """尝试用 LLM 生成 ReAct 风格检索计划。
 
@@ -150,13 +151,19 @@ def _try_llm_plan(
         str(_get(f, "content", "")) for f in (facts or [])[:8]
     ) or "暂无结构化事实"
     case_hint = f"案由：{case_type}" if case_type else "案由待定"
+    context_block = (
+        f"\n相关材料摘要：\n{attachment_context}\n" if attachment_context.strip() else ""
+    )
+    history_block = (
+        f"\n此前对话摘要：\n{conversation_summary}\n" if conversation_summary.strip() else ""
+    )
 
     system_prompt = (
         "你是法律检索计划生成助手。根据用户案情生成检索查询与执行步骤。"
         "只输出 JSON，不要解释。"
     )
     user_prompt = (
-        f"{case_hint}\n用户目标：{user_goal}\n已知事实：{facts_summary}\n\n"
+        f"{case_hint}\n用户目标：{user_goal}\n已知事实：{facts_summary}\n{context_block}{history_block}\n"
         "请生成检索计划，输出 JSON 格式：\n"
         '{"retrieval_queries": [{"query_text": "检索词", "route": "hybrid|bm25|case_rule|article_no"}], '
         '"plan_steps": [{"action": "步骤描述", "tool": "statute_retrieval|case_retrieval|evidence_analyzer"}]}\n\n'
@@ -257,9 +264,12 @@ def planner(state: CaseState) -> dict[str, Any]:
     case_type = _get(state, "case_type", None)
     facts = _get(state, "facts", []) or []
     attachment_context = _get(state, "relevant_attachment_context", "") or ""
+    conversation_summary = _get(state, "conversation_summary", "") or ""
 
     # --- 优先 LLM 计划生成 ---
-    llm_result = _try_llm_plan(user_goal, case_type, facts, attachment_context)
+    llm_result = _try_llm_plan(
+        user_goal, case_type, facts, attachment_context, conversation_summary
+    )
     if llm_result is not None:
         queries, plan = llm_result
         return {
