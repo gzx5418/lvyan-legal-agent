@@ -44,12 +44,15 @@ class RunContext:
         thread_id: str,
         user_id: str = "anonymous",
         law_as_of_date: date | None = None,
+        attachment_refs: list[dict] | None = None,
     ) -> None:
         self.run_id = run_id
         self.thread_id = thread_id
         # P2-13：归属用户；用于 stream / hitl 端点的 ownership 校验
         self.user_id: str = user_id
         self.law_as_of_date = law_as_of_date
+        # P0 性能：附件以 DocumentRef dict 形式传入，不再拼进 user_goal
+        self.attachment_refs: list[dict] = list(attachment_refs or [])
         # 状态：started / running / awaiting_hitl / completed / failed / cancelled
         self.status: str = "started"
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -393,6 +396,7 @@ class RunManager:
         user_id: str = "anonymous",
         law_as_of_date: date | None = None,
         attachments: list[str] | None = None,
+        attachment_refs: list[dict] | None = None,
         display_query: str | None = None,
     ) -> RunContext:
         """创建并异步启动一次 Agent 运行。"""
@@ -407,6 +411,7 @@ class RunManager:
                 resolved_thread_id,
                 user_id=user_id,
                 law_as_of_date=law_as_of_date,
+                attachment_refs=attachment_refs,
             )
         )
         ctx.created_at = _time.time()
@@ -1155,7 +1160,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
 
     from lvyan.observability.tracing import set_cost_thread
     from lvyan.runtime import get_case_memory
-    from lvyan.schemas import CaseState
+    from lvyan.schemas import CaseState, DocumentRef
 
     set_cost_thread(thread_id)
     try:
@@ -1171,6 +1176,15 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
             user_id=ctx.user_id,
         )
 
+        # P0 性能：附件以 DocumentRef 形式注入 state，不再拼进 user_goal；
+        # attachment_retriever 节点会切块并按需检索相关段落写入 relevant_attachment_context。
+        uploaded_docs = []
+        for ref in ctx.attachment_refs:
+            try:
+                uploaded_docs.append(DocumentRef(**ref))
+            except Exception:  # noqa: BLE001
+                continue
+
         initial = CaseState(
             run_id=ctx.run_id,
             thread_id=thread_id,
@@ -1179,6 +1193,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
             complexity=complexity,
             user_id=ctx.user_id,
             law_as_of_date=ctx.law_as_of_date,
+            uploaded_documents=uploaded_docs,
         )
         final_output = ""
         last_state: dict[str, Any] = {}
