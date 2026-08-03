@@ -660,7 +660,7 @@ class RunManager:
         try:
             from langgraph.types import Command
 
-            graph = _get_graph()
+            graph = await _get_graph()
             run_meta: dict[str, Any] | None = None
             if self._metadata_store is not None:
                 run_meta = self._metadata_store.get_run(run_id)
@@ -688,11 +688,11 @@ class RunManager:
             claimed = False  # P0-2：追踪 claim 是否成功
             for thread_id, meta in thread_candidates:
                 config = {"configurable": {"thread_id": thread_id}}
-                interrupt_info = _check_interrupt(graph, config)
+                interrupt_info = await _check_interrupt_async(graph, config)
                 if interrupt_info is None:
                     continue
 
-                snapshot = graph.get_state(config)
+                snapshot = await graph.aget_state(config)
                 if snapshot is None:
                     continue
 
@@ -765,7 +765,7 @@ class RunManager:
         # P1-4：独立 cancel watcher
         cancel_watcher = self._start_cancel_watcher(ctx)
         try:
-            graph = _get_graph()
+            graph = await _get_graph()
             final_output = ctx.final_output or ""
 
             final_output, legal_answer = await _stream_graph_events(
@@ -778,7 +778,7 @@ class RunManager:
             ctx.legal_answer = legal_answer
 
             # 再次检查是否还有中断 —— P0-2 三态 fail-closed
-            icr = _check_interrupt_status(graph, config)
+            icr = await _check_interrupt_status_async(graph, config)
             if icr.status == "unavailable":
                 await self._fail_run(
                     ctx,
@@ -1042,11 +1042,15 @@ async def _stream_graph_events(
     return final_output, legal_answer
 
 
-def _get_graph() -> Any:
-    """获取共享图实例。"""
-    from lvyan.runtime import get_shared_graph
+async def _get_graph() -> Any:
+    """获取共享图实例（异步路径，使用 AsyncPostgresSaver）。
 
-    return get_shared_graph()
+    必须在运行的事件循环中 ``await`` 调用，确保 ``AsyncConnection`` 绑定到
+    当前循环。同步 CLI 路径请直接使用 ``runtime.get_shared_graph()``。
+    """
+    from lvyan.runtime import get_shared_graph_async
+
+    return await get_shared_graph_async()
 
 
 def _get_case_memory() -> Any:
@@ -1089,6 +1093,10 @@ def _check_interrupt_status(graph: Any, config: dict[str, Any]) -> InterruptChec
     """三态中断检查（P0-2 fail-closed）。
 
     checkpoint 读取异常时返回 ``unavailable``，不再被静默当作「无中断」。
+
+    注意：本函数使用同步 ``graph.get_state()``，仅适用于同步 ``PostgresSaver``
+    或 ``MemorySaver``。使用 ``AsyncPostgresSaver`` 的 API 路径请用
+    :func:`_check_interrupt_status_async`。
     """
     try:
         snapshot = graph.get_state(config)
@@ -1096,6 +1104,25 @@ def _check_interrupt_status(graph: Any, config: dict[str, Any]) -> InterruptChec
         _logger.warning("check_interrupt 读取 checkpoint 失败，按 fail-closed 处理: %s", exc)
         return InterruptCheckResult("unavailable", {"error": str(exc)})
 
+    return _parse_interrupt_snapshot(snapshot)
+
+
+async def _check_interrupt_status_async(graph: Any, config: dict[str, Any]) -> InterruptCheckResult:
+    """三态中断检查（异步版本，API 路径用）。
+
+    使用 ``await graph.aget_state()``，兼容 ``AsyncPostgresSaver``。
+    """
+    try:
+        snapshot = await graph.aget_state(config)
+    except Exception as exc:  # noqa: BLE001 checkpoint 故障
+        _logger.warning("check_interrupt 读取 checkpoint 失败，按 fail-closed 处理: %s", exc)
+        return InterruptCheckResult("unavailable", {"error": str(exc)})
+
+    return _parse_interrupt_snapshot(snapshot)
+
+
+def _parse_interrupt_snapshot(snapshot: Any) -> InterruptCheckResult:
+    """从 graph.get_state / aget_state 返回的 snapshot 解析中断状态。"""
     if snapshot is None:
         return InterruptCheckResult("none")
     # 有待执行节点 = 图被中断
@@ -1120,6 +1147,17 @@ def _check_interrupt_status(graph: Any, config: dict[str, Any]) -> InterruptChec
             },
         )
     return InterruptCheckResult("none")
+
+
+async def _check_interrupt_async(graph: Any, config: dict[str, Any]) -> dict[str, Any] | None:
+    """检查图是否有待处理的 LangGraph interrupt（异步版本）。
+
+    保留旧二态语义（pending → dict / 否则 None），供不关心持久化故障的调用方使用。
+    """
+    result = await _check_interrupt_status_async(graph, config)
+    if result.status == "pending":
+        return result.payload
+    return None
 
 
 def _build_fallback_output(state: dict[str, Any], query: str) -> str:
@@ -1189,7 +1227,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
 
     set_cost_thread(thread_id)
     try:
-        graph = _get_graph()
+        graph = await _get_graph()
         config = {"configurable": {"thread_id": thread_id}}
 
         # 注册到 CaseMemory 索引
@@ -1261,7 +1299,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
                             ctx.legal_answer = la
 
         # 检查是否有 LangGraph interrupt（HITL）—— P0-2 三态 fail-closed
-        icr = _check_interrupt_status(graph, config)
+        icr = await _check_interrupt_status_async(graph, config)
         if icr.status == "unavailable":
             # checkpoint 不可读：不得假定无 interrupt，不得发送 final_output
             # P0-2：设置状态和错误码，_drive 的 _fail_run 负责持久化

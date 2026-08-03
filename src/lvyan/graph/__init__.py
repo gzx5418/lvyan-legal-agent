@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from .builder import NODE_NAMES, build_graph, build_graph_with_postgres
+from .builder import NODE_NAMES, build_graph, build_graph_with_postgres, build_graph_with_postgres_async
 from .policies import (
     PolicyViolationError,
     check_cost_budget,
@@ -32,6 +32,7 @@ __all__ = [
     # builder
     "build_graph",
     "build_graph_with_postgres",
+    "build_graph_with_postgres_async",
     "NODE_NAMES",
     # state
     "GraphState",

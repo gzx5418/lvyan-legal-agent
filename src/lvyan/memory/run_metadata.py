@@ -101,7 +101,12 @@ class PostgresRunMetadataStore:
     }
 
     def __init__(self, dsn: str | None = None) -> None:
-        self.dsn = _to_dsn(dsn or settings.database_url)
+        # 实时读环境变量（与 lvyan.graph.builder._resolve_backend_and_required 一致），
+        # 避免 settings 单例在导入时冻结导致 monkeypatch 不生效。
+        import os
+
+        resolved = dsn if dsn is not None else os.getenv("DATABASE_URL", settings.database_url)
+        self.dsn = _to_dsn(resolved)
         self._schema_ready = False
 
     def _connect(self):

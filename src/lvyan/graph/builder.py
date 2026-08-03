@@ -31,14 +31,17 @@ checkpointer 策略
 -----------------
 - :func:`build_graph`：默认用 ``MemorySaver``（内存 checkpointer），开箱即运行，
   适合本地开发与单元测试。
-- :func:`build_graph_with_postgres`：尝试用 ``PostgresSaver`` 持久化 checkpoint；
-  若 psycopg / langgraph-checkpoint-postgres 未安装或数据库不可达，捕获异常并
-  回退到 ``MemorySaver``，打印警告。
+- :func:`build_graph_with_postgres`：用 **同步** ``PostgresSaver`` 持久化 checkpoint；
+  供 CLI / 同步入口（``graph.invoke()``）使用。若 psycopg 未安装或数据库不可达，
+  捕获异常并回退到 ``MemorySaver``，打印警告。
+- :func:`build_graph_with_postgres_async`：用 **异步** ``AsyncPostgresSaver``，
+  在当前事件循环中 ``await`` 初始化；供 API 异步路径（``graph.astream()``）使用。
+  ``AsyncPostgresSaver`` 必须与运行时事件循环绑定，否则会话会在 ``astream`` 时挂起。
 
 切换到 Postgres 的方式
 ----------------------
-生产部署时直接调用 ``build_graph_with_postgres(dsn)``，或在自建图时把
-``MemorySaver()`` 替换为::
+- 同步路径（CLI）：直接调用 ``build_graph_with_postgres(dsn)``，或在自建图时把
+  ``MemorySaver()`` 替换为::
 
     from langgraph.checkpoint.postgres import PostgresSaver
     import psycopg
@@ -46,6 +49,19 @@ checkpointer 策略
     saver = PostgresSaver(conn)
     saver.setup()          # 首次需建表
     graph = compiled.compile(checkpointer=saver)
+
+- 异步路径（API server）：``await build_graph_with_postgres_async(dsn)``，或::
+
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    import psycopg
+    conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    saver = AsyncPostgresSaver(conn)
+    await saver.setup()
+    graph = compiled.compile(checkpointer=saver)
+
+注意：``PostgresSaver`` 的异步方法（``aput``/``aget``）继承自基类会抛
+``NotImplementedError``；``AsyncPostgresSaver`` 的同步方法（``put``/``get``）同理。
+因此同步 / 异步路径必须使用各自对应的 saver，不可互换。
 """
 
 from __future__ import annotations
@@ -78,7 +94,7 @@ from .routing import (
 )
 from .state import GraphState
 
-__all__ = ["build_graph", "build_graph_with_postgres", "NODE_NAMES", "PersistenceUnavailable"]
+__all__ = ["build_graph", "build_graph_with_postgres", "build_graph_with_postgres_async", "NODE_NAMES", "PersistenceUnavailable"]
 
 # 13 个节点名（注册顺序 = 主链顺序，不含 START/END）
 NODE_NAMES: tuple[str, ...] = (
@@ -224,52 +240,50 @@ def _persistence_required() -> bool:
     return persistence_required()
 
 
-def build_graph_with_postgres(dsn: str | None = None) -> Any:
-    """构建并返回编译后的图，优先使用 PostgreSQL checkpoint。
-
-    P2-4：``settings.checkpointer_backend`` 参与选择：
-
-    - ``memory``：直接用 MemorySaver。生产模式下拒绝（必须显式用 postgres）。
-    - ``postgres``：强制使用 PostgreSQL，等价于 ``persistence_required=true``。
-    - ``auto``（默认）：先尝试 PostgreSQL，失败按 ``persistence_required()`` 决定回退。
-
-    - ``dsn`` 为空时从 ``settings.database_url`` 推导（自动去掉 SQLAlchemy 的
-      ``+psycopg`` 前缀）。
-    - 若 psycopg / langgraph-checkpoint-postgres 未安装，或数据库不可达：
-        * development 且未强制持久化 → 回退 :func:`build_graph`（MemorySaver）；
-        * production / PERSISTENCE_REQUIRED=true → 抛 :class:`PersistenceUnavailable`，
-          让服务启动失败，绝不静默降级（P0-1）。
-    """
+def _resolve_backend_and_required() -> tuple[str, bool]:
+    """读取 CHECKPOINTER_BACKEND 环境变量，返回 (backend, required)。"""
     import os
 
-    # P2-4：从环境变量实时读取（与 is_production/persistence_required 一致），
-    # 不依赖 settings 单例（可能已在 import 时冻结）。
     backend = os.getenv("CHECKPOINTER_BACKEND", settings.checkpointer_backend).strip().lower()
-
-    # P1-2：非法 backend 值直接启动失败，不静默按 auto 处理
     if backend not in {"memory", "postgres", "auto"}:
         raise PersistenceUnavailable(
             f"CHECKPOINTER_BACKEND='{backend}' 非法；允许值: memory / postgres / auto"
         )
-
-    # P2-4：显式选择 memory
     if backend == "memory":
-        # P1-2：PERSISTENCE_REQUIRED=true 也禁止 MemorySaver（不只生产模式）
         if _persistence_required():
             raise PersistenceUnavailable(
                 "PERSISTENCE_REQUIRED=true 时禁止使用 MemorySaver；请使用 postgres"
             )
+        return "memory", False
+    if backend == "postgres":
+        return "postgres", True
+    return "auto", _persistence_required()
+
+
+def build_graph_with_postgres(dsn: str | None = None) -> Any:
+    """构建并返回编译后的图，优先使用 **同步** PostgreSQL checkpoint。
+
+    本函数用于 CLI / 同步入口（``graph.invoke()``）。``PostgresSaver`` 实现了
+    同步 ``put`` / ``get`` 方法。API 异步路径（``astream``）请使用
+    :func:`build_graph_with_postgres_async`，因为 ``PostgresSaver`` 的异步方法
+    ``aput`` / ``aget`` 继承自基类会抛 ``NotImplementedError``。
+
+    - ``dsn`` 为空时从 ``settings.database_url`` 推导。
+    - 若 psycopg / langgraph-checkpoint-postgres 未安装，或数据库不可达：
+        * development 且未强制持久化 → 回退 :func:`build_graph`（MemorySaver）；
+        * production / PERSISTENCE_REQUIRED=true → 抛 :class:`PersistenceUnavailable`。
+    """
+    backend, required = _resolve_backend_and_required()
+    if backend == "memory":
         return build_graph()
 
-    # P2-4：显式选择 postgres → 强制持久化
-    if backend == "postgres":
-        required = True
-    else:  # auto
-        required = _persistence_required()
+    # 实时读环境变量（与 _resolve_backend_and_required 一致），
+    # 避免 settings 单例在导入时冻结导致 monkeypatch 不生效。
+    import os
 
-    resolved_dsn = _to_dsn(dsn or settings.database_url)
+    resolved_dsn = _to_dsn(dsn or os.getenv("DATABASE_URL", settings.database_url))
     try:
-        import psycopg  # noqa: F401  仅探测是否可用
+        import psycopg
         from langgraph.checkpoint.postgres import PostgresSaver
     except ImportError as exc:
         if required:
@@ -277,15 +291,10 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
                 f"psycopg / langgraph-checkpoint-postgres 未安装（{exc}），"
                 f"且当前为强制持久化模式，拒绝回退 MemorySaver"
             ) from exc
-        print(
-            f"[lvyan.graph] psycopg / langgraph-checkpoint-postgres 未安装"
-            f"（{exc}），回退到 MemorySaver"
-        )
+        print(f"[lvyan.graph] psycopg 未安装（{exc}），回退到 MemorySaver")
         return build_graph()
 
     try:
-        # P2-18：对齐 LangGraph 官方 PostgresSaver.from_conn_string() 的连接参数
-        # autocommit=True / prepare_threshold=0 / row_factory=dict_row
         from psycopg.rows import dict_row
 
         conn = psycopg.connect(
@@ -295,30 +304,86 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
             row_factory=dict_row,
             connect_timeout=3,
         )
-    except Exception as exc:  # noqa: BLE001 连接失败需宽口径捕获
+        saver = PostgresSaver(conn)
+        saver.setup()
+    except Exception as exc:  # noqa: BLE001
         if required:
             raise PersistenceUnavailable(
                 f"PostgreSQL 不可达（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
             ) from exc
-        print(
-            f"[lvyan.graph] PostgreSQL 不可达（{exc}），回退到 MemorySaver"
-        )
+        print(f"[lvyan.graph] PostgreSQL 不可达（{exc}），回退到 MemorySaver")
         return build_graph()
 
     try:
-        saver = PostgresSaver(conn)
-        saver.setup()  # 首次运行需建 checkpoint 表
         return _build_graph_with_checkpointer(saver)
-    except Exception as exc:  # noqa: BLE001 setup / 编译失败需宽口径捕获
-        try:
-            conn.close()
-        except Exception:  # noqa: S110, BLE001 关闭失败无需上报
-            pass
+    except Exception as exc:  # noqa: BLE001
         if required:
             raise PersistenceUnavailable(
                 f"PostgresSaver 初始化失败（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
             ) from exc
-        print(
-            f"[lvyan.graph] PostgresSaver 初始化失败（{exc}），回退到 MemorySaver"
+        print(f"[lvyan.graph] PostgresSaver 初始化失败（{exc}），回退到 MemorySaver")
+        return build_graph()
+
+
+async def build_graph_with_postgres_async(dsn: str | None = None) -> Any:
+    """构建并返回编译后的图，使用 **异步** PostgreSQL checkpoint。
+
+    本函数用于 API 异步路径（``graph.astream()``）。``AsyncPostgresSaver`` 实现
+    了异步 ``aput`` / ``aget`` 方法，必须在运行的事件循环中 ``await`` 初始化，
+    以确保 ``AsyncConnection`` 绑定到正确的循环。
+
+    - ``dsn`` 为空时从 ``settings.database_url`` 推导。
+    - 若 psycopg / langgraph-checkpoint-postgres 未安装，或数据库不可达：
+        * development 且未强制持久化 → 回退 :func:`build_graph`（MemorySaver）；
+        * production / PERSISTENCE_REQUIRED=true → 抛 :class:`PersistenceUnavailable`。
+    """
+    backend, required = _resolve_backend_and_required()
+    if backend == "memory":
+        return build_graph()
+
+    # 实时读环境变量（与 _resolve_backend_and_required 一致），
+    # 避免 settings 单例在导入时冻结导致 monkeypatch 不生效。
+    import os
+
+    resolved_dsn = _to_dsn(dsn or os.getenv("DATABASE_URL", settings.database_url))
+    try:
+        import psycopg  # noqa: F401
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    except ImportError as exc:
+        if required:
+            raise PersistenceUnavailable(
+                f"psycopg / langgraph-checkpoint-postgres 未安装（{exc}），"
+                f"且当前为强制持久化模式，拒绝回退 MemorySaver"
+            ) from exc
+        print(f"[lvyan.graph] psycopg 未安装（{exc}），回退到 MemorySaver")
+        return build_graph()
+
+    try:
+        from psycopg.rows import dict_row
+
+        conn = await psycopg.AsyncConnection.connect(
+            resolved_dsn,
+            autocommit=True,
+            prepare_threshold=0,
+            row_factory=dict_row,
+            connect_timeout=3,
         )
+        saver = AsyncPostgresSaver(conn)
+        await saver.setup()
+    except Exception as exc:  # noqa: BLE001
+        if required:
+            raise PersistenceUnavailable(
+                f"PostgreSQL 不可达（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
+            ) from exc
+        print(f"[lvyan.graph] PostgreSQL 不可达（{exc}），回退到 MemorySaver")
+        return build_graph()
+
+    try:
+        return _build_graph_with_checkpointer(saver)
+    except Exception as exc:  # noqa: BLE001
+        if required:
+            raise PersistenceUnavailable(
+                f"AsyncPostgresSaver 初始化失败（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
+            ) from exc
+        print(f"[lvyan.graph] AsyncPostgresSaver 初始化失败（{exc}），回退到 MemorySaver")
         return build_graph()

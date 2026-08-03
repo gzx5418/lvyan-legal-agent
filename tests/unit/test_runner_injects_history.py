@@ -49,7 +49,11 @@ def test_default_runner_writes_conversation_summary_into_initial_state(monkeypat
         return ("", None)
 
     monkeypatch.setattr("lvyan.api.sse._stream_graph_events", fake_stream)
-    monkeypatch.setattr("lvyan.api.sse._get_graph", lambda: object())
+
+    async def fake_get_graph():
+        return object()
+
+    monkeypatch.setattr("lvyan.api.sse._get_graph", fake_get_graph)
 
     class FakeCaseMem:
         def register(self, *a, **kw):

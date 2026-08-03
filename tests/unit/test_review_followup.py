@@ -145,6 +145,9 @@ async def test_default_runner_emits_each_task_once_and_no_error_for_none(monkeyp
         def get_state(self, _config: dict[str, Any]):
             return SimpleNamespace(next=(), values={}, tasks=())
 
+        async def aget_state(self, _config: dict[str, Any]):
+            return SimpleNamespace(next=(), values={}, tasks=())
+
     class FakeMemory:
         def register(self, *_args: Any, **_kwargs: Any) -> None:
             return None
@@ -152,7 +155,10 @@ async def test_default_runner_emits_each_task_once_and_no_error_for_none(monkeyp
         def mark_output(self, _thread_id: str) -> None:
             return None
 
-    monkeypatch.setattr(sse, "_get_graph", lambda: FakeGraph())
+    async def _fake_get_graph() -> Any:
+        return FakeGraph()
+
+    monkeypatch.setattr(sse, "_get_graph", _fake_get_graph)
     monkeypatch.setattr("lvyan.runtime.get_case_memory", lambda: FakeMemory())
 
     ctx = sse.RunContext("run-1", "thread-1")
@@ -240,13 +246,20 @@ async def test_checkpoint_hitl_uses_run_metadata_without_sidecar(monkeypatch):
                 tasks=(task,),
             )
 
+        async def aget_state(self, config: dict[str, Any]):
+            return self.get_state(config)
+
     manager = sse.RunManager(metadata_store=FakeStore())
 
     async def fake_resume(*_args: Any, **_kwargs: Any) -> None:
         return None
 
     monkeypatch.setattr(manager, "_resume_drive", fake_resume)
-    monkeypatch.setattr(sse, "_get_graph", lambda: FakeGraph())
+
+    async def _fake_get_graph() -> Any:
+        return FakeGraph()
+
+    monkeypatch.setattr(sse, "_get_graph", _fake_get_graph)
     monkeypatch.setattr("lvyan.api.auth.is_auth_enabled", lambda: True)
 
     status, _message = await manager._resolve_hitl_from_checkpoint(
@@ -344,6 +357,9 @@ async def test_two_instances_only_one_can_claim_hitl(monkeypatch):
                 tasks=(SimpleNamespace(interrupts=[interrupt]),),
             )
 
+        async def aget_state(self, config: dict[str, Any]):
+            return self.get_state(config)
+
     shared = SharedStore()
     managers = [
         sse.RunManager(metadata_store=shared),
@@ -355,7 +371,11 @@ async def test_two_instances_only_one_can_claim_hitl(monkeypatch):
 
     for manager in managers:
         monkeypatch.setattr(manager, "_resume_drive", fake_resume)
-    monkeypatch.setattr(sse, "_get_graph", lambda: FakeGraph())
+
+    async def _fake_get_graph() -> Any:
+        return FakeGraph()
+
+    monkeypatch.setattr(sse, "_get_graph", _fake_get_graph)
     monkeypatch.setattr("lvyan.api.auth.is_auth_enabled", lambda: True)
 
     results = await asyncio.gather(*(
@@ -579,6 +599,9 @@ async def test_hitl_persistence_failure_does_not_publish_approval(monkeypatch):
                 tasks=(SimpleNamespace(interrupts=[interrupt]),),
             )
 
+        async def aget_state(self, config: dict[str, Any]):
+            return self.get_state(config)
+
     class Memory:
         def register(self, *_args: Any, **_kwargs: Any) -> None:
             return None
@@ -589,7 +612,11 @@ async def test_hitl_persistence_failure_does_not_publish_approval(monkeypatch):
     manager = sse.RunManager(metadata_store=FailingStore())
     ctx = manager._bind_context(sse.RunContext("run-1", "thread-1"))
     manager._runs[ctx.run_id] = ctx
-    monkeypatch.setattr(sse, "_get_graph", lambda: FakeGraph())
+
+    async def _fake_get_graph() -> Any:
+        return FakeGraph()
+
+    monkeypatch.setattr(sse, "_get_graph", _fake_get_graph)
     monkeypatch.setattr("lvyan.runtime.get_case_memory", lambda: Memory())
 
     output = await sse.default_runner("问题", "thread-1", "light", ctx)
@@ -629,10 +656,17 @@ async def test_second_hitl_persistence_failure_closes_without_approval(
                 tasks=(SimpleNamespace(interrupts=[interrupt]),),
             )
 
+        async def aget_state(self, config: dict[str, Any]):
+            return self.get_state(config)
+
     manager = sse.RunManager(metadata_store=FailingStore())
     ctx = manager._bind_context(sse.RunContext("run-1", "thread-1"))
     manager._runs[ctx.run_id] = ctx
-    monkeypatch.setattr(sse, "_get_graph", lambda: FakeGraph())
+
+    async def _fake_get_graph() -> Any:
+        return FakeGraph()
+
+    monkeypatch.setattr(sse, "_get_graph", _fake_get_graph)
 
     await manager._resume_drive(
         ctx,
