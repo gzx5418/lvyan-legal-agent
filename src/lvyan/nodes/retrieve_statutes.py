@@ -284,28 +284,15 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
         - ``statutes``: list[Authority]
         - ``cases``: list[CaseAuthority]
         - ``plan``: list[PlanStep]（含状态更新）
+
+    性能
+    ----
+    法规检索与类案检索互不依赖，提交到同一线程池并发执行；总耗时 ≈ max 而非 sum。
     """
     queries = _get(state, "retrieval_queries", []) or []
     law_as_of_date = _get(state, "law_as_of_date", None)
-
-    # --- 法规检索（P3-22：真正的并行）---
-    raw_statutes = _parallel_search_statutes(queries, as_of=law_as_of_date)
-
-    statutes = _dedup_authorities(raw_statutes)
-
-    # --- PR2: Reranker 重排序（RRF → Reranker）---
-    # 用 user_goal 作为 rerank 查询（最能反映用户真实意图）
     rerank_query = _get(state, "user_goal", "") or ""
-    if rerank_query.strip() and statutes:
-        # 先召回更大候选池，再 rerank 到 top_k
-        pool_k = min(len(statutes), 10 * _RERANK_POOL_MULTIPLIER)
-        statutes = _rerank_authorities(
-            query=rerank_query,
-            authorities=statutes[:pool_k],
-            top_k=10,
-        )
 
-    # --- 类案检索 ---
     case_query_text = ""
     for q in queries:
         qt = _get(q, "query_text", "") or ""
@@ -313,14 +300,26 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
             case_query_text = qt
             break
     if not case_query_text:
-        case_query_text = _get(state, "user_goal", "") or ""
+        case_query_text = rerank_query
 
-    cases: list[CaseAuthority] = []
-    if case_query_text.strip():
+    def _search_statutes_job() -> list[Authority]:
+        raw = _parallel_search_statutes(queries, as_of=law_as_of_date)
+        statutes = _dedup_authorities(raw)
+        if rerank_query.strip() and statutes:
+            pool_k = min(len(statutes), 10 * _RERANK_POOL_MULTIPLIER)
+            statutes = _rerank_authorities(
+                query=rerank_query, authorities=statutes[:pool_k], top_k=10
+            )
+        return statutes
+
+    def _search_cases_job() -> list[CaseAuthority]:
+        if not case_query_text.strip():
+            return []
         try:
             case_search_result = search_cases(case_query_text, top_k=10)
         except Exception:  # noqa: BLE001  检索失败不中断流程
-            case_search_result = None
+            return []
+        cases: list[CaseAuthority] = []
         if case_search_result is not None:
             hits = _get(case_search_result, "results", []) or []
             for hit in hits:
@@ -328,6 +327,27 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
                     cases.append(_to_case_authority(hit))
                 except Exception:  # noqa: BLE001  转换失败跳过单条
                     continue
+        return cases
+
+    # --- 法规与类案并发（互不依赖）---
+    global _CONCURRENT_EXECUTOR
+    if _CONCURRENT_EXECUTOR is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _CONCURRENT_EXECUTOR = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="lvyan-search"
+        )
+
+    stat_future = _CONCURRENT_EXECUTOR.submit(_search_statutes_job)
+    case_future = _CONCURRENT_EXECUTOR.submit(_search_cases_job)
+
+    try:
+        statutes = stat_future.result(timeout=30.0)
+    except Exception:  # noqa: BLE001
+        statutes = []
+    try:
+        cases = case_future.result(timeout=30.0)
+    except Exception:  # noqa: BLE001
+        cases = []
 
     # --- 更新 plan ---
     plan = _get(state, "plan", []) or []
