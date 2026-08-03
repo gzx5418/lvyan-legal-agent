@@ -1124,10 +1124,10 @@ def test_cancel_context_persistence_failure_returns_unavailable():
 
 
 # ---------------------------------------------------------------------------
-# 结构化输出：SSE final_output 事件携带 answer + markdown_fallback
+# 结构化输出：SSE final_output 事件携带 answer（P0-3 去重后不再含 markdown_fallback）
 # ---------------------------------------------------------------------------
 def test_final_output_event_includes_structured_answer_when_available():
-    """当 state 含 legal_answer 时，SSE final_output 事件应同时携带 answer 与 markdown_fallback。"""
+    """当 state 含 legal_answer 时，SSE final_output 事件携带 answer；output 同时作为 Markdown fallback 来源。"""
     import json
 
     from lvyan.api.sse import format_sse_event
@@ -1141,13 +1141,11 @@ def test_final_output_event_includes_structured_answer_when_available():
         "output": "# Markdown 回退",
         "schema_version": "legal_answer_v1",
         "answer": legal_answer,
-        "markdown_fallback": "# Markdown 回退",
     }
     frame = format_sse_event(event)
     payload = json.loads(frame.removeprefix("data: ").strip())
     assert payload["schema_version"] == "legal_answer_v1"
     assert payload["answer"]["meta"]["title"] == "测试"
-    assert payload["markdown_fallback"] == "# Markdown 回退"
     assert payload["output"] == "# Markdown 回退"
 
 
@@ -1173,8 +1171,8 @@ def test_build_final_output_event_helper_with_structured():
     event = _build_final_output_event(ctx)
     assert event["schema_version"] == "legal_answer_v1"
     assert event["answer"]["meta"]["title"] == "x"
-    assert event["markdown_fallback"] == "# MD"
     assert event["output"] == "# MD"
+    assert "markdown_fallback" not in event
 
 
 def test_build_final_output_event_helper_without_structured():

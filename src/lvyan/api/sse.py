@@ -895,16 +895,16 @@ class RunManager:
 # SSE 格式化
 # ---------------------------------------------------------------------------
 def _build_final_output_event(ctx: "RunContext") -> dict[str, Any]:
-    """构建 final_output 事件，同时携带结构化 answer 与 markdown 回退。
+    """构建 final_output 事件。
 
-    兼容设计：旧前端读取 ``output`` 字段（Markdown），新前端读取 ``answer``
-    （LegalAnswerV1 dict）。无结构化输出时退化为旧格式。
+    P0-3 去重：不再单独发送 ``markdown_fallback``。``output`` 字段同时承担
+    「旧前端 Markdown 来源」与「新前端 fallback 来源」两种角色，避免同一份
+    完整 Markdown 在单次 SSE 中被发送两次。
     """
     event: dict[str, Any] = {"event": "final_output", "output": ctx.final_output}
     if ctx.legal_answer:
         event["schema_version"] = ctx.legal_answer.get("schema_version", "legal_answer_v1")
         event["answer"] = ctx.legal_answer
-        event["markdown_fallback"] = ctx.final_output
     return event
 
 
