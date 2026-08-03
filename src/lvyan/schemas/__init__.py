@@ -33,6 +33,8 @@ from .legal_answer import (
 from .output import CitationAudit, CitationDetail, OutputMode, ReasoningResult
 
 __all__ = [
+    # attachment.py
+    "AttachmentChunk",
     # case.py
     "CaseState",
     "Fact",
