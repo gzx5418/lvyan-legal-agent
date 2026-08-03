@@ -200,6 +200,9 @@ class GraphState(TypedDict):
     # P0 性能：附件按需检索后的紧凑上下文，替代「全文塞进 user_goal」。
     # 由 attachment_retriever 节点写入（覆盖语义）；LLM 节点优先读取它。
     relevant_attachment_context: str
+    # 多轮记忆：本 thread 此前若干轮的紧凑摘要（覆盖语义）。
+    # 由 default_runner 在 run 开始时写入；LLM 节点据此理解追问上下文。
+    conversation_summary: str
 
     # --- 案件元信息（覆盖） ---
     jurisdiction: str | None

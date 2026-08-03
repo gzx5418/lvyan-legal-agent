@@ -109,6 +109,8 @@ class CaseState(BaseModel):
     user_goal: str
     # P0 性能：附件按需检索后的紧凑上下文（覆盖语义）
     relevant_attachment_context: str = ""
+    # 多轮记忆：本 thread 此前若干轮的紧凑摘要
+    conversation_summary: str = ""
     user_id: str = "anonymous"
     law_as_of_date: date | None = None
 
