@@ -101,16 +101,47 @@ def get_checkpointer_kind() -> str:
     return _checkpointer_kind
 
 
-def get_case_memory() -> CaseMemory:
-    """获取绑定到共享图的 CaseMemory 实例。
+def _resolve_shared_graph() -> Any:
+    """图解析器：优先返回异步图单例，否则返回同步图单例。
 
-    优先使用异步图单例（API server 路径），否则用同步图单例（CLI 路径）。
+    供 :class:`CaseMemory` 延迟绑定使用。每次方法调用时实时解析，确保：
+
+    - **API 异步路径**：``_shared_graph_async`` 在首个 API 请求触发
+      :func:`get_shared_graph_async` 后就绪，CaseMemory 自动切换到异步图，
+      使用 ``aget_state`` 不阻塞事件循环（修复 C1/C3）。
+    - **CLI 同步路径**：``_shared_graph_async`` 始终为 ``None``，回退到
+      :func:`get_shared_graph`（首次调用时按需创建同步图）。
+    - **两者均未就绪**：返回 ``None``，由 CaseMemory 抛 ``RuntimeError``。
+
+    注意：本函数不触发图的创建，仅返回已存在的单例。CLI 路径需先调用
+    :func:`get_shared_graph`，API 路径需先调用 :func:`get_shared_graph_async`。
+    """
+    if _shared_graph_async is not None:
+        return _shared_graph_async
+    if _shared_graph is not None:
+        return _shared_graph
+    return None
+
+
+def get_case_memory() -> CaseMemory:
+    """获取绑定到共享图的 CaseMemory 实例（延迟绑定）。
+
+    修复 C1/C3：CaseMemory 不再在构造时绑定特定图实例，而是通过
+    :func:`_resolve_shared_graph` 解析器延迟绑定。每次 checkpoint 操作时
+    实时选择当前可用的图（异步优先，同步兜底），确保：
+
+    - API 异步路径写入异步图后，CaseMemory 读取也走异步图（数据一致）
+    - CLI 同步路径读写均走同步图（行为不变）
+    - MemorySaver 回退场景下两路径共享同一进程内实例（仅当通过本函数
+      获取 CaseMemory 时；测试中注入独立 graph 的桩不受影响）
+
+    异步端点应使用 CaseMemory 的 ``aload_strict`` / ``adelete_strict`` /
+    ``alist_threads_strict`` 异步方法，避免同步 ``get_state`` 阻塞事件循环。
     """
     global _case_memory
     if _case_memory is not None:
         return _case_memory
-    graph = _shared_graph_async if _shared_graph_async is not None else get_shared_graph()
-    _case_memory = CaseMemory(graph=graph)
+    _case_memory = CaseMemory(graph_resolver=_resolve_shared_graph)
     return _case_memory
 
 
@@ -129,4 +160,5 @@ __all__ = [
     "get_case_memory",
     "reset_shared_graph",
     "get_checkpointer_kind",
+    "_resolve_shared_graph",
 ]

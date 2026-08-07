@@ -155,9 +155,66 @@ def _as_unix_timestamp(value: Any) -> float:
         return time.time()
 
 
+async def _mem_aload(mem: Any, thread_id: str) -> Any:
+    """异步加载会话状态，兼容异步 / 同步 CaseMemory 实现。
+
+    生产 ``CaseMemory`` 提供 ``aload``（使用异步图 ``aget_state``，不阻塞事件循环，
+    修复 C2）；旧测试桩（如 ``FakeCaseMemory``）仅实现同步 ``load``，回退到直接
+    调用（测试场景可接受同步阻塞）。
+    """
+    aload = getattr(mem, "aload", None)
+    if callable(aload):
+        return await aload(thread_id)
+    return mem.load(thread_id)
+
+
+async def _mem_aload_strict(mem: Any, thread_id: str) -> Any:
+    """异步严格加载会话状态，兼容异步 / 同步 CaseMemory 实现。
+
+    生产 ``CaseMemory`` 提供 ``aload_strict``（使用异步图 ``aget_state``）；
+    旧测试桩仅实现同步 ``load_strict``，回退到直接调用。
+    """
+    aload_strict = getattr(mem, "aload_strict", None)
+    if callable(aload_strict):
+        return await aload_strict(thread_id)
+    return mem.load_strict(thread_id)
+
+
+async def _mem_adelete_strict(mem: Any, thread_id: str) -> bool:
+    """异步严格删除会话，兼容异步 / 同步 CaseMemory 实现。
+
+    生产 ``CaseMemory`` 提供 ``adelete_strict``（通过 ``asyncio.to_thread``
+    卸载同步 ``delete_thread``，不阻塞事件循环，修复 C2）；旧测试桩仅实现
+    同步 ``delete_strict``，回退到直接调用。
+    """
+    adelete_strict = getattr(mem, "adelete_strict", None)
+    if callable(adelete_strict):
+        return await adelete_strict(thread_id)
+    return mem.delete_strict(thread_id)
+
+
+async def _mem_alist_threads_recoverable(mem: Any) -> list[tuple[str, dict[str, Any]]]:
+    """异步列出可恢复的会话，兼容异步 / 同步 CaseMemory 实现。
+
+    生产 ``CaseMemory`` 提供 ``alist_threads_strict``（异步校验每个索引项的
+    checkpoint 是否仍存在）；旧测试桩无此方法，回退到同步遍历 + ``load_strict``。
+    """
+    alist_strict = getattr(mem, "alist_threads_strict", None)
+    if callable(alist_strict):
+        return await alist_strict()
+    # 回退：同步遍历索引，逐项校验 checkpoint（兼容旧测试桩）
+    recoverable: list[tuple[str, dict[str, Any]]] = []
+    for tid, meta in mem.list_threads():
+        try:
+            if mem.load_strict(tid) is not None:
+                recoverable.append((tid, meta))
+        except Exception:  # noqa: BLE001
+            continue
+    return recoverable
+
+
 def _check_database() -> str:
     """轻量数据库可用性检查：探测 psycopg 是否可导入。
-
     P2-19：这是 ``/livez`` 级别的检查（仅探测 import）；``/readyz`` 使用
     :func:`_check_database_ready` 实际 ``SELECT 1``。
     """
@@ -685,7 +742,7 @@ def create_app(
                 assert_thread_owner(existing_meta, user_id, req.thread_id)
             elif is_auth_enabled():
                 # sidecar 索引缺失时，从 checkpoint 状态中恢复 owner 校验
-                cs = mem.load(req.thread_id)
+                cs = await _mem_aload(mem, req.thread_id)
                 if cs is not None:
                     cp_user_id = str(getattr(cs, "user_id", ANONYMOUS_USER) or ANONYMOUS_USER)
                     if cp_user_id != user_id:
@@ -834,7 +891,7 @@ def create_app(
         cs: Any = None
         checkpoint_available = False
         try:
-            cs = mem.load_strict(thread_id)
+            cs = await _mem_aload_strict(mem, thread_id)
             checkpoint_available = cs is not None
         except Exception as exc:  # noqa: BLE001
             _logger.warning("加载 thread %s checkpoint 失败（仅降级标记）: %s", thread_id, exc)
@@ -901,7 +958,7 @@ def create_app(
                     detail="thread metadata 暂时不可用",
                 ) from exc
             try:
-                mem.delete_strict(thread_id)
+                await _mem_adelete_strict(mem, thread_id)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,
@@ -930,7 +987,7 @@ def create_app(
             meta = dict(mem.list_threads()).get(thread_id)
             assert_thread_owner(meta, user_id, thread_id)
             try:
-                mem.delete_strict(thread_id)
+                await _mem_adelete_strict(mem, thread_id)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,
@@ -960,16 +1017,14 @@ def create_app(
         else:
             # 元数据索引可能在 checkpointer 被清理或故障恢复后遗留条目。
             # 只向前端暴露仍可恢复的会话，避免点击历史记录后看到空白页。
-            threads = []
-            for tid, meta in mem.list_threads():
-                try:
-                    if mem.load_strict(tid) is not None:
-                        threads.append((tid, meta))
-                except Exception as exc:  # noqa: BLE001
-                    raise HTTPException(
-                        status_code=503,
-                        detail="checkpoint 读取失败，暂时无法列出会话",
-                    ) from exc
+            # C2 修复：使用异步方法避免同步 get_state 阻塞事件循环。
+            try:
+                threads = await _mem_alist_threads_recoverable(mem)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail="checkpoint 读取失败，暂时无法列出会话",
+                ) from exc
         summaries: list[ThreadSummary] = []
         for tid, meta in threads:
             # ownership 过滤

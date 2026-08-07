@@ -56,9 +56,10 @@ WORKDIR /app
 # 从 builder 复制 venv
 COPY --from=builder /opt/venv /opt/venv
 
-# 复制应用源码、精编知识库、迁移脚本（migrations 仅作归档，compose 另挂到 postgres）
+# 复制应用源码、精编知识库、文书模板、迁移脚本（migrations 仅作归档，compose 另挂到 postgres）
 COPY src ./src
 COPY knowledge/curated ./knowledge/curated
+COPY templates ./templates
 COPY migrations ./migrations
 COPY README.md ./
 
