@@ -140,9 +140,9 @@ def stream_agent(
                     continue
                 yield {"event": "node_end", "node": node_name}
                 if isinstance(update, dict):
-                    out = update.get("final_output")
-                    if out:
-                        final_output = out
+                    # P0-A：与 SSE 路径保持一致，使用 "key in update" 显式覆盖。
+                    if "final_output" in update:
+                        final_output = update["final_output"]
     except Exception as exc:  # noqa: BLE001 流式入口需宽口径捕获
         yield {"event": "error", "message": str(exc)}
         return

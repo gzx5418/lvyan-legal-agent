@@ -58,10 +58,15 @@ def test_check_retrieval_degraded_when_required_and_missing(monkeypatch):
 
 
 def test_check_retrieval_ok_when_official_available(monkeypatch):
-    """官方库可用 → ok（无论是否 required）。"""
+    """官方库可用 + 索引一致 → ok（无论是否 required）。"""
     import lvyan.api.server as server_mod
 
     monkeypatch.setattr(server_mod, "is_official_db_available", lambda: True)
+    # P0-B：官方库可用时还需 manifest 一致才返回 ok
+    monkeypatch.setattr(
+        "lvyan.retrieval.manifest.verify_corpus_consistency",
+        lambda *a, **kw: {"consistent": True, "reason": None},
+    )
     assert server_mod._check_retrieval() == "ok"
 
 
@@ -85,6 +90,17 @@ def test_legal_corpus_status_structure(monkeypatch):
 
     monkeypatch.setattr(server_mod, "is_official_db_available", lambda: True)
     monkeypatch.setattr(server_mod, "is_official_law_db_required", lambda: True)
+    # P0-B：mock manifest 一致，使 mode=official_full
+    monkeypatch.setattr(
+        "lvyan.retrieval.manifest.verify_corpus_consistency",
+        lambda *a, **kw: {
+            "consistent": True,
+            "reason": None,
+            "manifest": {"chunks_count": 100},
+            "current_corpus_hash": "abc123",
+            "current_file_count": 50,
+        },
+    )
     info = server_mod._legal_corpus_status()
     assert info["mode"] == "official_full"
     assert info["available"] is True

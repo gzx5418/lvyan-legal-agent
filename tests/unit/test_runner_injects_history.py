@@ -46,7 +46,7 @@ def test_default_runner_writes_conversation_summary_into_initial_state(monkeypat
 
     async def fake_stream(graph, initial, config, ctx, **kw):
         captured["initial"] = initial
-        return ("", None)
+        return ("", None, None)
 
     monkeypatch.setattr("lvyan.api.sse._stream_graph_events", fake_stream)
 

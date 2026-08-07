@@ -286,26 +286,41 @@ def _check_retrieval() -> str:
     P0-4：``REQUIRE_OFFICIAL_LAW_DB=true``（生产默认）时，官方法律库缺失即视为
     ``degraded``（/readyz 据此返回 not-ready），避免在仅精编知识库子集下承接
     生产流量。未要求完整库时，精编知识库目录存在即视为 ``ok``（降级可用）。
+
+    P0-B：官方法律库可用时，额外校验法库 / ArticleIndex / BM25 三者一致性
+    （``corpus_manifest``）。不一致（``lawtext_changed`` / ``empty_index`` /
+    ``signature_mismatch``）视为 ``degraded`` —— 服务存活但检索使用陈旧索引，
+    对法律系统不可接受。
     """
     try:
-        if is_official_db_available():
-            return "ok"
-        if is_official_law_db_required():
+        if not is_official_db_available():
+            if is_official_law_db_required():
+                return "degraded"
+            # 未强制要求完整库：精编知识库存在即降级可用
+            return "ok" if settings.knowledge_dir.is_dir() else "unavailable"
+
+        # 官方法律库可用 → P0-B：校验索引一致性
+        from lvyan.retrieval.manifest import verify_corpus_consistency
+
+        check = verify_corpus_consistency()
+        if not check["consistent"]:
             return "degraded"
-        # 未强制要求完整库：精编知识库存在即降级可用
-        return "ok" if settings.knowledge_dir.is_dir() else "unavailable"
+        return "ok"
     except Exception:  # noqa: BLE001
         return "unavailable"
 
 
 def _legal_corpus_status() -> dict[str, Any]:
-    """P0-4：法律语料库详细状态（供 /readyz 透明披露，区分「完整库」与「精编子集」）。
+    """P0-4 / P0-B：法律语料库详细状态（供 /readyz 透明披露）。
 
     返回结构：
-        - mode: ``official_full``（官方法律库可用）/ ``curated_only``（仅精编子集）
+        - mode: ``official_full`` / ``curated_only`` / ``index_mismatch``
         - required: 是否强制要求完整库
         - available: 完整库是否可用
-        - documents / chunks: 规模统计（chunks 读 article_index 缓存，缺失时为 null）
+        - index_consistent: 法库/ArticleIndex/BM25 三者是否一致（P0-B）
+        - index_mismatch_reason: 不一致原因（consistent 时为 null）
+        - documents / chunks: 规模统计（读 manifest，缺失时为 null）
+        - corpus_hash: 当前法库内容指纹（供运维对比）
     """
     available = is_official_db_available()
     required = is_official_law_db_required()
@@ -316,27 +331,47 @@ def _legal_corpus_status() -> dict[str, Any]:
         "lawtext_dir": str(LAWTEXT_DIR),
         "documents": None,
         "chunks": None,
+        "index_consistent": None,
+        "index_mismatch_reason": None,
+        "corpus_hash": None,
     }
     # 尽力统计规模；缓存缺失或读取异常不阻断就绪检查
     try:
         if available:
             info["documents"] = sum(1 for _ in LAWTEXT_DIR.rglob("*.md"))
-        pkl = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.pkl"
-        js = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.json"
-        if pkl.is_file():
-            import pickle
 
-            with open(pkl, "rb") as f:
-                cached = pickle.load(f)
-            if isinstance(cached, dict) and isinstance(cached.get("chunks"), list):
-                info["chunks"] = len(cached["chunks"])
-        elif js.is_file():
-            import json
+        # P0-B：优先读 manifest 获取一致性状态与规模
+        from lvyan.retrieval.manifest import verify_corpus_consistency
 
-            with open(js, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            if isinstance(raw, dict) and isinstance(raw.get("chunks"), list):
-                info["chunks"] = len(raw["chunks"])
+        check = verify_corpus_consistency()
+        info["index_consistent"] = check["consistent"]
+        info["index_mismatch_reason"] = check["reason"]
+        info["corpus_hash"] = check["current_corpus_hash"]
+        if check["manifest"] is not None:
+            info["chunks"] = int(check["manifest"].get("chunks_count", 0)) or None
+            # 法库已变更但 manifest 记录了旧规模 —— 以 manifest 为准披露
+            if check["consistent"]:
+                info["mode"] = "official_full"
+            else:
+                info["mode"] = "index_mismatch"
+        else:
+            # manifest 缺失：回退到直接读 article_index 文件（兼容旧部署）
+            pkl = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.pkl"
+            js = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.json"
+            if pkl.is_file():
+                import pickle
+
+                with open(pkl, "rb") as f:
+                    cached = pickle.load(f)
+                if isinstance(cached, dict) and isinstance(cached.get("chunks"), list):
+                    info["chunks"] = len(cached["chunks"])
+            elif js.is_file():
+                import json
+
+                with open(js, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict) and isinstance(raw.get("chunks"), list):
+                    info["chunks"] = len(raw["chunks"])
     except Exception:  # noqa: BLE001
         pass
     return info
@@ -1024,6 +1059,11 @@ def create_app(
                     if legal_answer:
                         event["schema_version"] = legal_answer.get("schema_version", "legal_answer_v1")
                         event["answer"] = legal_answer
+                    # P1-A：与 live 路径 _build_final_output_event 保持一致，
+                    # 刷新恢复时也推送 document_file，前端据此渲染下载入口。
+                    doc_file = durable_run.get("document_file")
+                    if doc_file:
+                        event["document_file"] = doc_file
                     yield format_sse_event(event)
                 elif status == "failed":
                     # W4：与 live 路径 _fail_run 保持一致，包含 code 字段供前端分类
@@ -1461,6 +1501,69 @@ def create_app(
                 run_id=run_id, status=status, message=message
             )
         return HITLResponse(run_id=run_id, status=status, message=message)
+
+    @app.get("/api/documents/{run_id}/download")
+    async def download_document(
+        run_id: str,
+        user_id: str = Depends(get_current_user_id),
+    ) -> FileResponse:
+        """P1-A：安全下载文书文件。
+
+        - ownership 校验：仅 run 的所有者可下载
+        - path traversal 防护：文件必须在 AGENT_DIR/outputs 内
+        - 不暴露服务器内部路径：FileResponse 使用安全 filename
+        """
+        # 1. 获取 run 记录
+        if metadata_store is not None:
+            try:
+                run = metadata_store.get_run(run_id)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503, detail="run metadata 暂时不可用"
+                ) from exc
+        else:
+            raise HTTPException(status_code=503, detail="metadata store 不可用")
+
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"run {run_id} 无记录")
+
+        # 2. ownership 校验
+        if is_auth_enabled():
+            owner = str(run.get("user_id") or ANONYMOUS_USER)
+            if owner != user_id:
+                raise HTTPException(
+                    status_code=403, detail=f"run {run_id} 不属于当前用户"
+                )
+
+        # 3. 获取 document_file 信息
+        doc_file = run.get("document_file")
+        if not doc_file or not isinstance(doc_file, dict) or not doc_file.get("success"):
+            raise HTTPException(status_code=404, detail="该 run 无可下载的文书文件")
+
+        output_path_str = doc_file.get("output_path")
+        if not output_path_str:
+            raise HTTPException(status_code=404, detail="文书文件路径缺失")
+
+        # 4. path traversal 防护
+        file_path = Path(output_path_str).resolve()
+        outputs_dir = (AGENT_DIR / "outputs").resolve()
+        try:
+            file_path.relative_to(outputs_dir)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=403, detail="文件路径不合法"
+            ) from exc
+
+        if not file_path.is_file():
+            raise HTTPException(status_code=404, detail="文书文件不存在")
+
+        # 5. 安全下载（不暴露服务器路径）
+        safe_filename = f"{run_id}.docx"
+        return FileResponse(
+            path=str(file_path),
+            filename=safe_filename,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
 
     # --- 静态文件与前端页面 ---
     _static_dir = Path(__file__).parent / "static"

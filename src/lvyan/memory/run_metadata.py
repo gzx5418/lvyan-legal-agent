@@ -94,6 +94,7 @@ class PostgresRunMetadataStore:
         "interrupt_payload",
         "final_output",
         "legal_answer",
+        "document_file",
         "error",
         "completed_at",
         "expires_at",
@@ -263,6 +264,10 @@ class PostgresRunMetadataStore:
             from psycopg.types.json import Jsonb
 
             clean["legal_answer"] = Jsonb(clean["legal_answer"])
+        if "document_file" in clean and isinstance(clean["document_file"], (dict, list)):
+            from psycopg.types.json import Jsonb
+
+            clean["document_file"] = Jsonb(clean["document_file"])
         assignments = ", ".join(f"{key} = %s" for key in clean)
         params = [*clean.values(), run_id]
         with self._connect() as conn:
@@ -282,7 +287,7 @@ class PostgresRunMetadataStore:
                 cur.execute(
                     """
                     SELECT run_id, thread_id, user_id, status,
-                           interrupt_payload, final_output, legal_answer, error,
+                           interrupt_payload, final_output, legal_answer, document_file, error,
                            created_at, completed_at
                     FROM agent_runs
                     WHERE run_id = %s

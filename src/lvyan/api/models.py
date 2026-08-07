@@ -105,7 +105,8 @@ class HealthResponse(BaseModel):
 
     status: Literal["ok", "degraded"]
     database: Literal["ok", "unavailable"]
-    retrieval: Literal["ok", "unavailable"]
+    # P0-B：retrieval 可能为 degraded（法库/索引不一致），不仅是 ok/unavailable
+    retrieval: Literal["ok", "degraded", "unavailable"]
     model_gateway: Literal["ok", "unavailable"]
 
 

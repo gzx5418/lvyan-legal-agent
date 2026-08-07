@@ -264,6 +264,10 @@ def _load_article_chunks() -> list[Any]:
     ``ingest_laws.py`` CLI 预生成）；不存在时调用 ``build_article_index``
     现场构建并落盘，便于后续运行复用。
 
+    P0-B：加载缓存前先校验 ``corpus_manifest.json`` 中的 ``corpus_hash`` 是否
+    与当前 ``LAWTEXT_DIR`` 一致。法库已更新（submodule 升级 / 挂载卷覆盖）
+    时丢弃缓存、现场重建，避免使用陈旧索引。
+
     返回 ArticleChunk 实例列表（懒导入 ingest_laws 以避免循环依赖）。
     """
     global _GLOBAL_CHUNKS_CACHE
@@ -276,8 +280,25 @@ def _load_article_chunks() -> list[Any]:
         save_index_json,
     )
 
-    # 1) 优先尝试 pickle 缓存（最快）
-    if _ARTICLE_INDEX_PKL.is_file():
+    # P0-B：校验法库/索引一致性。不一致则跳过缓存、现场重建。
+    # 延迟导入避免循环依赖（manifest → lexical 会循环，但 manifest 内部
+    # 用函数内 import 解 lexical._compute_chunk_signature，此处安全）。
+    cache_trusted = True
+    try:
+        from lvyan.retrieval.manifest import verify_corpus_consistency
+
+        check = verify_corpus_consistency()
+        if not check["consistent"]:
+            cache_trusted = False
+            log(
+                f"[BM25] corpus_manifest 不一致（reason={check['reason']}），"
+                f"丢弃缓存并现场重建索引"
+            )
+    except Exception as exc:  # noqa: BLE001 校验失败不阻断加载，降级到原逻辑
+        log(f"[BM25] manifest 校验异常（忽略，按原逻辑加载）：{exc}")
+
+    # 1) 优先尝试 pickle 缓存（最快）—— 仅在 manifest 一致时信任
+    if cache_trusted and _ARTICLE_INDEX_PKL.is_file():
         try:
             import pickle
 
@@ -295,8 +316,8 @@ def _load_article_chunks() -> list[Any]:
         except (OSError, pickle.PickleError, Exception):
             pass
 
-    # 2) 回退到 JSON 缓存
-    if _ARTICLE_INDEX_FILE.is_file():
+    # 2) 回退到 JSON 缓存 —— 同样仅在 manifest 一致时信任
+    if cache_trusted and _ARTICLE_INDEX_FILE.is_file():
         try:
             with open(_ARTICLE_INDEX_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)

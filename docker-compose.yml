@@ -148,6 +148,12 @@ services:
       # —— 模型网关（必填，否则 LLM 节点全部不可用）——
       MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}
       MODEL_GATEWAY_API_KEY: ${MODEL_GATEWAY_API_KEY:-}
+      # P1-B：模型名也需透传，否则 .env 配置不生效（config.py 有代码默认值，但
+      # 用户在 .env 改 CHAT_MODEL 等必须通过 compose 传入容器）
+      CHAT_MODEL: ${CHAT_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      VISION_MODEL: ${VISION_MODEL:-Qwen/Qwen3-VL-8B-Instruct}
 
       # —— 认证（默认关闭方便首次部署；生产启用 JWT 时设 AUTH_ENABLED=true）——
       AUTH_ENABLED: ${AUTH_ENABLED:-false}
@@ -166,10 +172,30 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
 
+      # —— 官方法律全文库（git submodule，镜像已内嵌）——
+      # P1-B：LAWTEXT_DIR / REQUIRE_OFFICIAL_LAW_DB 必须透传，否则 .env 配置不生效。
+      # LAWTEXT_DIR 留空时 config.py 自动解析到容器内 /app/external/lvyan-lawtext/content。
+      LAWTEXT_DIR: ${LAWTEXT_DIR:-}
+      REQUIRE_OFFICIAL_LAW_DB: ${REQUIRE_OFFICIAL_LAW_DB:-true}
+
+      # —— 反向代理信任（W6）——
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}
+
       # —— 业务参数（有合理默认值，按需覆盖）——
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
       HITL_ENABLED: ${HITL_ENABLED:-true}
       CANCEL_POLL_INTERVAL_SECONDS: ${CANCEL_POLL_INTERVAL_SECONDS:-2}
+      # P1-B：检索/推理/资源上限必须透传，否则 .env 配置不生效（config.py 有代码
+      # 默认值，但用户在 .env 调整后不透传则不生效）。
+      MAX_RETRIEVAL_ITERATIONS: ${MAX_RETRIEVAL_ITERATIONS:-1}
+      MAX_LEGAL_REASONER_ITERATIONS: ${MAX_LEGAL_REASONER_ITERATIONS:-1}
+      MAX_COST_BUDGET_USD: ${MAX_COST_BUDGET_USD:-2.0}
+      MAX_ATTACHMENT_COUNT: ${MAX_ATTACHMENT_COUNT:-10}
+      MAX_EXTRACTED_CHARS_PER_FILE: ${MAX_EXTRACTED_CHARS_PER_FILE:-200000}
+      MAX_TOTAL_ATTACHMENT_CHARS: ${MAX_TOTAL_ATTACHMENT_CHARS:-400000}
+      MAX_CONCURRENT_CONVERSIONS: ${MAX_CONCURRENT_CONVERSIONS:-2}
+      DOCUMENT_CONVERSION_TIMEOUT_SECONDS: ${DOCUMENT_CONVERSION_TIMEOUT_SECONDS:-60}
+      ZIP_UNCOMPRESSED_BYTES_LIMIT: ${ZIP_UNCOMPRESSED_BYTES_LIMIT:-104857600}
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:

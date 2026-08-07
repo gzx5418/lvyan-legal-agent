@@ -564,6 +564,11 @@ def main() -> None:
         _save_article_index_pickle(chunks, pkl_path)
         print(f"[ingest] 已写入 pickle 索引：{pkl_path}", file=sys.stderr)
         prewarm_bm25_index(chunks, args.output.parent)
+        # P0-B：生成 corpus_manifest.json，供运行时校验法库/索引一致性
+        from lvyan.retrieval.manifest import write_corpus_manifest
+
+        manifest_path = write_corpus_manifest(chunks, lawtext_dir, args.output.parent)
+        print(f"[ingest] 已写入 corpus_manifest：{manifest_path}", file=sys.stderr)
 
     if args.stats:
         with_article = sum(1 for c in chunks if c.article_number)

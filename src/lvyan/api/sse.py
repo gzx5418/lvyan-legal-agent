@@ -63,6 +63,8 @@ class RunContext:
         self.final_output: str | None = None
         # 结构化法律输出（LegalAnswerV1 dict），与 final_output 并行
         self.legal_answer: dict[str, Any] | None = None
+        # P1-A：文书文件信息（document 模式 finalizer 渲染的 DOCX 元数据）
+        self.document_file: dict[str, Any] | None = None
         self.error: str | None = None
         self.non_recoverable: bool = False
         # HITL 中断信息（LangGraph interrupt 机制）
@@ -520,6 +522,7 @@ class RunManager:
                 status="completed",
                 final_output=ctx.final_output,
                 legal_answer=ctx.legal_answer,
+                document_file=ctx.document_file,
                 completed_at=datetime.now(timezone.utc),
             )
             thread_marked = self._mark_thread_output(ctx.thread_id)
@@ -780,14 +783,16 @@ class RunManager:
             graph = await _get_graph()
             final_output = ctx.final_output or ""
 
-            final_output, legal_answer = await _stream_graph_events(
+            final_output, legal_answer, document_file = await _stream_graph_events(
                 graph,
                 command,
                 config,
                 ctx,
                 final_output=final_output,
+                document_file=ctx.document_file,
             )
             ctx.legal_answer = legal_answer
+            ctx.document_file = document_file
 
             # 再次检查是否还有中断 —— P0-2 三态 fail-closed
             icr = await _check_interrupt_status_async(graph, config)
@@ -827,6 +832,7 @@ class RunManager:
                 status="completed",
                 final_output=ctx.final_output,
                 legal_answer=ctx.legal_answer,
+                document_file=ctx.document_file,
                 completed_at=datetime.now(timezone.utc),
             )
             thread_marked = self._mark_thread_output(ctx.thread_id)
@@ -946,6 +952,8 @@ def _build_final_output_event(ctx: "RunContext") -> dict[str, Any]:
     if ctx.legal_answer:
         event["schema_version"] = ctx.legal_answer.get("schema_version", "legal_answer_v1")
         event["answer"] = ctx.legal_answer
+    if ctx.document_file:
+        event["document_file"] = ctx.document_file
     return event
 
 
@@ -966,8 +974,9 @@ async def _stream_graph_events(
     ctx: "RunContext",
     *,
     final_output: str = "",
+    document_file: dict[str, Any] | None = None,
     collect_state: dict[str, Any] | None = None,
-) -> tuple[str, dict[str, Any] | None]:
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
     """统一处理 ``graph.astream`` 的事件流，推送 node_start/end/error 事件。
 
     被 ``default_runner``（source=initial_state）与 ``_resume_drive``
@@ -979,12 +988,14 @@ async def _stream_graph_events(
         config: LangGraph 配置（含 thread_id）。
         ctx: RunContext，用于 ``publish`` SSE 事件。
         final_output: 初始的 final_output（用于 HITL 恢复时承接上文）。
+        document_file: 初始的 document_file（用于 HITL 恢复时承接上文）。
         collect_state: 可选；若提供，会把 updates 写入该 dict（default_runner
             用于 fallback 输出生成）。
 
     Returns:
-        ``(final_output, legal_answer)``：流式过程中累积的 Markdown 输出与
-        结构化 LegalAnswerV1 dict（若 composer 已写入）。
+        ``(final_output, legal_answer, document_file)``：流式过程中累积的
+        Markdown 输出、结构化 LegalAnswerV1 dict（若 composer 已写入）与
+        文书文件元数据（document 模式 finalizer 渲染的 DOCX 信息）。
     """
     pending_starts: dict[str, float] = {}
     legal_answer: dict[str, Any] | None = None
@@ -1044,14 +1055,19 @@ async def _stream_graph_events(
                 if isinstance(update, dict):
                     if collect_state is not None:
                         collect_state.update(update)
-                    out = update.get("final_output")
-                    if out:
-                        final_output = out
-                    la = update.get("legal_answer")
-                    if la:
-                        legal_answer = la
+                    # P0-A 修复：使用 "key in update" 显式覆盖，而非 truthy 判断。
+                    # legal_answer_finalizer 在 HITL edited / 校验失败 / 隐私失败时会
+                    # 显式返回 legal_answer=None（清空不可信的结构化答案）。若用
+                    # ``if la:`` 判断，None 是 falsy 不会覆盖，导致 composer 旧版
+                    # 结构化答案残留在内存中，前端继续收到 stale answer。
+                    if "final_output" in update:
+                        final_output = update["final_output"]
+                    if "legal_answer" in update:
+                        legal_answer = update["legal_answer"]
+                    if "document_file" in update:
+                        document_file = update["document_file"]
 
-    return final_output, legal_answer
+    return final_output, legal_answer, document_file
 
 
 async def _get_graph() -> Any:
@@ -1285,7 +1301,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
         # v1 多 stream mode 返回 (mode, data) 元组，会被 isinstance(dict) 跳过。
         # "tasks" 流提供节点任务的开始/完成/错误事件，比 "debug" 更语义化。
         try:
-            final_output, legal_answer = await _stream_graph_events(
+            final_output, legal_answer, document_file = await _stream_graph_events(
                 graph,
                 initial.model_dump(),
                 config,
@@ -1294,6 +1310,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
                 collect_state=last_state,
             )
             ctx.legal_answer = legal_answer
+            ctx.document_file = document_file
         except TypeError as exc:  # v2 参数不兼容 → 回退 v1 updates
             if "version" not in str(exc):
                 raise
@@ -1303,12 +1320,14 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
                 for _node_name, update in chunk.items():
                     if isinstance(update, dict):
                         last_state.update(update)
-                        out = update.get("final_output")
-                        if out:
-                            final_output = out
-                        la = update.get("legal_answer")
-                        if la:
-                            ctx.legal_answer = la
+                        # P0-A 修复：与 _stream_graph_events 保持一致，使用 "key in
+                        # update" 显式覆盖，避免 legal_answer=None 不生效。
+                        if "final_output" in update:
+                            final_output = update["final_output"]
+                        if "legal_answer" in update:
+                            ctx.legal_answer = update["legal_answer"]
+                        if "document_file" in update:
+                            ctx.document_file = update["document_file"]
 
         # 检查是否有 LangGraph interrupt（HITL）—— P0-2 三态 fail-closed
         icr = await _check_interrupt_status_async(graph, config)
