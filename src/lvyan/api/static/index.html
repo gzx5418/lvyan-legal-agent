@@ -37,6 +37,14 @@
 
   <div class="sidebar-footer">
     <button type="button" id="clear-all-history" class="clear-all-btn" title="清空所有历史">清空历史</button>
+    <button type="button" id="workspace-btn" class="settings-entry" aria-controls="workspace-view" aria-expanded="false">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h4.2l1.8 2h5A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5v-10Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M8 11h8M8 14.5h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      <span>案件工作台</span>
+    </button>
+    <button type="button" id="settings-btn" class="settings-entry" aria-controls="settings-view" aria-expanded="false">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z" stroke="currentColor" stroke-width="1.7"/><path d="m19.4 13.5 1.1.9-2 3.4-1.3-.5a7.7 7.7 0 0 1-1.8 1l-.2 1.4h-4l-.2-1.4a7.7 7.7 0 0 1-1.8-1l-1.3.5-2-3.4 1.1-.9a7.4 7.4 0 0 1 0-2.1L5.9 10l2-3.4 1.3.5a7.7 7.7 0 0 1 1.8-1l.2-1.4h4l.2 1.4a7.7 7.7 0 0 1 1.8 1l1.3-.5 2 3.4-1.1.9c.1.7.1 1.4 0 2.1Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+      <span>设置</span>
+    </button>
     <div id="health-status" class="health-status" role="status" aria-live="polite">
       <span class="dot dot-pending"></span>
       <span class="health-text">检查中…</span>
@@ -74,6 +82,93 @@
     </div>
     <div id="progress-nodes" class="progress-nodes"></div>
   </div>
+
+  <!-- 设置页：仅管理浏览器偏好，不展示服务端机密配置 -->
+  <section id="settings-view" class="settings-view" aria-labelledby="settings-title" style="display:none;">
+    <div class="settings-titlebar">
+      <div>
+        <p class="settings-eyebrow">律言工作台</p>
+        <h1 id="settings-title">设置</h1>
+      </div>
+      <button type="button" id="settings-close" class="icon-btn" aria-label="关闭设置" title="返回对话">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="m4 4 10 10M14 4 4 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="settings-layout">
+      <nav class="settings-nav" aria-label="设置分类">
+        <button type="button" class="settings-nav-item active" data-settings-panel="general">通用</button>
+        <button type="button" class="settings-nav-item" data-settings-panel="runtime">运行状态</button>
+        <button type="button" class="settings-nav-item" data-settings-panel="data">数据与隐私</button>
+      </nav>
+      <div class="settings-panels">
+        <section class="settings-panel active" data-settings-content="general" aria-labelledby="settings-general-title">
+          <div class="settings-section-heading"><h2 id="settings-general-title">通用</h2><p>这些选项只保存在当前浏览器。</p></div>
+          <div class="settings-card">
+            <label class="settings-row" for="settings-default-mode"><span><strong>默认分析模式</strong><small>新对话启动时使用的工作深度。</small></span>
+              <select id="settings-default-mode"><option value="light">简要</option><option value="deep">深度</option><option value="document">文书</option></select>
+            </label>
+            <label class="settings-row" for="settings-density"><span><strong>阅读密度</strong><small>调整对话和设置页面的留白。</small></span>
+              <select id="settings-density"><option value="comfortable">舒适</option><option value="compact">紧凑</option></select>
+            </label>
+            <label class="settings-row settings-toggle" for="settings-reduce-motion"><span><strong>减少动效</strong><small>关闭脉冲和界面过渡，适合长时间阅读。</small></span><input id="settings-reduce-motion" type="checkbox"><i aria-hidden="true"></i></label>
+          </div>
+        </section>
+        <section class="settings-panel" data-settings-content="runtime" aria-labelledby="settings-runtime-title" hidden>
+          <div class="settings-section-heading"><h2 id="settings-runtime-title">运行状态</h2><p>只显示可公开的服务健康信息与当前会话状态。</p></div>
+          <div class="settings-card settings-status-card">
+            <div class="runtime-status"><span id="settings-health-dot" class="dot dot-pending"></span><div><strong id="settings-health-title">正在检查服务</strong><small id="settings-health-detail">连接到健康检查接口…</small></div></div>
+            <div class="settings-divider"></div>
+            <div class="runtime-facts"><span>认证凭据</span><strong id="settings-auth-status">未检测到浏览器令牌</strong></div>
+            <button type="button" id="settings-refresh-health" class="settings-secondary-btn">刷新状态</button>
+          </div>
+        </section>
+        <section class="settings-panel" data-settings-content="data" aria-labelledby="settings-data-title" hidden>
+          <div class="settings-section-heading"><h2 id="settings-data-title">数据与隐私</h2><p>对话的持久化副本由服务端管理；此处只控制本机浏览器缓存。</p></div>
+          <div class="settings-card">
+            <div class="settings-row"><span><strong>浏览器会话缓存</strong><small id="settings-history-count">正在读取本地会话…</small></span></div>
+            <div class="settings-danger-row"><span><strong>清除本地缓存</strong><small>删除此浏览器保存的历史副本，不会删除服务端会话。</small></span><button type="button" id="settings-clear-local" class="settings-danger-btn">清除缓存</button></div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </section>
+
+  <!-- 案件工作台：案件、文书版本与审批状态共用同一权限边界 -->
+  <section id="workspace-view" class="workspace-view" aria-labelledby="workspace-title" style="display:none;">
+    <div class="settings-titlebar">
+      <div><p class="settings-eyebrow">案件工作台</p><h1 id="workspace-title">案件与文书</h1></div>
+      <button type="button" id="workspace-close" class="icon-btn" aria-label="关闭案件工作台" title="返回对话">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="m4 4 10 10M14 4 4 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="workspace-layout">
+      <aside class="workspace-cases" aria-label="案件列表">
+        <form id="case-create-form" class="workspace-create-form">
+          <label class="sr-only" for="case-title-input">案件名称</label>
+          <input id="case-title-input" maxlength="240" placeholder="新建案件名称" required>
+          <textarea id="case-description-input" maxlength="5000" rows="2" placeholder="案件摘要（可选）"></textarea>
+          <button type="submit" class="workspace-primary">新建案件</button>
+        </form>
+        <div id="case-list" class="case-list" role="list"></div>
+      </aside>
+      <section class="workspace-detail" aria-live="polite">
+        <div id="workspace-empty" class="workspace-empty">选择一个案件，开始维护证据与文书。</div>
+        <div id="workspace-content" style="display:none;">
+          <div class="workspace-case-heading"><div><h2 id="workspace-case-title"></h2><p id="workspace-case-description"></p></div><span id="workspace-case-status" class="workspace-status"></span></div>
+          <div class="workspace-grid">
+            <section class="workspace-card"><h3>文书</h3><div id="workspace-document-list" class="workspace-list"></div></section>
+            <section class="workspace-card"><h3>审计记录</h3><div id="workspace-audit-list" class="workspace-list"></div></section>
+          </div>
+          <form id="document-create-form" class="workspace-document-form">
+            <h3>新建文书草稿</h3>
+            <div class="workspace-document-fields"><input id="document-title-input" maxlength="240" placeholder="文书标题" required><input id="document-type-input" maxlength="80" value="legal_memo" placeholder="文书类型" required></div>
+            <textarea id="document-content-input" maxlength="300000" rows="8" placeholder="输入文书正文…"></textarea>
+            <button type="submit" class="workspace-primary">保存为版本 1</button>
+          </form>
+        </div>
+      </section>
+    </div>
+  </section>
 
   <!-- 对话区 -->
   <div id="chat-area" class="chat-area">
@@ -157,6 +252,6 @@
 <div id="toast" class="toast" role="status" aria-live="polite" style="display:none;"></div>
 
 <script src="/static/components.js?v=2"></script>
-<script src="/static/app.js?v=13"></script>
+<script src="/static/app.js?v=14"></script>
 </body>
 </html>

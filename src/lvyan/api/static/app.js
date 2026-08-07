@@ -14,6 +14,10 @@ const state = {
   attachments: [],    // [{file_id, filename, size, content_type, text_preview}]
   lastQuery: '',      // 用于重新生成
   sidebarCollapsed: false,
+  settingsOpen: false,
+  workspaceOpen: false,
+  selectedCaseId: null,
+  cases: [],
 };
 
 // P1-2：全局运行超时定时器。只在终态（final_output/error/cancelled）或
@@ -23,6 +27,14 @@ let runTimeoutId = null;
 
 // 全局 SSE AbortController 引用
 let currentSSEController = null;
+
+const UI_PREFERENCES_KEY = 'lvyan_ui_preferences';
+const DEFAULT_UI_PREFERENCES = {
+  defaultMode: 'light',
+  density: 'comfortable',
+  reduceMotion: false,
+};
+let uiPreferences = { ...DEFAULT_UI_PREFERENCES };
 
 // --- 节点中文名映射（仅用于 node_error toast 展示，不参与进度统计） ---
 const NODE_LABELS = {
@@ -109,6 +121,38 @@ const els = {
   clearAllBtn: $('clear-all-history'),
   exportBtn: $('export-btn'),
   sidebarToggle: $('sidebar-toggle'),
+  inputArea: $('input-area'),
+  settingsBtn: $('settings-btn'),
+  settingsView: $('settings-view'),
+  settingsClose: $('settings-close'),
+  settingsDefaultMode: $('settings-default-mode'),
+  settingsDensity: $('settings-density'),
+  settingsReduceMotion: $('settings-reduce-motion'),
+  settingsHealthDot: $('settings-health-dot'),
+  settingsHealthTitle: $('settings-health-title'),
+  settingsHealthDetail: $('settings-health-detail'),
+  settingsAuthStatus: $('settings-auth-status'),
+  settingsRefreshHealth: $('settings-refresh-health'),
+  settingsHistoryCount: $('settings-history-count'),
+  settingsClearLocal: $('settings-clear-local'),
+  workspaceBtn: $('workspace-btn'),
+  workspaceView: $('workspace-view'),
+  workspaceClose: $('workspace-close'),
+  caseCreateForm: $('case-create-form'),
+  caseTitleInput: $('case-title-input'),
+  caseDescriptionInput: $('case-description-input'),
+  caseList: $('case-list'),
+  workspaceEmpty: $('workspace-empty'),
+  workspaceContent: $('workspace-content'),
+  workspaceCaseTitle: $('workspace-case-title'),
+  workspaceCaseDescription: $('workspace-case-description'),
+  workspaceCaseStatus: $('workspace-case-status'),
+  workspaceDocumentList: $('workspace-document-list'),
+  workspaceAuditList: $('workspace-audit-list'),
+  documentCreateForm: $('document-create-form'),
+  documentTitleInput: $('document-title-input'),
+  documentTypeInput: $('document-type-input'),
+  documentContentInput: $('document-content-input'),
   charCount: $('char-count'),
   msgMenu: $('msg-menu'),
   toast: $('toast'),
@@ -126,14 +170,13 @@ function init() {
     document.body.classList.add('sidebar-collapsed');
     els.sidebarToggle.setAttribute('aria-expanded', 'false');
   }
+  loadUiPreferences();
 
   // 模式选择
   document.querySelectorAll('.mode-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       if (state.isRunning) return;
-      document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      state.mode = btn.dataset.mode;
+      setActiveMode(btn.dataset.mode);
     });
   });
 
@@ -174,6 +217,34 @@ function init() {
 
   // 侧栏折叠
   els.sidebarToggle.addEventListener('click', toggleSidebar);
+
+  // 设置页
+  els.settingsBtn.addEventListener('click', openSettings);
+  els.settingsClose.addEventListener('click', closeSettings);
+  document.querySelectorAll('.settings-nav-item').forEach(btn => {
+    btn.addEventListener('click', () => showSettingsPanel(btn.dataset.settingsPanel));
+  });
+  els.settingsDefaultMode.addEventListener('change', () => {
+    uiPreferences.defaultMode = els.settingsDefaultMode.value;
+    persistUiPreferences();
+    if (!state.threadId && !state.isRunning) setActiveMode(uiPreferences.defaultMode);
+  });
+  els.settingsDensity.addEventListener('change', () => {
+    uiPreferences.density = els.settingsDensity.value;
+    persistUiPreferences();
+    applyUiPreferences();
+  });
+  els.settingsReduceMotion.addEventListener('change', () => {
+    uiPreferences.reduceMotion = els.settingsReduceMotion.checked;
+    persistUiPreferences();
+    applyUiPreferences();
+  });
+  els.settingsRefreshHealth.addEventListener('click', refreshSettingsHealth);
+  els.settingsClearLocal.addEventListener('click', clearLocalHistoryCache);
+  els.workspaceBtn.addEventListener('click', openWorkspace);
+  els.workspaceClose.addEventListener('click', closeWorkspace);
+  els.caseCreateForm.addEventListener('submit', createWorkspaceCase);
+  els.documentCreateForm.addEventListener('submit', createWorkspaceDocument);
 
   // 文件上传
   els.uploadBtn.addEventListener('click', () => els.fileInput.click());
@@ -231,6 +302,14 @@ function init() {
 // 全局快捷键
 // =========================================================================
 function handleGlobalShortcut(e) {
+  if (e.key === 'Escape' && state.workspaceOpen) {
+    closeWorkspace();
+    return;
+  }
+  if (e.key === 'Escape' && state.settingsOpen) {
+    closeSettings();
+    return;
+  }
   // Ctrl+N: 新对话
   if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
     e.preventDefault();
@@ -247,6 +326,315 @@ function handleGlobalShortcut(e) {
   if (e.key === 'Escape') {
     els.msgMenu.style.display = 'none';
   }
+}
+
+// =========================================================================
+// 设置页（浏览器本地偏好，不传递或展示服务端敏感配置）
+// =========================================================================
+function setActiveMode(mode) {
+  const validMode = ['light', 'deep', 'document'].includes(mode) ? mode : 'light';
+  state.mode = validMode;
+  document.querySelectorAll('.mode-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === validMode);
+  });
+}
+
+function loadUiPreferences() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY) || '{}');
+    if (raw && typeof raw === 'object') {
+      if (['light', 'deep', 'document'].includes(raw.defaultMode)) uiPreferences.defaultMode = raw.defaultMode;
+      if (['comfortable', 'compact'].includes(raw.density)) uiPreferences.density = raw.density;
+      if (typeof raw.reduceMotion === 'boolean') uiPreferences.reduceMotion = raw.reduceMotion;
+    }
+  } catch { /* 浏览器隐私模式或损坏缓存时使用默认值 */ }
+  els.settingsDefaultMode.value = uiPreferences.defaultMode;
+  els.settingsDensity.value = uiPreferences.density;
+  els.settingsReduceMotion.checked = uiPreferences.reduceMotion;
+  setActiveMode(uiPreferences.defaultMode);
+  applyUiPreferences();
+}
+
+function persistUiPreferences() {
+  try {
+    localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
+  } catch {
+    showToast('无法保存浏览器偏好设置', 'warning');
+  }
+}
+
+function applyUiPreferences() {
+  document.body.classList.toggle('compact-ui', uiPreferences.density === 'compact');
+  document.body.classList.toggle('reduce-motion', uiPreferences.reduceMotion);
+}
+
+function showSettingsPanel(panel) {
+  document.querySelectorAll('.settings-nav-item').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.settingsPanel === panel);
+  });
+  document.querySelectorAll('.settings-panel').forEach(section => {
+    const active = section.dataset.settingsContent === panel;
+    section.classList.toggle('active', active);
+    section.hidden = !active;
+  });
+}
+
+function openSettings() {
+  if (state.isRunning) {
+    showToast('请先结束当前运行，再打开设置', 'warning');
+    return;
+  }
+  if (state.workspaceOpen) closeWorkspace();
+  state.settingsOpen = true;
+  els.settingsBtn.setAttribute('aria-expanded', 'true');
+  els.settingsView.style.display = 'flex';
+  els.chatArea.style.display = 'none';
+  els.inputArea.style.display = 'none';
+  els.progressBar.style.display = 'none';
+  els.exportBtn.style.display = 'none';
+  els.threadLabel.textContent = '设置';
+  showSettingsPanel('general');
+  updateSettingsHistoryCount();
+  refreshSettingsHealth();
+  els.settingsClose.focus();
+}
+
+function closeSettings() {
+  if (!state.settingsOpen) return;
+  state.settingsOpen = false;
+  els.settingsBtn.setAttribute('aria-expanded', 'false');
+  els.settingsView.style.display = 'none';
+  els.chatArea.style.display = 'flex';
+  els.inputArea.style.display = '';
+  els.threadLabel.textContent = state.threadId ? (state.lastQuery || '当前会话').slice(0, 20) : '新对话';
+  els.exportBtn.style.display = state.threadId ? 'block' : 'none';
+  els.settingsBtn.focus();
+}
+
+function updateSettingsHistoryCount() {
+  const count = state.history.length;
+  els.settingsHistoryCount.textContent = count
+    ? `此浏览器保存了 ${count} 条会话副本。`
+    : '此浏览器尚未保存会话副本。';
+}
+
+async function refreshSettingsHealth() {
+  els.settingsAuthStatus.textContent = getAuthToken() ? '已检测到浏览器令牌' : '未检测到浏览器令牌';
+  els.settingsHealthDot.className = 'dot dot-pending';
+  els.settingsHealthTitle.textContent = '正在检查服务';
+  els.settingsHealthDetail.textContent = '连接到健康检查接口…';
+  try {
+    const resp = await apiFetch('/api/health');
+    if (!resp.ok) throw new Error('health request failed');
+    const data = await resp.json();
+    const failed = ['database', 'retrieval', 'model_gateway'].filter(key => data[key] !== 'ok');
+    const labels = { database: '数据库', retrieval: '检索服务', model_gateway: '模型网关' };
+    const healthy = failed.length === 0;
+    els.settingsHealthDot.className = `dot ${healthy ? 'dot-ok' : 'dot-pending'}`;
+    els.settingsHealthTitle.textContent = healthy ? '服务运行正常' : '服务降级运行';
+    els.settingsHealthDetail.textContent = healthy
+      ? '数据库、检索服务和模型网关均可用。'
+      : `待恢复：${failed.map(key => labels[key]).join('、')}。`;
+  } catch {
+    els.settingsHealthDot.className = 'dot dot-error';
+    els.settingsHealthTitle.textContent = '无法连接服务';
+    els.settingsHealthDetail.textContent = '请检查网络连接或稍后重试。';
+  }
+}
+
+// =========================================================================
+// 案件工作台：前端只展示当前身份能够访问的案件，详情始终从受控 API 读取。
+// =========================================================================
+function setWorkspaceVisible(visible) {
+  state.workspaceOpen = visible;
+  els.workspaceBtn.setAttribute('aria-expanded', String(visible));
+  els.workspaceView.style.display = visible ? 'flex' : 'none';
+  els.chatArea.style.display = visible ? 'none' : 'flex';
+  els.inputArea.style.display = visible ? 'none' : '';
+  els.progressBar.style.display = 'none';
+  els.exportBtn.style.display = visible ? 'none' : (state.threadId ? 'block' : 'none');
+  els.threadLabel.textContent = visible
+    ? '案件工作台'
+    : (state.threadId ? (state.lastQuery || '当前会话').slice(0, 20) : '新对话');
+}
+
+async function openWorkspace() {
+  if (state.isRunning) {
+    showToast('请先结束当前运行，再打开案件工作台', 'warning');
+    return;
+  }
+  if (state.settingsOpen) closeSettings();
+  setWorkspaceVisible(true);
+  await loadWorkspaceCases();
+  els.workspaceClose.focus();
+}
+
+function closeWorkspace() {
+  if (!state.workspaceOpen) return;
+  setWorkspaceVisible(false);
+  els.workspaceBtn.focus();
+}
+
+async function workspaceJson(url, options = {}) {
+  const response = await apiFetch(url, options);
+  if (!response.ok) {
+    let detail = '请求失败';
+    try { detail = (await response.json()).detail || detail; } catch { /* use fallback */ }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+function renderCaseList() {
+  els.caseList.replaceChildren();
+  if (!state.cases.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = '还没有案件。';
+    els.caseList.append(empty);
+    return;
+  }
+  state.cases.forEach(item => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.classList.toggle('active', item.case_id === state.selectedCaseId);
+    const title = document.createElement('strong');
+    title.textContent = item.title;
+    const meta = document.createElement('small');
+    meta.textContent = item.description || '未填写案件摘要';
+    button.append(title, meta);
+    button.addEventListener('click', () => selectWorkspaceCase(item.case_id));
+    els.caseList.append(button);
+  });
+}
+
+async function loadWorkspaceCases() {
+  try {
+    state.cases = await workspaceJson('/api/cases');
+    if (state.selectedCaseId && !state.cases.some(item => item.case_id === state.selectedCaseId)) {
+      state.selectedCaseId = null;
+    }
+    renderCaseList();
+    if (state.selectedCaseId) await selectWorkspaceCase(state.selectedCaseId);
+  } catch (error) {
+    showToast(`无法加载案件：${error.message}`, 'error');
+  }
+}
+
+function addWorkspaceRow(container, primary, secondary = '') {
+  const row = document.createElement('div');
+  const title = document.createElement('div');
+  title.textContent = primary;
+  row.append(title);
+  if (secondary) {
+    const meta = document.createElement('small');
+    meta.textContent = secondary;
+    row.append(meta);
+  }
+  container.append(row);
+}
+
+async function selectWorkspaceCase(caseId) {
+  state.selectedCaseId = caseId;
+  renderCaseList();
+  try {
+    const [caseItem, documents, auditEvents] = await Promise.all([
+      workspaceJson(`/api/cases/${encodeURIComponent(caseId)}`),
+      workspaceJson(`/api/cases/${encodeURIComponent(caseId)}/documents`),
+      workspaceJson(`/api/cases/${encodeURIComponent(caseId)}/audit-events`),
+    ]);
+    els.workspaceEmpty.style.display = 'none';
+    els.workspaceContent.style.display = 'block';
+    els.workspaceCaseTitle.textContent = caseItem.title;
+    els.workspaceCaseDescription.textContent = caseItem.description || '未填写案件摘要';
+    els.workspaceCaseStatus.textContent = caseItem.status === 'active' ? '进行中' : caseItem.status;
+    els.workspaceDocumentList.replaceChildren();
+    els.workspaceAuditList.replaceChildren();
+    if (documents.length) {
+      documents.forEach(item => addWorkspaceRow(
+        els.workspaceDocumentList,
+        `${item.title} · ${item.status}`,
+        item.document_type,
+      ));
+    } else {
+      addWorkspaceRow(els.workspaceDocumentList, '尚无文书草稿');
+    }
+    if (auditEvents.length) {
+      auditEvents.slice(0, 5).forEach(item => addWorkspaceRow(
+        els.workspaceAuditList,
+        item.action,
+        new Date(item.created_at).toLocaleString(),
+      ));
+    } else {
+      addWorkspaceRow(els.workspaceAuditList, '尚无审计记录');
+    }
+  } catch (error) {
+    state.selectedCaseId = null;
+    renderCaseList();
+    els.workspaceContent.style.display = 'none';
+    els.workspaceEmpty.style.display = 'grid';
+    showToast(`无法打开案件：${error.message}`, 'error');
+  }
+}
+
+async function createWorkspaceCase(event) {
+  event.preventDefault();
+  const title = els.caseTitleInput.value.trim();
+  if (!title) return;
+  try {
+    const created = await workspaceJson('/api/cases', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, description: els.caseDescriptionInput.value.trim() }),
+    });
+    els.caseCreateForm.reset();
+    await loadWorkspaceCases();
+    await selectWorkspaceCase(created.case_id);
+    showToast('案件已创建');
+  } catch (error) {
+    showToast(`创建案件失败：${error.message}`, 'error');
+  }
+}
+
+async function createWorkspaceDocument(event) {
+  event.preventDefault();
+  if (!state.selectedCaseId) {
+    showToast('请先选择案件', 'warning');
+    return;
+  }
+  const title = els.documentTitleInput.value.trim();
+  const documentType = els.documentTypeInput.value.trim();
+  if (!title || !documentType) return;
+  try {
+    await workspaceJson(`/api/cases/${encodeURIComponent(state.selectedCaseId)}/documents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        document_type: documentType,
+        content: els.documentContentInput.value,
+      }),
+    });
+    els.documentCreateForm.reset();
+    els.documentTypeInput.value = 'legal_memo';
+    await selectWorkspaceCase(state.selectedCaseId);
+    showToast('文书草稿已保存');
+  } catch (error) {
+    showToast(`保存文书失败：${error.message}`, 'error');
+  }
+}
+
+function clearLocalHistoryCache() {
+  if (!state.history.length) {
+    showToast('本地会话缓存已经为空');
+    return;
+  }
+  if (!confirm('仅清除本浏览器保存的会话副本？服务端会话不会被删除。')) return;
+  state.history = [];
+  try { localStorage.removeItem('lvyan_history'); } catch { /* 忽略私有模式限制 */ }
+  renderHistory();
+  updateSettingsHistoryCount();
+  showToast('已清除本地会话缓存');
 }
 
 async function responseError(resp, fallback) {
@@ -1418,6 +1806,7 @@ function startNewChat() {
   state.threadId = null;
   state.runId = null;
   state.isRunning = false;
+  setActiveMode(uiPreferences.defaultMode);
   state.lastQuery = '';
   clearAttachments();
   els.welcome.style.display = 'flex';

@@ -31,6 +31,15 @@ from .legal_answer import (
     UncertaintyItem,
 )
 from .output import CitationAudit, CitationDetail, OutputMode, ReasoningResult
+from .workspace import (
+    CaseEvidence,
+    DocumentApproval,
+    DocumentVersion,
+    LegalCase,
+    LegalDocument,
+    ReviewFinding,
+    WorkspaceAuditEvent,
+)
 
 __all__ = [
     # attachment.py
@@ -67,4 +76,12 @@ __all__ = [
     "LegalCitation",
     "CitationLevel",
     "UncertaintyItem",
+    # workspace.py
+    "LegalCase",
+    "CaseEvidence",
+    "LegalDocument",
+    "DocumentVersion",
+    "ReviewFinding",
+    "DocumentApproval",
+    "WorkspaceAuditEvent",
 ]

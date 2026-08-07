@@ -8,12 +8,16 @@
 from __future__ import annotations
 
 from .case_vault import DEFAULT_TTL_SECONDS, CaseVault
+from .case_workspace import CaseWorkspaceStore, InMemoryCaseWorkspaceStore, PostgresCaseWorkspaceStore
 from .checkpoints import ShortTermMemory
 from .user_preferences import UserPreference, UserPreferences, sanitize_preference
 
 __all__ = [
     "ShortTermMemory",
     "CaseVault",
+    "CaseWorkspaceStore",
+    "InMemoryCaseWorkspaceStore",
+    "PostgresCaseWorkspaceStore",
     "DEFAULT_TTL_SECONDS",
     "UserPreferences",
     "UserPreference",

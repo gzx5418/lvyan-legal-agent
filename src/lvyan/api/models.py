@@ -157,6 +157,87 @@ class DeleteResponse(BaseModel):
     thread_id: str
 
 
+class CaseCreateRequest(BaseModel):
+    """创建一个受当前用户隔离的案件工作空间。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=240)
+    description: str = Field(default="", max_length=5_000)
+    thread_id: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+    @field_validator("title")
+    @classmethod
+    def title_must_contain_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("案件标题不能为空")
+        return value
+
+
+class EvidenceLinkRequest(BaseModel):
+    """将已经上传且归属当前用户的文件链接为案件证据。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    file_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+    evidence_type: str = Field(default="other", min_length=1, max_length=80)
+    summary: str = Field(default="", max_length=5_000)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+
+
+class DocumentCreateRequest(BaseModel):
+    """在案件内创建一份带初始版本的法律文书。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=240)
+    document_type: str = Field(min_length=1, max_length=80)
+    content: str = Field(max_length=300_000)
+    source_run_id: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class DocumentVersionCreateRequest(BaseModel):
+    """为文书创建一个不可变的新版本。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(max_length=300_000)
+    change_summary: str = Field(default="", max_length=2_000)
+    source_run_id: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class ReviewFindingCreateRequest(BaseModel):
+    """记录一项可追踪的文书审阅问题。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version_id: str = Field(min_length=1, max_length=128)
+    severity: Literal["low", "medium", "high", "critical"]
+    title: str = Field(min_length=1, max_length=240)
+    description: str = Field(min_length=1, max_length=10_000)
+    suggestion: str = Field(default="", max_length=10_000)
+    source_refs: list[dict[str, Any]] = Field(default_factory=list, max_length=50)
+
+
+class ReviewFindingStatusRequest(BaseModel):
+    """关闭或豁免一项审阅问题。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["resolved", "waived"]
+
+
+class DocumentApprovalRequest(BaseModel):
+    """对指定版本作出审批决定。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version_id: str = Field(min_length=1, max_length=128)
+    decision: Literal["approved", "rejected"]
+    comment: str = Field(default="", max_length=5_000)
+
+
 __all__ = [
     "AgentRunRequest",
     "AgentRunResponse",
@@ -169,4 +250,11 @@ __all__ = [
     "ThreadSummary",
     "ThreadListResponse",
     "DeleteResponse",
+    "CaseCreateRequest",
+    "EvidenceLinkRequest",
+    "DocumentCreateRequest",
+    "DocumentVersionCreateRequest",
+    "ReviewFindingCreateRequest",
+    "ReviewFindingStatusRequest",
+    "DocumentApprovalRequest",
 ]
