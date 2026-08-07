@@ -10,12 +10,10 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
-from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field
 
-from lvyan.config import AGENT_DIR, KNOWLEDGE_DIR
+from lvyan.config import KNOWLEDGE_DIR
 from lvyan.tools.base import ToolResult
 
 # ---------------------------------------------------------------------------

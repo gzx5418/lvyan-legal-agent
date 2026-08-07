@@ -11,11 +11,9 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -88,7 +86,6 @@ class TestHistoricalLawEndToEnd:
         from lvyan.retrieval.version_aware import verify_statute_status, _reset_metadata_cache
 
         _reset_metadata_cache()
-        from lvyan.retrieval.version_aware import _metadata_cache, _groups_cache
 
         from lvyan.retrieval.version_resolver import LawMetadata
 

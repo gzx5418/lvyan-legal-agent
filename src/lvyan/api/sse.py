@@ -137,6 +137,8 @@ class RunManager:
 
     # P3-24：完成的运行在 _runs 中保留 1 小时后清理（可被 gc_runs 显式调用）
     _RUN_TTL_SECONDS: float = 3600.0
+    # W3：awaiting_hitl 状态使用 24 小时 TTL，避免用户长时间不审批导致内存泄漏
+    _HITL_TTL_SECONDS: float = 86400.0
 
     def __init__(
         self,
@@ -563,6 +565,11 @@ class RunManager:
         ``create_run`` 时自动调用一次，亦可由外部定时器周期调用。
 
         P1-2：``cancelled`` 状态也纳入清理，避免取消的 RunContext 永久驻留。
+
+        W3 修复：``awaiting_hitl`` 状态使用独立的更长 TTL
+        （``_HITL_TTL_SECONDS``，默认 24 小时）。用户若长时间不回复审批，
+        该 RunContext 仍会被清理，避免内存泄漏。终态（completed / failed /
+        cancelled）使用默认 TTL（1 小时）。
         """
         ttl = ttl_seconds if ttl_seconds is not None else self._RUN_TTL_SECONDS
         now = time.time()
@@ -571,6 +578,11 @@ class RunManager:
             if ctx.status in ("completed", "failed", "cancelled"):
                 completed = ctx.completed_at or ctx.created_at
                 if completed and (now - completed) > ttl:
+                    stale.append(rid)
+            elif ctx.status == "awaiting_hitl":
+                # W3：awaiting_hitl 使用更长 TTL，避免用户长时间不审批导致内存泄漏
+                created = ctx.created_at or now
+                if (now - created) > self._HITL_TTL_SECONDS:
                     stale.append(rid)
         for rid in stale:
             self._runs.pop(rid, None)

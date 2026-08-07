@@ -33,7 +33,6 @@ from __future__ import annotations
 from lvyan.validators.privacy import (
     PrivacyRedactionResult,
     SanitizedItem,
-    SanitizedItemType,
     redact_privacy,
     sanitize_privacy,
 )

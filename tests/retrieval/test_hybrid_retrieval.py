@@ -12,17 +12,14 @@
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 
 import pytest
 
 from lvyan.config import LAWTEXT_DIR
 from lvyan.retrieval import (
-    ScoredChunk,
     article_no_search,
     bm25_search,
     case_rule_search,
-    dense_search,
     hybrid_search,
     rerank,
     rewrite_for_reretrieval,

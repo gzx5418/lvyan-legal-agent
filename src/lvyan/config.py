@@ -345,7 +345,9 @@ def validate_runtime_config() -> None:
 
     - ``CHECKPOINTER_BACKEND`` 只允许 ``memory`` / ``postgres`` / ``auto``；
     - ``PERSISTENCE_REQUIRED=true`` + ``CHECKPOINTER_BACKEND=memory`` 冲突；
-    - 生产模式 + ``AUTH_ENABLED=true`` + ``AUTH_MODE=auto`` 冲突。
+    - 生产模式 + ``AUTH_ENABLED=true`` + ``AUTH_MODE=auto`` 冲突；
+    - W13：``JWT_VERIFY_IN_PROCESS=true`` 时校验 JWKS_URL / ISSUER / AUDIENCE
+      非空，且 ``JWT_ALGORITHMS`` 不含 ``none``。
     """
     import os
 
@@ -366,6 +368,24 @@ def validate_runtime_config() -> None:
             raise RuntimeError(
                 "AUTH_MODE=auto 在生产模式下被禁止；"
                 "请设置 AUTH_MODE=jwt 或 AUTH_MODE=trusted_proxy"
+            )
+    # W13：JWT 进程内验签的配置组合校验（启动期暴露配置错误，避免首请求才发现）
+    if os.getenv("JWT_VERIFY_IN_PROCESS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        jwks_url = os.getenv("JWT_JWKS_URL", "").strip()
+        issuer = os.getenv("JWT_ISSUER", "").strip()
+        audience = os.getenv("JWT_AUDIENCE", "").strip()
+        if not jwks_url:
+            raise RuntimeError(
+                "JWT_VERIFY_IN_PROCESS=true 时必须配置 JWT_JWKS_URL（JWKS 公钥来源）"
+            )
+        if not issuer or not audience:
+            raise RuntimeError(
+                "JWT_VERIFY_IN_PROCESS=true 时必须同时配置 JWT_ISSUER 和 JWT_AUDIENCE"
+            )
+        algorithms = [a.strip().lower() for a in os.getenv("JWT_ALGORITHMS", "RS256").split(",") if a.strip()]
+        if not algorithms or any(a == "none" for a in algorithms):
+            raise RuntimeError(
+                "JWT_ALGORITHMS 配置非法：禁止使用 none，必须使用 RS256/ES256 等非对称算法"
             )
 
 

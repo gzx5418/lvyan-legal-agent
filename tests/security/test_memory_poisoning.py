@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
 
 from lvyan.memory.case_vault import DEFAULT_TTL_SECONDS, CaseVault
 from lvyan.memory.user_preferences import (

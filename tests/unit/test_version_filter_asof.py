@@ -16,7 +16,6 @@ import sys
 from datetime import date
 from pathlib import Path
 
-import pytest
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_SRC) not in sys.path:

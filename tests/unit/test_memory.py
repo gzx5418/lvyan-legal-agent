@@ -357,7 +357,6 @@ def test_case_vault_delete_and_delete_thread(tmp_path):
 def test_memory_public_api_importable():
     from lvyan.memory import (  # noqa: F401
         CaseVault,
-        DEFAULT_TTL_SECONDS,
         ShortTermMemory,
         UserPreference,
         UserPreferences,

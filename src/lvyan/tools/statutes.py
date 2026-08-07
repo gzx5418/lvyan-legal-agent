@@ -16,14 +16,14 @@ TODO(Task 8): ``search_statutes`` 后端切换到 ``retrieval.hybrid_search``，
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from lvyan.config import AGENT_DIR, KNOWLEDGE_DIR, LAWTEXT_DIR
+from lvyan.config import AGENT_DIR, LAWTEXT_DIR
 from lvyan.retrieval import lexical
 from lvyan.retrieval.version_resolver import (
     LawMetadata,

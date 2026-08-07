@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from lvyan.tools.base import ToolResult
 from lvyan.validators.prompt_injection import (

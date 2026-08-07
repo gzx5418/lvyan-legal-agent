@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from lvyan.tools.documents import extract_document
 from lvyan.validators.prompt_injection import (

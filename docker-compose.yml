@@ -137,12 +137,13 @@ services:
       DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-lvyan}:${POSTGRES_PASSWORD:-lvyan}@postgres:5432/${POSTGRES_DB:-lvyan}"
 
       # —— OpenSearch（未启动时检索降级，不阻塞应用）——
-      OPENSEARCH_URL: "http://opensearch:9200"
+      # W7：URL 可通过 .env 的 OPENSEARCH_URL 覆盖（启用 TLS 时改为 https://）
+      OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch:9200}
       OPENSEARCH_USER: ${OPENSEARCH_USER:-admin}
       OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:-admin}
 
       # —— 对象存储端点（当前代码保留位，未实际接入）——
-      OBJECT_STORAGE_ENDPOINT: "minio:9000"
+      OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT:-minio:9000}
 
       # —— 模型网关（必填，否则 LLM 节点全部不可用）——
       MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}

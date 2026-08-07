@@ -29,7 +29,6 @@ import pytest
 from lvyan.config import settings
 from lvyan.nodes.output_guardrail import output_guardrail
 from lvyan.schemas import Authority
-from lvyan.tools.documents import extract_document
 from lvyan.tools.export import render_docx
 
 

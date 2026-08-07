@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 
 import pytest
 
@@ -126,7 +125,6 @@ def test_run_with_missing_attachment_returns_404(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 def test_gc_runs_cleans_cancelled_contexts():
     """cancelled 状态的 RunContext 也应被 GC（不再永久驻留）。"""
-    import asyncio
     import time
 
     from lvyan.api.sse import RunContext, RunManager
@@ -726,7 +724,13 @@ def test_production_accepts_auth_mode_trusted_proxy(monkeypatch):
 # P1-5（复审第三轮）：JWKS 错误统一返回 invalid_token
 # ---------------------------------------------------------------------------
 def test_jwks_failure_returns_invalid_token(monkeypatch):
-    """JWKS 获取失败时返回 invalid_token，不泄露内部异常。"""
+    """JWKS 获取失败时返回 invalid_token，不泄露内部异常。
+
+    测试隔离修复：当测试环境未安装 PyJWT 时，代码会在 import jwt 处抛
+    ImportError→503，到不了测试期望的 JWKS 异常分支（149 行）。
+    通过 sys.modules 注入桩 jwt 模块跳过 ImportError 检查，让代码直达
+    _fetch_signing_key 调用点。
+    """
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("AUTH_MODE", "jwt")
     monkeypatch.setenv("JWT_VERIFY_IN_PROCESS", "true")
@@ -736,6 +740,15 @@ def test_jwks_failure_returns_invalid_token(monkeypatch):
     from fastapi import HTTPException
 
     from lvyan.api.auth import _verify_jwt_and_extract_sub
+
+    # 注入桩 jwt 模块，避免 ImportError 中断测试（仅本测试用，无 decode 调用）
+    import sys
+    import types
+
+    if "jwt" not in sys.modules:
+        fake_jwt = types.ModuleType("jwt")
+        fake_jwt.decode = lambda *a, **kw: None  # 不会被调用（_fetch_signing_key 先抛异常）
+        monkeypatch.setitem(sys.modules, "jwt", fake_jwt)
 
     # 模拟 _fetch_signing_key 抛异常
     import lvyan.api.auth as auth_mod

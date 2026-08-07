@@ -20,7 +20,6 @@ import pytest
 from lvyan.retrieval.version_aware import StatuteVerification
 from lvyan.schemas import Authority
 from lvyan.validators.authority_status import (
-    AuthorityStatusReport,
     validate_authority_status,
 )
 

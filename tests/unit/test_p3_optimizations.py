@@ -13,9 +13,7 @@ import asyncio
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
-import pytest
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_SRC) not in sys.path:

@@ -32,7 +32,7 @@ from lvyan.graph.policies import (
     enforce_policies,
 )
 from lvyan.nodes.citation_verifier import citation_verifier
-from lvyan.nodes.critic import MAX_LEGAL_REASONER_ITERATIONS, critic
+from lvyan.nodes.critic import critic
 from lvyan.schemas import Authority, ReasoningResult, RetrievalQuery
 
 

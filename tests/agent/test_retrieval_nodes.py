@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-import pytest
 
 from lvyan.config import LAWTEXT_DIR
 from lvyan.nodes.evidence_analyzer import authority_resolver, evidence_analyzer

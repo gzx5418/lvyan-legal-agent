@@ -16,9 +16,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any
 
-from lvyan.retrieval.lexical import SYNONYM_MAP, _expand_keywords, _tokenize
+from lvyan.retrieval.lexical import _expand_keywords, _tokenize
 
 # ---------------------------------------------------------------------------
 # 模型网关 / LLM 改写骨架

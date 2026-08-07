@@ -80,4 +80,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 
 # 直接 uvicorn factory 模式启动；host 0.0.0.0 才能被容器外访问
 # factory 模式确保 create_app() 在事件循环内执行，AsyncPostgresSaver 绑定到正确循环
-CMD ["uvicorn", "lvyan.api.server:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# W6 修复：--forwarded-allow-ips 默认只信任容器内部网段（172.16/12 + 127.0.0.1），
+# 避免直接对外暴露时被伪造 X-Forwarded-For。部署在可信反向代理后方时，
+# 可通过 FORWARDED_ALLOW_IPS 环境变量覆盖（如 "*" 或具体代理 IP）。
+# 使用 shell 形式 CMD 以读取环境变量。
+CMD sh -c 'uvicorn lvyan.api.server:create_app --factory --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-127.0.0.1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}"'

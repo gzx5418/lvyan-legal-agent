@@ -118,12 +118,18 @@ _MAGIC_BYTES: dict[str, tuple[bytes, ...]] = {
     ".jpeg": (b"\xff\xd8\xff",),
     ".gif": (b"GIF87a", b"GIF89a"),
     ".bmp": (b"BM",),
+    # W9 修复：补全 .webp 与 .tiff 的 magic bytes 校验，避免伪装上传
+    ".webp": (b"RIFF",),  # RIFF....WEBP（前 4 字节 RIFF，第 8-12 字节 WEBP）
+    ".tiff": (b"II\x2a\x00", b"MM\x00\x2a"),  # 小端 II*\0 或大端 MM\0*
     ".docx": (b"PK\x03\x04",),  # ZIP-based Office
     ".xlsx": (b"PK\x03\x04",),
     ".pptx": (b"PK\x03\x04",),
     ".doc": (b"\xd0\xcf\x11\xe0",),  # OLE Compound
     ".xls": (b"\xd0\xcf\x11\xe0",),
 }
+
+# W9：.webp 需要二次校验（RIFF 头后第 8-12 字节必须是 WEBP）
+_WEBP_SECONDARY_TAG = b"WEBP"
 
 
 def _state_summary(state: Any) -> dict[str, Any]:
@@ -153,6 +159,22 @@ def _as_unix_timestamp(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return time.time()
+
+
+def _detect_checkpointer_kind_from_instance(checkpointer: Any) -> str:
+    """根据 checkpointer 实例类名判断后端类型（W1 修复辅助）。
+
+    与 ``runtime._detect_checkpointer_kind`` 逻辑一致，但接受任意实例而非
+    依赖全局变量，供 ``/readyz`` 实时探测当前 CaseMemory 实际使用的图。
+    """
+    if checkpointer is None:
+        return "unknown"
+    name = type(checkpointer).__name__.lower()
+    if "postgres" in name:
+        return "postgres"
+    if "memory" in name:
+        return "memory"
+    return "unknown"
 
 
 async def _mem_aload(mem: Any, thread_id: str) -> Any:
@@ -227,13 +249,20 @@ def _check_database() -> str:
 
 
 def _check_database_ready() -> str:
-    """``/readyz`` 级别：实际尝试连接 PostgreSQL 并 ``SELECT 1``。"""
-    try:
-        import psycopg
-        from lvyan.config import settings as _settings
+    """``/readyz`` 级别：实际尝试连接 PostgreSQL 并 ``SELECT 1``。
 
+    W2 修复：实时读取 ``DATABASE_URL`` 环境变量，与 builder.py /
+    run_metadata.py 保持一致，避免 settings 单例在 import 时冻结导致
+    monkeypatch 不生效。
+    """
+    try:
+        import os
+
+        import psycopg
+
+        # 实时读环境变量，避免 settings 单例冻结（与 builder.py 一致）
+        dsn = os.getenv("DATABASE_URL", settings.database_url)
         # 把 SQLAlchemy 风格连接串转为 psycopg 原生 DSN
-        dsn = _settings.database_url
         if dsn.startswith("postgresql+psycopg://"):
             dsn = "postgresql://" + dsn[len("postgresql+psycopg://") :]
         with psycopg.connect(dsn, connect_timeout=2) as conn:
@@ -385,15 +414,81 @@ def _harden_attachment_content(content: str) -> str:
 
 
 def _enforce_zip_uncompressed_limit(content: bytes, limit: int) -> None:
-    """P1-4：扫描 ZIP central directory 累计未压缩大小，超限即拒绝（防 ZIP bomb）。
+    """P1-4 / W10：扫描 ZIP 累计未压缩大小，超限即拒绝（防 ZIP bomb）。
 
-    仅读取 local file header 的 compressed/uncompressed 字段，不解压实际内容，
-    避免 OOM。对加密 / 异常 ZIP 直接放行（后续 markitdown 自行处理或失败）。
+    W10 修复：原实现仅扫描 local file header（``PK\\x03\\x04``），当 ZIP 使用
+    data descriptor 模式时（general purpose bit flag 第 3 位置 1），local header
+    中的 comp_size/uncomp_size 均为 0，实际大小记录在压缩数据之后的 data
+    descriptor 中，导致 ZIP bomb 检查被绕过。
+
+    新实现优先解析 central directory（位于文件末尾，``PK\\x01\\x02`` 记录），
+    其中 ``uncomp_size`` 字段始终包含真实大小，不受 data descriptor 影响。
+    回退路径：central directory 不存在 / 解析失败时，仍扫描 local file header
+    （覆盖非标准 ZIP）。对加密 / 异常 ZIP 直接放行（markitdown 自行处理或失败）。
     """
     import struct
 
+    # ------------------------------------------------------------------
+    # 策略 1：解析 central directory（优先，不受 data descriptor 影响）
+    # ------------------------------------------------------------------
+    eocd_sig = b"PK\x05\x06"
+    eocd_idx = content.rfind(eocd_sig)
+    if eocd_idx != -1 and eocd_idx + 22 <= len(content):
+        try:
+            # EOCD: sig(4) disk(2) cd_disk(2) disk_entries(2)
+            #       total_entries(2) cd_size(4) cd_offset(4) comment_len(2)
+            (_sig, _disk, _cd_disk, _disk_entries,
+             total_entries, cd_size, cd_offset, _comment_len) = struct.unpack(
+                "<IHHHHIIH", content[eocd_idx : eocd_idx + 22]
+            )
+            total = 0
+            cd_sig = b"PK\x01\x02"
+            offset = cd_offset
+            entries_scanned = 0
+            # 防御性上限：避免畸形 cd_offset 导致无限循环
+            max_entries = max(total_entries, 0) + 1024
+            while entries_scanned < max_entries:
+                idx = content.find(cd_sig, offset)
+                if idx == -1 or idx + 46 > len(content):
+                    break
+                try:
+                    # central directory file header:
+                    # sig(4) ver_made(2) ver_need(2) flag(2) method(2) time(2) date(2)
+                    # crc(4) comp_size(4) uncomp_size(4) name_len(2) extra_len(2)
+                    # comment_len(2) disk_start(2) int_attr(2) ext_attr(4) local_offset(4)
+                    (_s, _vm, _vn, _flag, _method, _t, _d, _crc,
+                     comp_size, uncomp_size, name_len, extra_len,
+                     comment_len, _ds, _ia, _ea, _lo) = struct.unpack(
+                        "<IHHHHHHIIIHHHHHII", content[idx : idx + 46]
+                    )
+                except struct.error:
+                    break
+                # central directory 中 uncomp_size 永远是真实值（无 data descriptor 问题）
+                total += uncomp_size or comp_size
+                if total > limit:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            f"Office 文件解压后总大小 {total} bytes 超过上限 {limit} bytes"
+                            "（疑似 ZIP bomb）"
+                        ),
+                    )
+                offset = idx + 46 + name_len + extra_len + comment_len
+                entries_scanned += 1
+            if entries_scanned > 0:
+                # central directory 解析成功，直接返回
+                return
+        except HTTPException:
+            # 413（ZIP bomb 命中）必须向上传播
+            raise
+        except struct.error:
+            # EOCD / central directory 解析失败，回退到 local header 扫描
+            pass
+
+    # ------------------------------------------------------------------
+    # 策略 2：回退到 local file header 扫描（覆盖非标准 ZIP / EOCD 损坏）
+    # ------------------------------------------------------------------
     total = 0
-    # 扫描所有 PK\x03\x04（local file header）签名
     offset = 0
     sig = b"PK\x03\x04"
     while True:
@@ -401,8 +496,6 @@ def _enforce_zip_uncompressed_limit(content: bytes, limit: int) -> None:
         if idx == -1 or idx + 30 > len(content):
             break
         try:
-            # local file header: sig(4) ver(2) flag(2) method(2) time(2) date(2)
-            # crc(4) comp_size(4) uncomp_size(4) name_len(2) extra_len(2)
             (_sig, _ver, _flag, _method, _t, _d, _crc,
              comp_size, uncomp_size, name_len, extra_len) = struct.unpack(
                 "<IHHHHHIIIHH", content[idx : idx + 30]
@@ -485,12 +578,30 @@ def create_app(
         runner: 可注入的异步 runner，用于测试替代真实图执行。
         memory: 可注入的 CaseMemory 实例；None 时使用共享实例（绑定共享图）。
     """
-    app = FastAPI(title="律言法律智能体 API", version="0.2.0")
-
     # P1-2 / P1-4：启动期验证运行时配置（非法 backend、冲突组合、生产认证）
-    from lvyan.config import validate_runtime_config
+    from lvyan.config import is_auth_enabled_env, is_production, validate_runtime_config
 
     validate_runtime_config()
+
+    # W12：生产模式禁用 /docs /redoc /openapi.json，避免 API 结构泄露
+    _is_prod = is_production()
+
+    # W8：生产模式 + AUTH_ENABLED=false 启动告警（不阻断启动，仅显眼日志）
+    # 默认配置为 AUTH_ENABLED=false 方便首次部署，但生产部署若忘记开启，
+    # 所有接口将无认证暴露，因此打印 WARNING 提醒运维。
+    if _is_prod and not is_auth_enabled_env():
+        _logger.warning(
+            "⚠️  生产模式（RUNTIME_MODE=production）下 AUTH_ENABLED=false："
+            "API 完全无认证暴露，任何人都可发起 Agent run / 上传文件 / 查看历史会话。"
+            "请通过 .env 设置 AUTH_ENABLED=true 并配置 AUTH_MODE=jwt 或 trusted_proxy。"
+        )
+    app = FastAPI(
+        title="律言法律智能体 API",
+        version="0.2.0",
+        docs_url=None if _is_prod else "/docs",
+        redoc_url=None if _is_prod else "/redoc",
+        openapi_url=None if _is_prod else "/openapi.json",
+    )
 
     if metadata_store is None and runner is None and memory is None:
         from lvyan.config import durable_runtime_required
@@ -527,6 +638,18 @@ def create_app(
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Authorization", "X-User-ID"],
     )
+
+    # W11：安全响应头中间件，防止 MIME 嗅探 / 点击劫持 / 协议降级
+    @app.middleware("http")
+    async def _security_headers_middleware(request: Any, call_next: Any) -> Any:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = (
+            "geolocation=(), microphone=(), camera=(), payment=()"
+        )
+        return response
 
     @app.get("/api/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -568,10 +691,19 @@ def create_app(
         gw = _check_model_gateway_ready()
 
         # P0-1：暴露实际 checkpointer 类型；生产模式下 memory = 降级
+        # W1 修复：实时探测当前 CaseMemory 实际使用的图实例的 checkpointer 类型，
+        # 而非依赖 _checkpointer_kind 全局变量（后者只在同步图首次创建时设置，
+        # 异步图就绪后不会更新）。
         from lvyan.config import durable_runtime_required, is_production, is_auth_enabled_env
-        from lvyan.runtime import get_checkpointer_kind
+        from lvyan.runtime import _resolve_shared_graph, get_checkpointer_kind
 
-        cp_kind = get_checkpointer_kind()
+        cp_kind = "unknown"
+        resolved_graph = _resolve_shared_graph()
+        if resolved_graph is not None:
+            cp_kind = _detect_checkpointer_kind_from_instance(resolved_graph.checkpointer)
+        else:
+            # 图尚未创建时回退到全局变量（兼容 CLI 模式 / 启动初期）
+            cp_kind = get_checkpointer_kind()
         cp_status = "ok"
         if cp_kind == "unknown":
             cp_status = "unknown"
@@ -824,16 +956,20 @@ def create_app(
                 if status == "completed":
                     final_md = durable_run.get("final_output") or ""
                     legal_answer = durable_run.get("legal_answer")
+                    # W4 修复：与 live 路径 _build_final_output_event 保持一致，
+                    # 不再单独发送 markdown_fallback（output 字段已承担该角色）。
+                    # 避免前端在首次运行与刷新恢复时收到不同事件结构。
                     event: dict[str, Any] = {"event": "final_output", "output": final_md}
                     if legal_answer:
                         event["schema_version"] = legal_answer.get("schema_version", "legal_answer_v1")
                         event["answer"] = legal_answer
-                        event["markdown_fallback"] = final_md
                     yield format_sse_event(event)
                 elif status == "failed":
+                    # W4：与 live 路径 _fail_run 保持一致，包含 code 字段供前端分类
                     yield format_sse_event(
                         {
                             "event": "error",
+                            "code": "run_failed",
                             "message": durable_run.get("error") or "Agent run failed",
                         }
                     )
@@ -1117,6 +1253,12 @@ def create_app(
                 raise HTTPException(
                     status_code=415,
                     detail=f"文件头 magic bytes 与扩展名 {ext} 不符（疑似伪装）",
+                )
+            # W9：.webp 二次校验 —— RIFF 容器也用于 WAV/AVI，需确认第 8-12 字节是 WEBP
+            if ext == ".webp" and len(content) >= 12 and content[8:12] != _WEBP_SECONDARY_TAG:
+                raise HTTPException(
+                    status_code=415,
+                    detail="文件头 RIFF 但 secondary tag 不是 WEBP（疑似伪装）",
                 )
 
         file_id = uuid.uuid4().hex[:16]

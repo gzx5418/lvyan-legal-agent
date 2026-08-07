@@ -23,7 +23,6 @@ from lvyan.nodes.critic import (
 )
 from lvyan.schemas import (
     Authority,
-    CaseState,
     ReasoningResult,
 )
 

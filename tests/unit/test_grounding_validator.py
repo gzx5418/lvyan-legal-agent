@@ -12,10 +12,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-import pytest
 
 from lvyan.schemas import Authority, ReasoningResult
-from lvyan.validators.grounding import GroundingReport, validate_grounding
+from lvyan.validators.grounding import validate_grounding
 
 
 # ---------------------------------------------------------------------------

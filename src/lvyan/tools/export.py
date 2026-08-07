@@ -14,7 +14,6 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
 
 from lvyan.tools.base import ToolResult
 

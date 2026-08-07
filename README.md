@@ -255,6 +255,7 @@ curl -N http://localhost:8000/api/agent/stream/run-...
 | `POST` | `/api/agent/run` | 启动 Agent，可传 `law_as_of_date` |
 | `GET` | `/api/agent/stream/{run_id}` | 获取节点事件与最终输出 |
 | `POST` | `/api/agent/hitl/{run_id}` | 提交人工审批决策 |
+| `POST` | `/api/agent/cancel/{run_id}` | 取消运行中的 Agent |
 | `GET` | `/api/agent/state/{thread_id}` | 获取会话状态摘要 |
 | `DELETE` | `/api/agent/state/{thread_id}` | 删除会话 |
 | `GET` | `/api/agent/threads` | 列出当前用户会话 |
@@ -263,7 +264,7 @@ curl -N http://localhost:8000/api/agent/stream/run-...
 | `GET` | `/readyz` | 数据库、元数据表和检索就绪检查 |
 | `GET` | `/api/health` | 综合健康状态 |
 
-完整交互式接口文档：启动服务后访问 [http://localhost:8000/docs](http://localhost:8000/docs)。
+完整交互式接口文档：启动服务后访问 [http://localhost:8000/docs](http://localhost:8000/docs)（生产模式禁用 `/docs` 以避免 API 结构泄露）。
 
 ## 多实例部署说明
 

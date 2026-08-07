@@ -19,7 +19,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 # 路径引导：把 tests/evals 加入 sys.path，便于 import agent_eval
 _THIS_DIR = Path(__file__).resolve().parent  # tests/unit/

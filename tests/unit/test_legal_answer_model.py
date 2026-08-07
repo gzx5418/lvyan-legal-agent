@@ -10,11 +10,9 @@ from lvyan.schemas.legal_answer import (
     ExecutiveSummary,
     FactItem,
     LegalIssue,
-    EvidenceItem,
     RiskItem,
     ActionItem,
     LegalCitation,
-    UncertaintyItem,
 )
 
 

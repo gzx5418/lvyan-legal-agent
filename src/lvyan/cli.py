@@ -20,7 +20,7 @@ import json
 import sys
 from typing import Any, Sequence
 
-from lvyan.main import AgentResult, run_agent_with_state, stream_agent
+from lvyan.main import run_agent_with_state, stream_agent
 
 __all__ = ["build_parser", "run_cli", "main"]
 

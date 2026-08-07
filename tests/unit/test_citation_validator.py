@@ -229,7 +229,7 @@ def test_validate_citations_chinese_arabic_interchange(
     report = validate_citations(rr, statutes)
     # 应能匹配到法条（not_found 不应出现）
     not_found = [i for i in report.issues if i.issue_type == "not_found"]
-    assert len(not_found) == 0, f"中文数字「四十七」应能匹配阿拉伯数字「47」"
+    assert len(not_found) == 0, "中文数字「四十七」应能匹配阿拉伯数字「47」"
 
 
 # ---------------------------------------------------------------------------
