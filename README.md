@@ -100,6 +100,28 @@ pip install -e ".[dev,documents]"
 > 自动降级到 `knowledge/curated` 精编知识库；检出后可启用全库条文级 BM25 检索。
 > 也可通过 `LAWTEXT_DIR` 环境变量指定外部法条目录（见 `.env.example`）。
 
+> [!IMPORTANT]
+> **远程一键部署是否连着下载法律文库，取决于克隆方式：**
+>
+> | 克隆方式 | 是否下载法律文库 | 说明 |
+> |---|---|---|
+> | `git clone --recursive <repo>` | ✅ 是 | 主仓库 + 所有 submodule 一起拉取（推荐） |
+> | `git clone <repo>` | ❌ 否 | 仅主仓库，submodule 目录为空，应用降级到精编知识库 |
+> | 普通克隆后执行 `git submodule update --init --recursive` | ✅ 是 | 补检 submodule，等效 `--recursive` |
+>
+> - **Docker 部署**：`docker compose up -d --build` 不会自动拉 submodule，必须先执行
+>   `git submodule update --init --recursive`，否则镜像内法条库为空（可启动但降级）。
+> - **CI/CD 流水线**：若用 GitHub Actions `actions/checkout`，需配 `submodules: true`
+>   才会在构建镜像前拉取法条库：
+>   ```yaml
+>   - uses: actions/checkout@v4
+>     with:
+>       submodules: true
+>   ```
+> - **法律文库体积**：2445 个纯文本 `.md` 文件，仓库约几十 MB（无 LFS），克隆很快。
+> - **未检出也能跑**：Docker 构建仍会成功（COPY 空目录），应用启动后
+>   `is_official_db_available()=False`，自动降级到精编知识库，不会崩溃。
+
 仅安装核心运行时：
 
 ```bash
