@@ -32,10 +32,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# 路径解析统一走 lvyan.config（环境变量优先 > AGENT 内默认 > 回退到 ../律言skill/...）
+# 路径解析统一走 lvyan.config（环境变量优先 > AGENT 内默认路径）
 from lvyan.config import (  # noqa: E402
     AGENT_DIR,
-    REPO_ROOT,
     settings,
 )
 
@@ -47,18 +46,15 @@ _SYNONYM_FILE = Path(__file__).resolve().parent / "synonyms.json"
 
 
 def _resolve_law_index_file() -> Path:
-    """官方法律索引文件路径：环境变量 > AGENT 新位置 > 回退原 skill 位置。
+    """官方法律索引文件路径：环境变量 > AGENT/knowledge/manifests/law_index.json。
 
-    Task 8 会在 ``AGENT/knowledge/manifests/`` 重建索引；在此之前回退到
-    ``律言skill/knowledge/law_index.json`` 以保留标题预筛能力（degraded 兼容）。
+    索引文件由 ``ingest_laws.py`` CLI 预生成到 ``AGENT/knowledge/manifests/``；
+    不存在时返回默认路径，由 ``_load_law_index()`` 容错返回空列表。
     """
     env = os.getenv("LAW_INDEX_FILE")
     if env:
         return Path(env)
-    new_loc = AGENT_DIR / "knowledge" / "manifests" / "law_index.json"
-    if new_loc.is_file():
-        return new_loc
-    return REPO_ROOT / "律言skill" / "knowledge" / "law_index.json"
+    return AGENT_DIR / "knowledge" / "manifests" / "law_index.json"
 
 
 _LAW_INDEX_FILE: Path = _resolve_law_index_file()

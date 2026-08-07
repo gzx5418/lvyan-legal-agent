@@ -1,11 +1,10 @@
 """统一配置模块。
 
 律言 Agent Runtime 的所有运行时配置集中在此，避免分散读取环境变量。
-路径解析策略沿用原 ``律言skill/scripts/project_config.py`` 的「环境变量优先」约定：
+路径解析策略遵循「环境变量优先」约定：
 
 1. 显式环境变量（``LAWTEXT_DIR`` / ``KNOWLEDGE_DIR`` 等）覆盖一切
-2. AGENT 工程内默认路径
-3. ``../律言skill/lawtext_extracted/laws-main/content`` 作为官方法律全文库默认位置
+2. AGENT 工程内默认路径（官方法律全文库走 git submodule）
 
 本模块刻意不引入 ``pydantic-settings``，仅依赖 ``pydantic.BaseModel`` + ``os.getenv``，
 以保持 ``pyproject.toml`` 依赖清单的最小化。
@@ -59,7 +58,6 @@ _SRC_DIR = _PKG_DIR.parent  # AGENT/src
 # 本地开发不设此变量时走 __file__ 推导，行为不变。
 _agent_dir_env = os.getenv("AGENT_DIR")
 AGENT_DIR = Path(_agent_dir_env).resolve() if _agent_dir_env else _SRC_DIR.parent  # AGENT/
-REPO_ROOT = AGENT_DIR.parent  # 法律/（仓库根）
 
 
 def _resolve_knowledge_dir() -> Path:
@@ -71,25 +69,19 @@ def _resolve_knowledge_dir() -> Path:
 
 
 def _resolve_lawtext_dir() -> Path:
-    """官方法律全文库目录解析（优先级：环境变量 > submodule > 旧路径）。
+    """官方法律全文库目录解析（优先级：环境变量 > submodule）。
 
     解析顺序：
       1. ``LAWTEXT_DIR`` 环境变量（显式覆盖一切）
-      2. ``AGENT/external/lvyan-lawtext/content``（git submodule，推荐）
-      3. ``../律言skill/lawtext_extracted/laws-main/content``（历史路径，向后兼容）
+      2. ``AGENT/external/lvyan-lawtext/content``（git submodule，默认）
 
-    三处都不存在时仍返回默认值，由 ``is_official_db_available()`` 返回 False
+    submodule 未检出时返回默认路径，由 ``is_official_db_available()`` 返回 False
     触发降级到精编知识库。
     """
     env = os.getenv("LAWTEXT_DIR")
     if env:
         return Path(env)
-    # 优先：git submodule（external/lvyan-lawtext/content）
-    submodule_path = AGENT_DIR / "external" / "lvyan-lawtext" / "content"
-    if submodule_path.is_dir():
-        return submodule_path
-    # 兼容：旧路径（律言skill，本地开发沿用）
-    return REPO_ROOT / "律言skill" / "lawtext_extracted" / "laws-main" / "content"
+    return AGENT_DIR / "external" / "lvyan-lawtext" / "content"
 
 
 KNOWLEDGE_DIR: Path = _resolve_knowledge_dir()
@@ -411,7 +403,6 @@ def is_auth_enabled_env() -> bool:
 
 __all__ = [
     "AGENT_DIR",
-    "REPO_ROOT",
     "KNOWLEDGE_DIR",
     "LAWTEXT_DIR",
     "Settings",
