@@ -301,7 +301,7 @@ def assert_thread_owner(
         thread_id: 用于错误消息。
     """
     if thread_meta is None:
-        raise HTTPException(status_code=404, detail=f"thread {thread_id} 无记录")
+        raise HTTPException(status_code=404, detail="资源不存在")
 
     if not is_auth_enabled():
         return  # 单租户模式不强制 ownership
@@ -309,8 +309,8 @@ def assert_thread_owner(
     owner = _meta_user_id(thread_meta)
     if owner != current_user_id:
         raise HTTPException(
-            status_code=403,
-            detail=f"thread {thread_id} 不属于当前用户（owner={owner}）",
+            status_code=404,
+            detail="资源不存在",
         )
 
 
@@ -332,6 +332,6 @@ def assert_run_owner(
     owner = str(getattr(run_ctx, "user_id", ANONYMOUS_USER) or ANONYMOUS_USER)
     if owner != current_user_id:
         raise HTTPException(
-            status_code=403,
-            detail=f"run {run_id} 不属于当前用户（owner={owner}）",
+            status_code=404,
+            detail="资源不存在",
         )

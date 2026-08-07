@@ -32,12 +32,19 @@ class FakeCaseMemory:
         self._store: dict[str, CaseState] = {}
         self._index: dict[str, dict[str, Any]] = {}
 
-    def register(self, thread_id: str, title: str = "", complexity: str = "light") -> None:
+    def register(
+        self,
+        thread_id: str,
+        title: str = "",
+        complexity: str = "light",
+        user_id: str = "anonymous",
+    ) -> None:
         self._index[thread_id] = {
             "title": title or thread_id,
             "complexity": complexity,
             "created_at": time.time(),
             "has_output": False,
+            "user_id": user_id,
         }
 
     def mark_output(self, thread_id: str) -> None:
@@ -200,6 +207,40 @@ def test_cancel_stops_an_active_run():
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "cancelled"
+
+
+def test_cross_user_active_thread_is_indistinguishable_from_missing(monkeypatch):
+    """跨租户请求不能泄露会话 owner、存在性或是否仍在运行。"""
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("AUTH_MODE", "trusted_proxy")
+
+    async def slow_runner(*_args, **_kwargs):
+        await asyncio.sleep(60)
+        return "should not complete"
+
+    app = create_app(runner=slow_runner, memory=FakeCaseMemory())
+    alice_headers = {"X-User-ID": "alice"}
+    bob_headers = {"X-User-ID": "bob"}
+    with TestClient(app) as client:
+        run = client.post(
+            "/api/agent/run", json={"query": "tenant test"}, headers=alice_headers
+        ).json()
+        thread_id = run["thread_id"]
+        run_id = run["run_id"]
+
+        responses = [
+            client.get(f"/api/agent/state/{thread_id}", headers=bob_headers),
+            client.delete(f"/api/agent/state/{thread_id}", headers=bob_headers),
+            client.get(f"/api/agent/stream/{run_id}", headers=bob_headers),
+            client.post(f"/api/agent/hitl/{run_id}", json={"action": "approve"}, headers=bob_headers),
+            client.post(f"/api/agent/cancel/{run_id}", headers=bob_headers),
+        ]
+        for response in responses:
+            assert response.status_code == 404
+            assert response.json()["detail"] == "资源不存在"
+
+        # 由 owner 清理后台任务，避免遗留 60 秒测试运行。
+        client.post(f"/api/agent/cancel/{run_id}", headers=alice_headers)
 
 
 # ---------------------------------------------------------------------------

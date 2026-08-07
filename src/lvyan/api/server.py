@@ -950,10 +950,7 @@ def create_app(
                 if not meta_path.is_file():
                     raise HTTPException(
                         status_code=404,
-                        detail=(
-                            f"附件 {fid} 不存在；可能已删除或上传至其他实例。"
-                            f"请重新上传后再发起分析。"
-                        ),
+                        detail="附件不存在",
                     )
                 try:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -974,8 +971,8 @@ def create_app(
                     attachment_owner = meta.get("user_id", ANONYMOUS_USER)
                     if attachment_owner != user_id:
                         raise HTTPException(
-                            status_code=403,
-                            detail=f"附件 {fid} 不属于当前用户",
+                            status_code=404,
+                            detail="附件不存在",
                         )
 
                 # M5：读取 Markdown 正文（优先 .md 文件，回退旧 markdown，再回退 preview）
@@ -1030,8 +1027,8 @@ def create_app(
                     ) from exc
                 if durable_thread is not None and str(durable_thread.get("user_id", "")) != user_id:
                     raise HTTPException(
-                        status_code=403,
-                        detail=f"thread {req.thread_id} 不属于当前用户",
+                        status_code=404,
+                        detail="会话不存在",
                     )
             existing_meta = dict(mem.list_threads()).get(req.thread_id)
             if existing_meta is not None:
@@ -1043,8 +1040,8 @@ def create_app(
                     cp_user_id = str(getattr(cs, "user_id", ANONYMOUS_USER) or ANONYMOUS_USER)
                     if cp_user_id != user_id:
                         raise HTTPException(
-                            status_code=403,
-                            detail=f"thread {req.thread_id} 不属于当前用户（owner={cp_user_id}）",
+                            status_code=404,
+                            detail="会话不存在",
                         )
 
         try:
@@ -1060,8 +1057,8 @@ def create_app(
             )
         except ThreadOwnershipError as exc:
             raise HTTPException(
-                status_code=403,
-                detail=f"thread {req.thread_id} 不属于当前用户",
+                status_code=404,
+                detail="会话不存在",
             ) from exc
         except RunMetadataUnavailable as exc:
             raise HTTPException(
@@ -1093,7 +1090,7 @@ def create_app(
         ctx = manager.get(run_id)
         if ctx is None:
             if metadata_store is None:
-                raise HTTPException(status_code=404, detail=f"run {run_id} 不存在")
+                raise HTTPException(status_code=404, detail="资源不存在")
             try:
                 durable_run = metadata_store.get_run(run_id)
             except Exception as exc:  # noqa: BLE001
@@ -1102,11 +1099,11 @@ def create_app(
                     detail="run metadata 暂时不可用",
                 ) from exc
             if durable_run is None:
-                raise HTTPException(status_code=404, detail=f"run {run_id} 不存在")
+                raise HTTPException(status_code=404, detail="资源不存在")
             if is_auth_enabled() and str(durable_run.get("user_id", "")) != user_id:
                 raise HTTPException(
-                    status_code=403,
-                    detail=f"run {run_id} 不属于当前用户",
+                    status_code=404,
+                    detail="资源不存在",
                 )
 
             status = str(durable_run.get("status", "unknown"))
@@ -1246,15 +1243,15 @@ def create_app(
         user_id: str = Depends(get_current_user_id),
     ) -> DeleteResponse:
         """删除指定会话：从 checkpointer 与索引中移除。"""
-        if manager.has_active_thread_runs(thread_id):
-            raise HTTPException(
-                status_code=409,
-                detail="该会话仍在运行，请先终止运行",
-            )
         if metadata_store is not None:
             try:
                 meta = metadata_store.get_thread(thread_id)
                 assert_thread_owner(meta, user_id, thread_id)
+                if manager.has_active_thread_runs(thread_id):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="该会话仍在运行，请先终止运行",
+                    )
                 if metadata_store.has_active_runs(thread_id):
                     raise HTTPException(
                         status_code=409,
@@ -1296,6 +1293,11 @@ def create_app(
         else:
             meta = dict(mem.list_threads()).get(thread_id)
             assert_thread_owner(meta, user_id, thread_id)
+            if manager.has_active_thread_runs(thread_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail="该会话仍在运行，请先终止运行",
+                )
             try:
                 await _mem_adelete_strict(mem, thread_id)
             except Exception as exc:  # noqa: BLE001
@@ -1545,9 +1547,9 @@ def create_app(
             assert_run_owner(ctx, user_id, run_id)
         status, message = await manager.resolve_hitl(run_id, req, current_user_id=user_id)
         if status == "not_found":
-            raise HTTPException(status_code=404, detail=message)
+            raise HTTPException(status_code=404, detail="资源不存在")
         if status == "forbidden":
-            raise HTTPException(status_code=403, detail=message)
+            raise HTTPException(status_code=404, detail="资源不存在")
         if status == "unavailable":
             raise HTTPException(status_code=503, detail=message)
         if status == "error":
@@ -1561,9 +1563,9 @@ def create_app(
     ) -> HITLResponse:
         status, message = await manager.cancel_run(run_id, user_id)
         if status == "not_found":
-            raise HTTPException(status_code=404, detail=message)
+            raise HTTPException(status_code=404, detail="资源不存在")
         if status == "forbidden":
-            raise HTTPException(status_code=403, detail=message)
+            raise HTTPException(status_code=404, detail="资源不存在")
         if status == "conflict":
             raise HTTPException(status_code=409, detail=message)
         # P1-2：持久化失败 → 503；cancel_requested → 202（已接受，远端将停止）
@@ -1609,14 +1611,14 @@ def create_app(
             raise HTTPException(status_code=503, detail="metadata store 不可用")
 
         if run is None:
-            raise HTTPException(status_code=404, detail=f"run {run_id} 无记录")
+            raise HTTPException(status_code=404, detail="资源不存在")
 
         # 2. ownership 校验
         if is_auth_enabled():
             owner = str(run.get("user_id") or ANONYMOUS_USER)
             if owner != user_id:
                 raise HTTPException(
-                    status_code=403, detail=f"run {run_id} 不属于当前用户"
+                    status_code=404, detail="资源不存在"
                 )
 
         # 3. 获取 document_file 信息

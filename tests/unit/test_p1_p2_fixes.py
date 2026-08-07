@@ -145,8 +145,8 @@ def test_auth_enabled_with_x_user_id(monkeypatch):
     assert uid == "user-123"
 
 
-def test_assert_thread_owner_mismatch(monkeypatch):
-    """启用认证 + 归属不匹配 → 403。"""
+def test_assert_thread_owner_mismatch_is_indistinguishable_from_missing(monkeypatch):
+    """跨租户会话必须以 404 隐藏存在性及 owner。"""
     monkeypatch.setenv("AUTH_ENABLED", "true")
     from fastapi import HTTPException
 
@@ -155,7 +155,8 @@ def test_assert_thread_owner_mismatch(monkeypatch):
     meta = {"user_id": "alice", "title": "T"}
     with pytest.raises(HTTPException) as exc:
         assert_thread_owner(meta, "bob", "thread-1")
-    assert exc.value.status_code == 403
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "资源不存在"
 
 
 def test_assert_thread_owner_disabled(monkeypatch):

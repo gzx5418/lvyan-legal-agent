@@ -253,7 +253,7 @@ def test_cross_user_attachment_blocked_in_run(monkeypatch, tmp_path):
             json={"query": "请分析附件", "attachments": [file_id]},
             headers={"X-User-ID": "bob"},
         )
-    assert response.status_code == 403
+    assert response.status_code == 404
 
 
 def test_attachment_file_id_path_traversal_is_rejected(monkeypatch, tmp_path):

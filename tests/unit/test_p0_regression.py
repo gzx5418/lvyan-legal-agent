@@ -296,7 +296,7 @@ class TestCheckpointHITLAuth:
         meta = {"user_id": "user-alice"}
         with pytest.raises(HTTPException) as exc:
             auth_module.assert_thread_owner(meta, "anonymous", "thread-1")
-        assert exc.value.status_code == 403
+        assert exc.value.status_code == 404
 
 
 # ---------------------------------------------------------------------------
