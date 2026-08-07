@@ -806,12 +806,13 @@ def create_app(
     @app.get("/api/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         """向后兼容的总体健康检查（livez + readyz 的混合视图）。"""
-        # P1-1：corpus 校验含全库 hash / 索引读取，卸载到线程池避免阻塞 event loop
-        import asyncio
-
-        db = _check_database()
-        ret = await asyncio.to_thread(_check_retrieval)
-        gw = _check_model_gateway()
+        # P1-1/P2：DB / retrieval / gateway 均为同步网络或磁盘 I/O，
+        # 全部卸载到线程池并并发执行，避免阻塞 event loop。
+        db, ret, gw = await asyncio.gather(
+            asyncio.to_thread(_check_database),
+            asyncio.to_thread(_check_retrieval),
+            asyncio.to_thread(_check_model_gateway),
+        )
         overall = "ok" if (db == "ok" and ret == "ok" and gw == "ok") else "degraded"
         return HealthResponse(status=overall, database=db, retrieval=ret, model_gateway=gw)
 
@@ -833,21 +834,22 @@ def create_app(
           生产模式下若为 memory（静默降级）→ not-ready。
         - ``object_storage``：保留位（当前未实现）
         """
-        # P1-1：corpus 校验含全库 hash / 磁盘索引读取，卸载到线程池避免阻塞
-        # event loop（TTL 到期刷新时会出现 5 分钟一次的同步磁盘扫描）。
-        import asyncio
-
-        db = _check_database_ready()
+        # P1-1/P2：DB / retrieval / gateway 均为同步网络或磁盘 I/O，
+        # 全部卸载到线程池并**并发**执行（asyncio.gather），避免 event loop
+        # 被任一慢依赖阻塞，也避免三者串行叠加延迟。
+        db, ret, gw = await asyncio.gather(
+            asyncio.to_thread(_check_database_ready),
+            asyncio.to_thread(_check_retrieval),
+            asyncio.to_thread(_check_model_gateway_ready),
+        )
         if db == "ok" and metadata_store is not None:
             healthcheck = getattr(metadata_store, "healthcheck", None)
             if callable(healthcheck):
                 try:
-                    if not healthcheck():
+                    if not await asyncio.to_thread(healthcheck):
                         db = "unavailable"
                 except Exception:  # noqa: BLE001
                     db = "unavailable"
-        ret = await asyncio.to_thread(_check_retrieval)
-        gw = _check_model_gateway_ready()
 
         # P0-1：暴露实际 checkpointer 类型；生产模式下 memory = 降级
         # W1 修复：实时探测当前 CaseMemory 实际使用的图实例的 checkpointer 类型，

@@ -132,46 +132,76 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 
 
 # ---------------------------------------------------------------------------
-# P1-3：rebuild 跨进程互斥锁
+# P1-3：rebuild 跨进程互斥锁（owner 校验 + 有界等待）
 # ---------------------------------------------------------------------------
-def _acquire_rebuild_lock(manifests_dir: Path) -> bool:
+# 锁文件内容 = "pid:uuid" 形式的 owner 令牌。释放时校验内容仍属于当前进程，
+# 避免「进程 A 超时被接管 → B 持锁 → A 结束释放锁时误删 B 的锁」竞态。
+_REBUILD_LOCK_STALE_SECONDS = 600.0  # 崩溃残留锁超过此时间视为过期
+_REBUILD_LOCK_WAIT_SECONDS = 120.0   # 未抢到锁时最多等待其他进程重建完成
+
+
+def _acquire_rebuild_lock(manifests_dir: Path) -> str | None:
     """以原子创建 ``.rebuild.lock`` 文件的方式获取 rebuild 互斥锁。
 
     跨 worker / 多实例（K8s 共享卷）同时发现索引失效时，只允许一个进程执行
-    rebuild，避免并发写同一批 temp 文件互相覆盖。锁文件超时（10 分钟）自动
-    视为过期并接管，防止进程崩溃残留锁导致永久阻塞。
+    rebuild，避免并发写同一批 temp 文件互相覆盖。锁文件超时自动视为过期并
+    接管，防止进程崩溃残留锁导致永久阻塞。
 
     Returns:
-        True 表示本进程获得锁；False 表示已有其他进程在重建。
+        锁 owner 令牌（``pid:uuid``）；返回 ``None`` 表示已有其他进程持锁。
     """
+    import uuid
+
     lock_path = Path(manifests_dir) / ".rebuild.lock"
     Path(manifests_dir).mkdir(parents=True, exist_ok=True)
 
-    # 过期锁清理：mtime 超过 10 分钟视为崩溃残留
+    # 过期锁清理：mtime 超过阈值视为崩溃残留
     try:
-        if lock_path.is_file() and (time.time() - lock_path.stat().st_mtime) > 600:
+        if lock_path.is_file() and (
+            time.time() - lock_path.stat().st_mtime
+        ) > _REBUILD_LOCK_STALE_SECONDS:
             lock_path.unlink(missing_ok=True)
     except OSError:
         pass
 
+    owner = f"{os.getpid()}:{uuid.uuid4().hex}"
     try:
         fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         try:
-            os.write(fd, str(os.getpid()).encode("utf-8"))
+            os.write(fd, owner.encode("utf-8"))
         finally:
             os.close(fd)
-        return True
+        return owner
     except FileExistsError:
-        return False
+        return None
 
 
-def _release_rebuild_lock(manifests_dir: Path) -> None:
-    """释放 rebuild 锁（仅删除锁文件；如已被其他进程接管则保留）。"""
+def _release_rebuild_lock(manifests_dir: Path, owner: str | None) -> None:
+    """释放 rebuild 锁；仅当锁内容仍属于当前 owner 时才删除。
+
+    若锁已被其他进程接管（超时接管 / 内容不同），本进程绝不删除他人锁。
+    """
+    if not owner:
+        return
     lock_path = Path(manifests_dir) / ".rebuild.lock"
     try:
-        lock_path.unlink(missing_ok=True)
+        if lock_path.is_file() and lock_path.read_text(encoding="utf-8") == owner:
+            lock_path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _wait_for_rebuild_lock(
+    manifests_dir: Path,
+    timeout: float = _REBUILD_LOCK_WAIT_SECONDS,
+) -> None:
+    """未抢到锁时轮询等待，直到锁消失（其他进程重建完成）或超时。"""
+    lock_path = Path(manifests_dir) / ".rebuild.lock"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not lock_path.exists():
+            return
+        time.sleep(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -453,11 +483,16 @@ def rebuild_corpus_indexes(
     manifests_dir = Path(manifests_dir or (AGENT_DIR / "knowledge" / "manifests"))
     manifests_dir.mkdir(parents=True, exist_ok=True)
 
-    # P1-3：跨进程互斥锁，防止多 worker / 多实例并发重建互相覆盖
-    if not _acquire_rebuild_lock(manifests_dir):
-        _logger.warning("[manifest] 另一进程正在重建索引，本次跳过")
-        # 等待片刻后直接读取（可能已被重建），若仍不一致如实报告
-        time.sleep(1.0)
+    # P1-3：跨进程互斥锁，防止多 worker / 多实例并发重建互相覆盖。
+    # 未抢到锁时轮询等待其他进程完成（最多 _REBUILD_LOCK_WAIT_SECONDS），
+    # 避免「B 抢不到锁 → 只等 1s → verify 仍是 mismatch → 短暂认知不一致」。
+    owner = _acquire_rebuild_lock(manifests_dir)
+    if owner is None:
+        _logger.warning(
+            "[manifest] 另一进程正在重建索引，等待其完成（最多 %.0fs）",
+            _REBUILD_LOCK_WAIT_SECONDS,
+        )
+        _wait_for_rebuild_lock(manifests_dir)
         invalidate_corpus_health_cache()
         return verify_corpus_consistency(lawtext_dir, manifests_dir, force=True)
 
@@ -503,7 +538,7 @@ def rebuild_corpus_indexes(
         # 4) 新 manifest（原子写，最后生成 —— 作为「全部就绪」的信号）
         write_corpus_manifest(chunks, lawtext_dir, manifests_dir)
     finally:
-        _release_rebuild_lock(manifests_dir)
+        _release_rebuild_lock(manifests_dir, owner)
 
     # 5) 清理缓存并强制重新校验
     invalidate_corpus_health_cache()

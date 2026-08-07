@@ -96,7 +96,7 @@ from .state import GraphState
 
 __all__ = ["build_graph", "build_graph_with_postgres", "build_graph_with_postgres_async", "NODE_NAMES", "PersistenceUnavailable"]
 
-# 13 个节点名（注册顺序 = 主链顺序，不含 START/END）
+# 14 个节点名（注册顺序 = 主链顺序，不含 START/END）
 NODE_NAMES: tuple[str, ...] = (
     "preflight",
     "attachment_retriever",
@@ -116,7 +116,7 @@ NODE_NAMES: tuple[str, ...] = (
 
 
 def _register_nodes(graph: StateGraph) -> None:
-    """向 StateGraph 注册全部 13 个节点。"""
+    """向 StateGraph 注册全部 14 个节点。"""
     graph.add_node("preflight", preflight)
     graph.add_node("attachment_retriever", attachment_retriever)
     graph.add_node("jurisdiction_triage", jurisdiction_triage)

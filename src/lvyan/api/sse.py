@@ -975,6 +975,43 @@ def format_sse_event(event: dict[str, Any]) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
+# ---------------------------------------------------------------------------
+# P2：用户语义阶段（前端进度条不再关心 LangGraph 节点数）
+# ---------------------------------------------------------------------------
+# key 为稳定英文标识，label 为可直接展示的中文文案（前端无需维护映射表，
+# 彻底消除「前端 12 / 后端注释 13 / 实际 14」这类节点数漂移）。
+PHASE_TOTAL = 6
+PHASE_MAP: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "comprehension",
+        "理解问题",
+        ("preflight", "jurisdiction_triage", "fact_extractor", "missing_fact_assessor"),
+    ),
+    ("preparation", "整理材料", ("attachment_retriever", "planner")),
+    ("retrieval", "检索法律", ("parallel_retrieval", "authority_resolver")),
+    ("analysis", "分析争点", ("legal_reasoner",)),
+    ("verification", "校验依据", ("critic", "citation_verifier", "output_guardrail")),
+    ("generation", "生成结果", ("composer", "legal_answer_finalizer")),
+)
+_NODE_PHASE_IDX: dict[str, int] = {
+    node: idx for idx, (_key, _label, nodes) in enumerate(PHASE_MAP) for node in nodes
+}
+
+
+async def _publish_phase_progress(ctx: "RunContext", completed_index: int) -> None:
+    """发布阶段完成事件（completed 为 1 基累计数）。"""
+    phase_key, phase_label, _nodes = PHASE_MAP[completed_index]
+    await ctx.publish(
+        {
+            "event": "phase_progress",
+            "phase": phase_key,
+            "label": phase_label,
+            "completed": completed_index + 1,
+            "total": PHASE_TOTAL,
+        }
+    )
+
+
 async def _stream_graph_events(
     graph: Any,
     source: Any,
@@ -1007,6 +1044,9 @@ async def _stream_graph_events(
     """
     pending_starts: dict[str, float] = {}
     legal_answer: dict[str, Any] | None = None
+    # P2：语义阶段进度（仅向前推进：重跑旧阶段节点不使进度回退）
+    max_phase_idx = -1
+    completed_phases = -1
 
     async for part in graph.astream(
         source,
@@ -1036,6 +1076,24 @@ async def _stream_graph_events(
                         "timestamp": pending_starts[task_id or task_name],
                     }
                 )
+                # P2：阶段推进 —— 新阶段的首个节点启动时，补齐已完成的中间阶段
+                # 并发布当前阶段启动事件。
+                phase_idx = _NODE_PHASE_IDX.get(task_name, -1)
+                if phase_idx > max_phase_idx:
+                    while completed_phases < phase_idx - 1:
+                        completed_phases += 1
+                        await _publish_phase_progress(ctx, completed_phases)
+                    max_phase_idx = phase_idx
+                    phase_key, phase_label, _nodes = PHASE_MAP[phase_idx]
+                    await ctx.publish(
+                        {
+                            "event": "phase_start",
+                            "phase": phase_key,
+                            "label": phase_label,
+                            "index": phase_idx + 1,
+                            "total": PHASE_TOTAL,
+                        }
+                    )
             elif "result" in payload or "error" in payload:
                 start_ts = pending_starts.pop(task_id or task_name, None)
                 now = time.time()

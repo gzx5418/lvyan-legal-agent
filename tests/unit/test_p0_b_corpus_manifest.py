@@ -500,3 +500,121 @@ def test_load_manifest_returns_none_when_corrupt(tmp_path):
     manifest_path = tmp_path / "corpus_manifest.json"
     manifest_path.write_text("{invalid json", encoding="utf-8")
     assert load_corpus_manifest(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# 11. P1-3：rebuild 互斥锁（owner 校验 + 有界等待）
+# ---------------------------------------------------------------------------
+def test_rebuild_lock_roundtrip(tmp_path):
+    """获取锁 → 锁文件写入 owner 令牌 → 释放只删自己的锁。"""
+    from lvyan.retrieval.manifest import _acquire_rebuild_lock, _release_rebuild_lock
+
+    manifests_dir = tmp_path / "manifests"
+    owner = _acquire_rebuild_lock(manifests_dir)
+    assert owner is not None, "空目录应能获取锁"
+    lock_path = manifests_dir / ".rebuild.lock"
+    assert lock_path.is_file()
+    assert lock_path.read_text(encoding="utf-8") == owner
+
+    # 同一目录再次获取应失败（互斥）
+    assert _acquire_rebuild_lock(manifests_dir) is None
+
+    _release_rebuild_lock(manifests_dir, owner)
+    assert not lock_path.exists()
+
+
+def test_release_does_not_delete_foreign_lock(tmp_path):
+    """释放时若锁已被其他进程接管（内容不同），绝不删除他人锁。"""
+    from lvyan.retrieval.manifest import _acquire_rebuild_lock, _release_rebuild_lock
+
+    manifests_dir = tmp_path / "manifests"
+    owner_a = _acquire_rebuild_lock(manifests_dir)
+    lock_path = manifests_dir / ".rebuild.lock"
+
+    # 模拟进程 B 超时接管：删除 A 的锁并写入自己的 owner
+    lock_path.unlink()
+    owner_b = _acquire_rebuild_lock(manifests_dir)
+    assert owner_b is not None and owner_b != owner_a
+
+    # 进程 A 结束释放 → 不得删除 B 的锁
+    _release_rebuild_lock(manifests_dir, owner_a)
+    assert lock_path.exists(), "释放他人锁的竞态：A 不应删除 B 的锁"
+    assert lock_path.read_text(encoding="utf-8") == owner_b
+
+    _release_rebuild_lock(manifests_dir, owner_b)
+    assert not lock_path.exists()
+
+
+def test_rebuild_lock_steals_stale_lock(tmp_path):
+    """超过 stale 阈值的锁会被接管（崩溃残留自愈）。"""
+    import os
+    import time as _time
+
+    from lvyan.retrieval.manifest import (
+        _REBUILD_LOCK_STALE_SECONDS,
+        _acquire_rebuild_lock,
+    )
+
+    manifests_dir = tmp_path / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = manifests_dir / ".rebuild.lock"
+    lock_path.write_text("999:deadbeef", encoding="utf-8")
+    # 伪造过期 mtime（超过 stale 阈值）
+    old = _time.time() - _REBUILD_LOCK_STALE_SECONDS - 60
+    os.utime(lock_path, (old, old))
+
+    owner = _acquire_rebuild_lock(manifests_dir)
+    assert owner is not None, "过期残留锁应被接管"
+    assert lock_path.read_text(encoding="utf-8") == owner
+
+
+def test_wait_for_rebuild_lock_returns_when_lock_cleared(tmp_path):
+    """锁在超时前消失 → _wait_for_rebuild_lock 尽快返回。"""
+    import threading
+    import time
+
+    from lvyan.retrieval.manifest import _acquire_rebuild_lock, _wait_for_rebuild_lock
+
+    manifests_dir = tmp_path / "manifests"
+    owner = _acquire_rebuild_lock(manifests_dir)
+    assert owner is not None
+
+    def clear_later():
+        time.sleep(0.3)
+        lock_path = manifests_dir / ".rebuild.lock"
+        if lock_path.read_text(encoding="utf-8") == owner:
+            lock_path.unlink()
+
+    t = threading.Thread(target=clear_later, daemon=True)
+    t.start()
+    _wait_for_rebuild_lock(manifests_dir, timeout=5.0)
+    t.join(timeout=2.0)
+    assert not (manifests_dir / ".rebuild.lock").exists()
+
+
+def test_rebuild_waits_and_verifies_when_locked(tmp_path, monkeypatch):
+    """另一进程持锁时 rebuild 应等待并返回现有索引的 verify 结果，而非强制重建。"""
+    import lvyan.retrieval.manifest as manifest_mod
+
+    lawtext = _make_lawtext_dir(tmp_path, {"law1.md": "# 测试法\n\n第一条 内容\n"})
+    manifests_dir = tmp_path / "manifests"
+    # 先建好一致的三件套
+    rebuild_corpus_indexes(lawtext, manifests_dir)
+
+    acquired: list[bool] = []
+    waited: list[bool] = []
+
+    def fake_acquire(_dir):
+        acquired.append(True)
+        return None  # 模拟另一进程持锁
+
+    def fake_wait(_dir, timeout=0):
+        waited.append(True)
+
+    monkeypatch.setattr(manifest_mod, "_acquire_rebuild_lock", fake_acquire)
+    monkeypatch.setattr(manifest_mod, "_wait_for_rebuild_lock", fake_wait)
+
+    result = rebuild_corpus_indexes(lawtext, manifests_dir)
+    assert acquired, "应尝试获取锁"
+    assert waited, "未抢到锁时应等待其他进程重建完成"
+    assert result["consistent"] is True

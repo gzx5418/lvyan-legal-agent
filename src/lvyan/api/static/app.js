@@ -10,8 +10,6 @@ const state = {
   mode: 'light',
   isRunning: false,
   history: [],        // [{threadId, query, mode, ts, messages}]
-  completedNodes: new Set(),
-  totalNodes: 12,
   runStartTime: 0,
   attachments: [],    // [{file_id, filename, size, content_type, text_preview}]
   lastQuery: '',      // 用于重新生成
@@ -23,10 +21,10 @@ const state = {
 // 定时器就被取消，「5 分钟超时自动停止」实际从未生效。
 let runTimeoutId = null;
 
-// 全局 EventSource 引用
-let currentEventSource = null;
+// 全局 SSE AbortController 引用
+let currentSSEController = null;
 
-// --- 节点中文名映射 ---
+// --- 节点中文名映射（仅用于 node_error toast 展示，不参与进度统计） ---
 const NODE_LABELS = {
   preflight: '预检',
   jurisdiction_triage: '管辖分流',
@@ -41,6 +39,44 @@ const NODE_LABELS = {
   composer: '生成',
   output_guardrail: '安全护栏',
 };
+
+// =========================================================================
+// 统一认证层（P0：内置前端完整支持 AUTH_MODE=jwt / trusted_proxy）
+// =========================================================================
+// 所有 REST / SSE 请求统一走 apiFetch / apiFetchStream，自动携带
+// Authorization: Bearer <token>，避免逐接口零散补 Header 遗漏。
+function getAuthToken() {
+  if (window.__authToken) return window.__authToken;
+  // 部署方可在 index.html 注入 <meta name="auth-token" content="...">
+  const meta = document.querySelector('meta[name="auth-token"]');
+  if (meta && meta.content) return meta.content;
+  try {
+    return localStorage.getItem('lvyan_auth_token') || '';
+  } catch { return ''; }
+}
+
+function authHeaders(extra = {}) {
+  const headers = { ...extra };
+  const token = getAuthToken();
+  if (token) headers.Authorization = 'Bearer ' + token;
+  return headers;
+}
+
+async function apiFetch(url, options = {}) {
+  return fetch(url, {
+    ...options,
+    credentials: 'same-origin',
+    headers: authHeaders(options.headers || {}),
+  });
+}
+
+// P2：SSE 流式请求（EventSource 无法携带 Authorization，改用 fetch stream）
+function closeSSE() {
+  if (currentSSEController) {
+    currentSSEController.abort();
+    currentSSEController = null;
+  }
+}
 
 // --- DOM 引用 ---
 const $ = (id) => document.getElementById(id);
@@ -84,10 +120,7 @@ const els = {
 function init() {
   // 重置可能残留的运行状态
   state.isRunning = false;
-  if (currentEventSource) {
-    currentEventSource.close();
-    currentEventSource = null;
-  }
+  closeSSE();
   if (window.matchMedia('(max-width: 768px)').matches) {
     state.sidebarCollapsed = true;
     document.body.classList.add('sidebar-collapsed');
@@ -226,7 +259,7 @@ async function responseError(resp, fallback) {
 // =========================================================================
 async function checkHealth() {
   try {
-    const resp = await fetch('/api/health');
+    const resp = await apiFetch('/api/health');
     const data = await resp.json();
     const dot = els.healthStatus.querySelector('.dot');
     const text = els.healthStatus.querySelector('.health-text');
@@ -282,8 +315,7 @@ async function sendQuery() {
   els.stopBtn.style.display = 'flex';
   els.uploadBtn.disabled = true;
 
-  // 重置进度
-  state.completedNodes.clear();
+  // 重置进度（语义阶段由 phase_start / phase_progress 事件驱动）
   showProgress(true);
 
   // 深度法律分析可能耗时较长，5 分钟后才主动请求服务端停止。
@@ -309,7 +341,7 @@ async function sendQuery() {
       body.attachments = state.attachments.map(a => a.file_id);
     }
 
-    const resp = await fetch('/api/agent/run', {
+    const resp = await apiFetch('/api/agent/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -347,7 +379,7 @@ async function stopGeneration(message = '已停止生成。') {
   if (!state.isRunning || !state.runId) return;
   els.stopBtn.disabled = true;
   try {
-    const resp = await fetch(`/api/agent/cancel/${state.runId}`, { method: 'POST' });
+    const resp = await apiFetch(`/api/agent/cancel/${state.runId}`, { method: 'POST' });
     if (resp.status === 409) {
       showToast('任务已结束，正在同步最终结果', 'info');
       return;
@@ -373,10 +405,7 @@ async function stopGeneration(message = '已停止生成。') {
       // 不关闭 SSE，等待 cancelled 事件
       return;
     }
-    if (currentEventSource) {
-      currentEventSource.close();
-      currentEventSource = null;
-    }
+    closeSSE();
     updateLastAgentMessage(message);
     finalizeRun();
   } catch (err) {
@@ -387,46 +416,87 @@ async function stopGeneration(message = '已停止生成。') {
 }
 
 // =========================================================================
-// SSE 监听
+// SSE 监听（P2：改用 fetch + ReadableStream，可携带 Authorization；EventSource 不能设 Header）
 // =========================================================================
-function listenSSE(runId) {
-  if (currentEventSource) {
-    currentEventSource.close();
-    currentEventSource = null;
-  }
+async function listenSSE(runId) {
+  closeSSE();
+  const controller = new AbortController();
+  currentSSEController = controller;
 
-  const es = new EventSource(`/api/agent/stream/${runId}`);
-  currentEventSource = es;
-
-  es.onmessage = (e) => {
-    try {
-      const event = JSON.parse(e.data);
-      handleSSEEvent(event);
-    } catch (err) {
-      console.error('SSE parse error:', err);
-    }
-  };
-
-  es.onerror = () => {
-    es.close();
-    if (currentEventSource === es) currentEventSource = null;
+  let resp;
+  try {
+    resp = await apiFetch(`/api/agent/stream/${runId}`, {
+      signal: controller.signal,
+      headers: { Accept: 'text/event-stream' },
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    console.error('SSE connect error:', err);
     if (state.isRunning) {
       updateLastAgentMessage('连接中断，请重试。');
       resetRunState();
     }
-  };
+    return;
+  }
+
+  if (!resp.ok || !resp.body) {
+    let reason = '无法连接流';
+    try {
+      const body = await resp.json();
+      reason = body.detail || reason;
+    } catch { /* ignore */ }
+    if (state.isRunning) {
+      updateLastAgentMessage(`连接中断（${reason}），请重试。`);
+      resetRunState();
+    }
+    currentSSEController = null;
+    return;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // 逐帧解析 SSE：帧之间以空行（\n\n）分隔
+      let sep;
+      while ((sep = buffer.indexOf('\n\n')) >= 0) {
+        const frame = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        const dataLine = frame.split('\n').find(line => line.startsWith('data:'));
+        if (dataLine) {
+          try {
+            handleSSEEvent(JSON.parse(dataLine.slice(5).trim()));
+          } catch (err) {
+            console.error('SSE parse error:', err);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') return; // 主动停止，静默退出
+    console.error('SSE stream error:', err);
+    if (state.isRunning) {
+      updateLastAgentMessage('连接中断，请重试。');
+      resetRunState();
+    }
+  } finally {
+    if (currentSSEController === controller) currentSSEController = null;
+  }
 }
 
 function handleSSEEvent(event) {
   switch (event.event) {
-    case 'node_start':
-      updateNodeChip(event.node, 'running');
+    case 'phase_start':
+      handlePhaseStart(event);
       break;
 
-    case 'node_end':
-      updateNodeChip(event.node, 'done');
-      state.completedNodes.add(event.node);
-      updateProgressFill();
+    case 'phase_progress':
+      handlePhaseProgress(event);
       break;
 
     case 'node_error':
@@ -439,10 +509,7 @@ function handleSSEEvent(event) {
       break;
 
     case 'final_output':
-      if (currentEventSource) {
-        currentEventSource.close();
-        currentEventSource = null;
-      }
+      closeSSE();
       if (event.answer && event.schema_version === 'legal_answer_v1' && window.renderLegalAnswer) {
         updateLastAgentMessageStructured(event.answer, event.markdown_fallback || event.output || '');
       } else {
@@ -464,19 +531,13 @@ function handleSSEEvent(event) {
       break;
 
     case 'cancelled':
-      if (currentEventSource) {
-        currentEventSource.close();
-        currentEventSource = null;
-      }
+      closeSSE();
       updateLastAgentMessage(event.message || '已停止生成。');
       finalizeRun();
       break;
 
     case 'error':
-      if (currentEventSource) {
-        currentEventSource.close();
-        currentEventSource = null;
-      }
+      closeSSE();
       updateLastAgentMessage(`运行错误: ${event.message || '未知错误'}`);
       finalizeRun();
       break;
@@ -507,35 +568,69 @@ function finalizeRun() {
 }
 
 // =========================================================================
-// 进度条
+// 进度条（P2：语义阶段驱动，不再依赖 LangGraph 节点数）
+// 后端通过 phase_start / phase_progress 事件推送阶段，前端只消费事件。
 // =========================================================================
 function showProgress(show) {
   els.progressBar.style.display = show ? 'block' : 'none';
-  els.progressBar.setAttribute('aria-valuenow', '0');
   if (show) {
     els.progressFill.style.width = '0%';
     els.progressNodes.innerHTML = '';
-    Object.entries(NODE_LABELS).forEach(([key, label]) => {
-      const chip = document.createElement('span');
-      chip.className = 'node-chip';
-      chip.id = `chip-${key}`;
-      chip.textContent = label;
-      els.progressNodes.appendChild(chip);
-    });
+    els.progressBar.setAttribute('aria-valuenow', '0');
   }
 }
 
-function updateNodeChip(node, status) {
-  const chip = $(`chip-${node}`);
-  if (!chip) return;
-  chip.className = `node-chip ${status}`;
+// phase_start：新阶段开始 → 创建/点亮对应 chip（label 由后端下发，前端无映射表）
+function handlePhaseStart(event) {
+  const chipId = `phase-${event.phase}`;
+  let chip = $(chipId);
+  if (!chip) {
+    chip = document.createElement('span');
+    chip.className = 'node-chip running';
+    chip.id = chipId;
+    chip.textContent = event.label || event.phase;
+    els.progressNodes.appendChild(chip);
+  } else {
+    chip.className = 'node-chip running';
+  }
 }
 
-function updateProgressFill() {
-  const pct = (state.completedNodes.size / state.totalNodes) * 100;
-  const bounded = Math.min(pct, 100);
-  els.progressFill.style.width = `${bounded}%`;
-  els.progressBar.setAttribute('aria-valuenow', String(Math.round(bounded)));
+// phase_progress：某阶段完成 → 标记 chip done + 更新进度填充（completed/total）
+function handlePhaseProgress(event) {
+  const chip = $(`phase-${event.phase}`);
+  if (chip) chip.className = 'node-chip done';
+  const total = event.total > 0 ? event.total : 1;
+  const pct = Math.min((event.completed / total) * 100, 100);
+  els.progressFill.style.width = `${pct}%`;
+  els.progressBar.setAttribute('aria-valuenow', String(Math.round(pct)));
+}
+
+function updateNodeChip(node, status) {
+  // node_error 时点亮对应语义阶段 chip（尽力而为；未知节点忽略）
+  const phase = nodeToPhaseKey(node);
+  if (!phase) return;
+  const chip = $(`phase-${phase}`);
+  if (chip) chip.className = 'node-chip error';
+}
+
+function nodeToPhaseKey(node) {
+  const map = {
+    preflight: 'comprehension',
+    jurisdiction_triage: 'comprehension',
+    fact_extractor: 'comprehension',
+    missing_fact_assessor: 'comprehension',
+    attachment_retriever: 'preparation',
+    planner: 'preparation',
+    parallel_retrieval: 'retrieval',
+    authority_resolver: 'retrieval',
+    legal_reasoner: 'analysis',
+    critic: 'verification',
+    citation_verifier: 'verification',
+    output_guardrail: 'verification',
+    composer: 'generation',
+    legal_answer_finalizer: 'generation',
+  };
+  return map[node] || null;
 }
 
 // =========================================================================
@@ -553,7 +648,7 @@ async function resolveHitl(action, editedOutput = null) {
   if (!state.runId) return;
   els.hitlPanel.style.display = 'none';
   try {
-    const resp = await fetch(`/api/agent/hitl/${state.runId}`, {
+    const resp = await apiFetch(`/api/agent/hitl/${state.runId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, edited_output: editedOutput }),
@@ -590,7 +685,7 @@ async function handleFiles(files) {
     formData.append('file', file);
 
     try {
-      const resp = await fetch('/api/upload', {
+      const resp = await apiFetch('/api/upload', {
         method: 'POST',
         body: formData,
       });
@@ -866,12 +961,7 @@ function documentArtifactToDocFile(artifact) {
 
 // P1-5：通过 fetch 下载文书（支持认证头 + blob 触发浏览器保存）
 async function downloadDocumentFile(docFile) {
-  const headers = {};
-  // trusted_proxy 模式：网关注入 X-User-ID；JWT 模式：前端保存的 token（如有）
-  if (window.__authToken) {
-    headers['Authorization'] = 'Bearer ' + window.__authToken;
-  }
-  const resp = await fetch(docFile.download_url, { headers, credentials: 'same-origin' });
+  const resp = await apiFetch(docFile.download_url);
   if (!resp.ok) {
     let detail = '';
     try {
@@ -1018,7 +1108,7 @@ async function loadHistory() {
   renderHistory();
 
   try {
-    const resp = await fetch('/api/agent/threads');
+    const resp = await apiFetch('/api/agent/threads');
     if (!resp.ok) throw new Error(await responseError(resp, '历史同步失败'));
     const data = await resp.json();
     const serverThreadIds = new Set(data.threads.map(thread => thread.thread_id));
@@ -1145,7 +1235,7 @@ async function loadThreadState(threadId, item) {
   addConversationNotice('正在加载完整对话…', 'loading');
 
   try {
-    const resp = await fetch(`/api/agent/state/${threadId}`);
+    const resp = await apiFetch(`/api/agent/state/${threadId}`);
     const localMessages = Array.isArray(item.messages) ? item.messages : [];
     if (!resp.ok) {
       const reason = await responseError(resp, '无法加载会话');
@@ -1252,7 +1342,7 @@ async function deleteHistoryItem(threadId) {
   if (!item) return;
 
   try {
-    const resp = await fetch(`/api/agent/state/${item.threadId}`, { method: 'DELETE' });
+    const resp = await apiFetch(`/api/agent/state/${item.threadId}`, { method: 'DELETE' });
     if (!resp.ok && resp.status !== 404) {
       throw new Error(await responseError(resp, '删除失败'));
     }
@@ -1283,7 +1373,7 @@ async function clearAllHistory() {
 
   const results = await Promise.all(state.history.map(async item => {
     try {
-      const resp = await fetch(`/api/agent/state/${item.threadId}`, { method: 'DELETE' });
+      const resp = await apiFetch(`/api/agent/state/${item.threadId}`, { method: 'DELETE' });
       if (resp.ok || resp.status === 404) return { item, deleted: true };
       return {
         item,
@@ -1313,9 +1403,8 @@ function startNewChat() {
     showToast('请先停止当前生成，再开始新对话', 'warning');
     return;
   }
-  if (currentEventSource) {
-    currentEventSource.close();
-    currentEventSource = null;
+  if (currentSSEController) {
+    closeSSE();
   }
   state.threadId = null;
   state.runId = null;
