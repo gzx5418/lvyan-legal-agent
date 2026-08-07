@@ -130,23 +130,68 @@ CORS_ALLOWED_ORIGINS=https://your-frontend.example.com
 还必须设置 `JWT_VERIFY_IN_PROCESS=true` 以及 `JWT_JWKS_URL`、`JWT_ISSUER`、
 `JWT_AUDIENCE`；未验签的 Bearer JWT 会被拒绝。
 
-### 3. 启动基础设施
+### 3. 启动服务
 
-只启动 PostgreSQL：
+提供两种方式：**Docker 一键部署**（推荐远程部署）或**本地开发**（pip install + uvicorn）。
+
+#### 方式 A：Docker 一键部署（推荐）
+
+仅需安装 Docker 与 Docker Compose，无需本地 Python 环境。compose 会拉起应用
+容器 + PostgreSQL + OpenSearch + MinIO，migrations 首次启动自动执行。
 
 ```bash
-docker compose up -d postgres
+# 1. 准备配置（已在第 2 步完成）
+cp .env.example .env
+
+# 2. 构建镜像并启动全部服务
+docker compose up -d --build
+
+# 3. 查看应用日志
+docker compose logs -f app
+
+# 4. 健康检查
+curl http://localhost:8000/livez   # {"status":"ok"}
+curl http://localhost:8000/readyz  # status=ready 表示全部依赖就绪
 ```
 
-启动全部本地依赖：
+最小化部署（仅 app + PostgreSQL，不需要检索/对象存储）：
 
 ```bash
-docker compose up -d
+docker compose up -d --build postgres app
+```
+
+可选启动 Langfuse 可观测性栈：
+
+```bash
+docker compose --profile full up -d --build
+```
+
+应用容器特性：
+
+- 多阶段构建，非 root 用户运行，`/livez` 健康检查
+- 生产模式默认开启（`RUNTIME_MODE=production` + `CHECKPOINTER_BACKEND=postgres`），
+  禁止任何静默降级
+- `migrations/*.sql` 挂载到 postgres 的 `/docker-entrypoint-initdb.d/`，
+  首次启动自动建表；应用层 `_ensure_schema` 兜底
+- 持久化卷：`lvyan-app-data`（上传与线程索引）、`lvyan-app-outputs`（文书导出）、
+  `lvyan-app-manifests`（检索索引缓存）
+- 端口映射可通过 `.env` 的 `APP_PORT` / `POSTGRES_PORT` 等覆盖
+
+> ⚠️ `.env.example` 中的默认密码仅方便本地试用，生产部署前必须替换为强随机值，
+> 并按需关闭对外的 5432/9200/9000/9001 端口映射。
+
+#### 方式 B：本地开发
+
+仅启动基础设施（PostgreSQL 必需，OpenSearch/MinIO/Langfuse 可选）：
+
+```bash
+docker compose up -d postgres        # 最小化
+docker compose up -d                 # 全部依赖
 ```
 
 `docker-compose.yml` 中的密码仅供本地开发，生产部署前必须替换并限制端口暴露。
 
-### 4. 启动服务
+安装依赖并启动服务：
 
 ```bash
 python -m uvicorn lvyan.api.server:app --host 0.0.0.0 --port 8000
@@ -247,7 +292,9 @@ curl -N http://localhost:8000/api/agent/stream/run-...
 ├── templates/            # 分析报告与法律文书模板
 ├── prompts/              # 法律推理、证据和输出标准
 ├── tests/                # unit / integration / security / retrieval / evals
-└── docker-compose.yml    # 本地基础设施
+├── Dockerfile            # 多阶段构建镜像（非 root、健康检查）
+├── .dockerignore         # 构建上下文排除清单
+└── docker-compose.yml    # 一键部署：app + postgres + opensearch + minio
 ```
 
 ## 测试与质量
