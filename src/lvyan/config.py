@@ -54,7 +54,11 @@ def _load_dotenv() -> None:
 # config.py 位于 AGENT/src/lvyan/config.py
 _PKG_DIR = Path(__file__).resolve().parent  # AGENT/src/lvyan
 _SRC_DIR = _PKG_DIR.parent  # AGENT/src
-AGENT_DIR = _SRC_DIR.parent  # AGENT/
+# 环境变量优先：容器部署时包安装到 site-packages，__file__ 推导的路径无效，
+# 必须通过 AGENT_DIR 环境变量显式指定工作根目录（如 /app）。
+# 本地开发不设此变量时走 __file__ 推导，行为不变。
+_agent_dir_env = os.getenv("AGENT_DIR")
+AGENT_DIR = Path(_agent_dir_env).resolve() if _agent_dir_env else _SRC_DIR.parent  # AGENT/
 REPO_ROOT = AGENT_DIR.parent  # 法律/（仓库根）
 
 

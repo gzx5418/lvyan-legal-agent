@@ -1,44 +1,60 @@
-# 本地开发环境一键拉起的律言 Agent Runtime 基础设施。
-# 包含：PostgreSQL（checkpoint + 元数据）、OpenSearch（条文检索）、MinIO（案件加密空间）、Langfuse（可观测性）。
+# 律言法律智能体一键部署编排
+# ============================
+# 包含：应用本体 + PostgreSQL（checkpoint + 元数据）+ OpenSearch（条文检索）
+#       + MinIO（对象存储）+ Langfuse（可观测性，可选）
 #
-# 注意：这是本地开发配置，密码/密钥均为弱默认值，安全插件已禁用以简化联调。
-# 生产环境部署前必须：
-#   1. 修改所有默认密码（POSTGRES_PASSWORD / MINIO_ROOT_PASSWORD / NEXTAUTH_SECRET 等）
-#   2. 启用 OpenSearch 安全插件与 TLS
-#   3. 为 Langfuse 配置独立的强 NEXTAUTH_SECRET 与 SALT
-#   4. 限制端口暴露范围（不要直接对外暴露 5432/9200/9000/3000）
+# 快速开始：
+#   1. cp .env.example .env  并修改其中的密码 / 模型网关地址
+#   2. docker compose up -d
+#   3. 访问 http://<host>:8000  （API + 内置前端）
+#      健康检查：http://<host>:8000/livez  /readyz
+#
+# 仅启动应用 + PostgreSQL（最小化部署，不需要检索/对象存储）：
+#   docker compose up -d postgres app
+#
+# 注意：本文件带弱默认密码仅方便本地试用；生产部署必须通过 .env 覆盖所有密码，
+#       并按需关闭对外的 5432/9200/9000/9001/3000 端口映射。
 
 services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL：LangGraph checkpointer + 业务元数据表
+  # migrations/*.sql 首次启动自动执行（建 agent_runs / agent_threads / agent_messages）
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
     container_name: lvyan-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: lvyan
-      POSTGRES_PASSWORD: lvyan
-      POSTGRES_DB: lvyan
+      POSTGRES_USER: ${POSTGRES_USER:-lvyan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lvyan}
+      POSTGRES_DB: ${POSTGRES_DB:-lvyan}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - lvyan-postgres-data:/var/lib/postgresql/data
+      # 首次初始化时自动执行迁移脚本（仅数据卷为空时触发）
+      - ./migrations:/docker-entrypoint-initdb.d:ro
     networks:
       - lvyan-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lvyan -d lvyan"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lvyan} -d ${POSTGRES_DB:-lvyan}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  # ---------------------------------------------------------------------------
+  # OpenSearch：条文级检索索引（生产必须）
+  # ---------------------------------------------------------------------------
   opensearch:
     image: opensearchproject/opensearch:2.13.0
     container_name: lvyan-opensearch
     restart: unless-stopped
     environment:
       discovery.type: single-node
-      DISABLE_SECURITY_PLUGIN: "true"  # 本地开发简化，禁用安全插件；生产环境必须启用
-      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      DISABLE_SECURITY_PLUGIN: ${OPENSEARCH_DISABLE_SECURITY:-true}
+      OPENSEARCH_JAVA_OPTS: ${OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m}
     ports:
-      - "9200:9200"
+      - "${OPENSEARCH_PORT:-9200}:9200"
     volumes:
       - lvyan-opensearch-data:/usr/share/opensearch/data
     networks:
@@ -49,17 +65,20 @@ services:
       timeout: 5s
       retries: 10
 
+  # ---------------------------------------------------------------------------
+  # MinIO：对象存储（案件加密空间、文书附件）
+  # ---------------------------------------------------------------------------
   minio:
     image: minio/minio
     container_name: lvyan-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: lvyan
-      MINIO_ROOT_PASSWORD: lvyan_dev_password
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-lvyan}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-lvyan_dev_password}
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # Web Console
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - lvyan-minio-data:/data
     networks:
@@ -70,24 +89,103 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---------------------------------------------------------------------------
+  # Langfuse：可观测性（可选，未配置 key 时应用自动关闭 trace 上报）
+  # ---------------------------------------------------------------------------
   langfuse:
     image: langfuse/langfuse:2
     container_name: lvyan-langfuse
     restart: unless-stopped
+    profiles: ["full"]  # 默认不启动，docker compose --profile full up 时才拉起
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: "postgresql://lvyan:lvyan@postgres:5432/lvyan"
-      NEXTAUTH_URL: "http://localhost:3000"
-      NEXTAUTH_SECRET: "lvyan-dev-nextauth-secret-change-me"  # 生产环境必须替换为强随机串
-      SALT: "lvyan-dev-salt-change-me"                         # 生产环境必须替换
-      # 关闭可选依赖以简化本地启动
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-lvyan}:${POSTGRES_PASSWORD:-lvyan}@postgres:5432/lvyan"
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-lvyan-dev-nextauth-secret-change-me}
+      SALT: ${LANGFUSE_SALT:-lvyan-dev-salt-change-me}
       DISABLE_TELEMETRY: "true"
     ports:
-      - "3000:3000"
+      - "${LANGFUSE_PORT:-3000}:3000"
     networks:
       - lvyan-net
+
+  # ---------------------------------------------------------------------------
+  # 律言 Agent 应用本体
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lvyan-agent:latest
+    container_name: lvyan-app
+    restart: unless-stopped
+    # 强依赖仅 postgres（生产模式 checkpointer + 元数据必须可用）。
+    # opensearch / minio 为检索与对象存储服务，当前代码未硬依赖，
+    # 不阻塞启动；按需随 compose 一起拉起即可。
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # —— 部署模式（Dockerfile 已默认 production，此处显式声明便于覆盖）——
+      RUNTIME_MODE: ${RUNTIME_MODE:-production}
+      PERSISTENCE_REQUIRED: ${PERSISTENCE_REQUIRED:-true}
+      CHECKPOINTER_BACKEND: ${CHECKPOINTER_BACKEND:-postgres}
+
+      # —— PostgreSQL（容器内通过服务名访问）——
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-lvyan}:${POSTGRES_PASSWORD:-lvyan}@postgres:5432/${POSTGRES_DB:-lvyan}"
+
+      # —— OpenSearch（未启动时检索降级，不阻塞应用）——
+      OPENSEARCH_URL: "http://opensearch:9200"
+      OPENSEARCH_USER: ${OPENSEARCH_USER:-admin}
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:-admin}
+
+      # —— 对象存储端点（当前代码保留位，未实际接入）——
+      OBJECT_STORAGE_ENDPOINT: "minio:9000"
+
+      # —— 模型网关（必填，否则 LLM 节点全部不可用）——
+      MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}
+      MODEL_GATEWAY_API_KEY: ${MODEL_GATEWAY_API_KEY:-}
+
+      # —— 认证（默认关闭方便首次部署；生产启用 JWT 时设 AUTH_ENABLED=true）——
+      AUTH_ENABLED: ${AUTH_ENABLED:-false}
+      AUTH_MODE: ${AUTH_MODE:-auto}
+      JWT_VERIFY_IN_PROCESS: ${JWT_VERIFY_IN_PROCESS:-false}
+      JWT_ISSUER: ${JWT_ISSUER:-}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-}
+      JWT_JWKS_URL: ${JWT_JWKS_URL:-}
+      JWT_ALGORITHMS: ${JWT_ALGORITHMS:-RS256}
+
+      # —— CORS（启用凭据时禁止 *，必须明确来源）——
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+
+      # —— 可观测性（可选）——
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+
+      # —— 业务参数（有合理默认值，按需覆盖）——
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      HITL_ENABLED: ${HITL_ENABLED:-true}
+      CANCEL_POLL_INTERVAL_SECONDS: ${CANCEL_POLL_INTERVAL_SECONDS:-2}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      # 用户上传、线程索引：跨重启必须保留
+      - lvyan-app-data:/app/data
+      # 文书导出产物
+      - lvyan-app-outputs:/app/outputs
+      # 检索索引缓存（避免每次重启重建 BM25/article index）
+      - lvyan-app-manifests:/app/knowledge/manifests
+    networks:
+      - lvyan-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/livez', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
 
 networks:
   lvyan-net:
@@ -97,3 +195,6 @@ volumes:
   lvyan-postgres-data:
   lvyan-opensearch-data:
   lvyan-minio-data:
+  lvyan-app-data:
+  lvyan-app-outputs:
+  lvyan-app-manifests:

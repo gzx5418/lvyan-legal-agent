@@ -1,0 +1,69 @@
+# 构建上下文排除清单：减小镜像体积 + 避免运行时产物/密钥进镜像
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+*.egg
+
+# 测试与覆盖率（镜像只跑应用，不跑测试）
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.ruff_cache/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 版本控制（构建上下文不需要 git 历史）
+.git/
+.github/
+
+# 文档（README.md 在 Dockerfile 单独 COPY，其余文档不进镜像）
+docs/
+
+# 测试代码
+tests/
+
+# 运行时产物（必须挂卷，不能进镜像）
+data/uploads/
+data/thread_index.json
+knowledge/manifests/
+outputs/
+checkpoints.db
+*.db-journal
+
+# 本地运行产物与临时文件
+*.log
+tmp/
+
+# 环境变量与密钥（永不进镜像）
+.env
+.env.*
+!.env.example
+
+# Windows 专用启动脚本（容器内用 uvicorn 直接启动，不需要）
+run_server_win.py
+
+# 端到端测试报告与调试脚本
+e2e_multi_turn_report.md
+debug_graph.py
+
+# 索引缓存（运行时重建）
+knowledge/normalized/
+knowledge/raw/
