@@ -77,8 +77,12 @@ flowchart LR
 ### 1. 安装
 
 ```bash
-git clone https://github.com/gzx5418/lvyan-legal-agent.git
+# 递归克隆：一并拉取官方法律全文库 submodule（推荐）
+git clone --recursive https://github.com/gzx5418/lvyan-legal-agent.git
 cd lvyan-legal-agent
+
+# 若已普通克隆，补检 submodule（不影响启动，仅降级到精编知识库）
+# git submodule update --init --recursive
 
 python -m venv .venv
 # Linux / macOS
@@ -89,6 +93,12 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -e ".[dev,documents]"
 ```
+
+> [!NOTE]
+> 官方法律全文库以 git submodule 形式集成（`external/lvyan-lawtext`，采集自
+> [国家法律法规数据库](https://flk.npc.gov.cn/)）。未检出 submodule 时应用仍可启动，
+> 自动降级到 `knowledge/curated` 精编知识库；检出后可启用全库条文级 BM25 检索。
+> 也可通过 `LAWTEXT_DIR` 环境变量指定外部法条目录（见 `.env.example`）。
 
 仅安装核心运行时：
 
@@ -143,16 +153,24 @@ CORS_ALLOWED_ORIGINS=https://your-frontend.example.com
 # 1. 准备配置（已在第 2 步完成）
 cp .env.example .env
 
-# 2. 构建镜像并启动全部服务
+# 2. 检出官方法律库 submodule（构建期 COPY 依赖，非递归克隆时必需）
+git submodule update --init --recursive
+
+# 3. 构建镜像并启动全部服务
 docker compose up -d --build
 
-# 3. 查看应用日志
+# 4. 查看应用日志
 docker compose logs -f app
 
-# 4. 健康检查
+# 5. 健康检查
 curl http://localhost:8000/livez   # {"status":"ok"}
 curl http://localhost:8000/readyz  # status=ready 表示全部依赖就绪
 ```
+
+> [!TIP]
+> 若未检出 submodule，Docker 构建仍会成功（COPY 空目录），应用启动后降级到精编
+> 知识库。如需在容器内使用外部更新的法条库，可挂卷到
+> `/app/external/lvyan-lawtext/content` 或设置 `LAWTEXT_DIR` 指向挂载路径。
 
 最小化部署（仅 app + PostgreSQL，不需要检索/对象存储）：
 
@@ -289,12 +307,14 @@ curl -N http://localhost:8000/api/agent/stream/run-...
 │   ├── tools/            # 法规、案例、文档和计算工具
 │   └── observability/    # 指标、追踪与成本记录
 ├── migrations/           # PostgreSQL 业务元数据迁移
-├── knowledge/            # 精编法律知识库
+├── knowledge/            # 精编法律知识库（curated）
+├── external/lvyan-lawtext/  # 官方法律全文库（git submodule，采集自 flk.npc.gov.cn）
 ├── templates/            # 分析报告与法律文书模板
 ├── prompts/              # 法律推理、证据和输出标准
 ├── tests/                # unit / integration / security / retrieval / evals
 ├── Dockerfile            # 多阶段构建镜像（非 root、健康检查）
 ├── .dockerignore         # 构建上下文排除清单
+├── .gitmodules           # git submodule 配置（官方法律库）
 └── docker-compose.yml    # 一键部署：app + postgres + opensearch + minio
 ```
 

@@ -63,6 +63,12 @@ COPY templates ./templates
 COPY migrations ./migrations
 COPY README.md ./
 
+# 官方法律全文库（git submodule，采集自 flk.npc.gov.cn）
+# 前提：构建前本地执行 `git submodule update --init --recursive` 检出数据。
+# 若 submodule 未检出，此 COPY 不产生内容，应用降级到精编知识库（不影响启动）。
+# 也可通过运行时挂卷 + LAWTEXT_DIR 环境变量覆盖（见 .env.example）。
+COPY external/lvyan-lawtext/content ./external/lvyan-lawtext/content
+
 # 创建运行时目录并切换非 root 用户
 RUN groupadd -r -g 1000 lvyan && \
     useradd -r -u 1000 -g 1000 -d /app -s /sbin/nologin lvyan && \

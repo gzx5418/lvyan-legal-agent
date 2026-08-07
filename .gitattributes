@@ -1,0 +1,69 @@
+# Git 属性配置
+# ====================================
+# 统一跨平台换行符（Windows 开发机与 Linux 容器/CI 一致），
+# 避免法条文本、模板与代码因 CRLF/LF 混用导致 diff 噪声或校验失败。
+
+# 默认：所有文本文件统一使用 LF（检入与检出均为 LF）
+* text=auto eol=lf
+
+# 源码与配置（显式声明，避免误判）
+*.py     text eol=lf
+*.pyi    text eol=lf
+*.toml   text eol=lf
+*.cfg    text eol=lf
+*.ini    text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.sql    text eol=lf
+*.html   text eol=lf
+*.css    text eol=lf
+*.js     text eol=lf
+*.ts     text eol=lf
+*.sh     text eol=lf
+*.env    text eol=lf
+*.dockerfile text eol=lf
+Dockerfile   text eol=lf
+.gitignore   text eol=lf
+.gitattributes text eol=lf
+.gitmodules  text eol=lf
+
+# Windows 专用脚本保留 CRLF（PowerShell 对编码敏感）
+*.ps1    text eol=crlf
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+
+# 二进制文件（不做换行符转换，避免损坏）
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.svg    binary
+*.pdf    binary
+*.docx   binary
+*.doc    binary
+*.xlsx   binary
+*.xls    binary
+*.pptx   binary
+*.ppt    binary
+*.zip    binary
+*.gz     binary
+*.tar    binary
+*.pkl    binary
+*.db     binary
+*.sqlite binary
+*.sqlite3 binary
+
+# 语言统计：把法条数据归入数据文件，避免 GitHub 误判语言占比
+knowledge/curated/**/*.json linguist-language=JSON
+external/** linguist-vendored
+
+# 导出忽略（git archive 时排除开发专用文件）
+.gitattributes export-ignore
+.gitignore     export-ignore
+.dockerignore  export-ignore
+tests/         export-ignore
+docs/plans/    export-ignore

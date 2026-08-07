@@ -1,0 +1,3 @@
+[submodule "external/lvyan-lawtext"]
+	path = external/lvyan-lawtext
+	url = https://github.com/gzx5418/lvyan-lawtext.git

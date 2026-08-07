@@ -71,14 +71,24 @@ def _resolve_knowledge_dir() -> Path:
 
 
 def _resolve_lawtext_dir() -> Path:
-    """官方法律全文库目录：环境变量 LAWTEXT_DIR > ../律言skill/lawtext_extracted/laws-main/content。
+    """官方法律全文库目录解析（优先级：环境变量 > submodule > 旧路径）。
 
-    沿用原 project_config 的环境变量优先策略，三处都不存在时仍返回默认值，
-    由 ``is_official_db_available()`` 返回 False 触发降级。
+    解析顺序：
+      1. ``LAWTEXT_DIR`` 环境变量（显式覆盖一切）
+      2. ``AGENT/external/lvyan-lawtext/content``（git submodule，推荐）
+      3. ``../律言skill/lawtext_extracted/laws-main/content``（历史路径，向后兼容）
+
+    三处都不存在时仍返回默认值，由 ``is_official_db_available()`` 返回 False
+    触发降级到精编知识库。
     """
     env = os.getenv("LAWTEXT_DIR")
     if env:
         return Path(env)
+    # 优先：git submodule（external/lvyan-lawtext/content）
+    submodule_path = AGENT_DIR / "external" / "lvyan-lawtext" / "content"
+    if submodule_path.is_dir():
+        return submodule_path
+    # 兼容：旧路径（律言skill，本地开发沿用）
     return REPO_ROOT / "律言skill" / "lawtext_extracted" / "laws-main" / "content"
 
 

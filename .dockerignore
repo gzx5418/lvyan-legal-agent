@@ -34,6 +34,12 @@ htmlcov/
 .git/
 .github/
 
+# git submodule 的 .git gitlink 文件与内部 git 目录（仅保留检出的工作树内容）
+# 官方法律库 external/lvyan-lawtext/content 会通过 Dockerfile COPY 打入镜像；
+# 此处排除 submodule 自身的 git 元数据，避免进镜像。
+external/*/.git
+external/*/.gitmodules
+
 # 文档（README.md 在 Dockerfile 单独 COPY，其余文档不进镜像）
 docs/
 
