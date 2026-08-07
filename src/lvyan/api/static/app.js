@@ -809,14 +809,86 @@ function appendDocumentDownload(docFile) {
   const wrapper = document.createElement('div');
   wrapper.className = 'doc-download-wrapper';
   const sizeKb = docFile.file_size ? (docFile.file_size / 1024).toFixed(1) + ' KB' : '';
-  const btn = document.createElement('a');
+  const btn = document.createElement('button');
+  btn.type = 'button';
   btn.className = 'doc-download-btn';
-  btn.href = docFile.download_url;
-  btn.download = docFile.filename || 'document.docx';
   btn.innerHTML = '⬇ 下载文书 ' + (docFile.filename || '') + (sizeKb ? ' (' + sizeKb + ')' : '');
+  // P1-5：改用 fetch 下载，可携带认证头（JWT），而非裸 <a href>（后者无法附加 Authorization）
+  btn.addEventListener('click', async function () {
+    btn.disabled = true;
+    btn.textContent = '下载中…';
+    try {
+      await downloadDocumentFile(docFile);
+    } catch (err) {
+      showToast('下载失败：' + (err && err.message ? err.message : String(err)), 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '⬇ 下载文书 ' + (docFile.filename || '') + (sizeKb ? ' (' + sizeKb + ')' : '');
+    }
+  });
   wrapper.appendChild(btn);
   body.appendChild(wrapper);
+  // P1-6：把下载产物记录到消息 dataset，供 captureConversation 持久化，
+  // 历史会话重新打开时可恢复下载按钮。
+  const runId = runIdFromDownloadUrl(docFile.download_url);
+  if (runId) {
+    const artifacts = JSON.parse(lastMsg.dataset.artifacts || '[]');
+    if (!artifacts.some(a => a.type === 'document' && a.run_id === runId)) {
+      artifacts.push({
+        type: 'document',
+        run_id: runId,
+        filename: docFile.filename || '法律文书.docx',
+        format: docFile.format || 'docx',
+        file_size: docFile.file_size || 0,
+      });
+      lastMsg.dataset.artifacts = JSON.stringify(artifacts);
+    }
+  }
   els.chatArea.scrollTop = els.chatArea.scrollHeight;
+}
+
+// P1-6：从固定格式的下载路径 /api/documents/{run_id}/download 提取 run_id
+function runIdFromDownloadUrl(url) {
+  const parts = String(url || '').split('/').filter(Boolean);
+  const idx = parts.indexOf('documents');
+  return (idx >= 0 && parts[idx + 1]) ? parts[idx + 1] : null;
+}
+
+// P1-6：历史 artifact（仅 type/run_id/filename 等 public 字段）→ 可下载的 docFile
+function documentArtifactToDocFile(artifact) {
+  return {
+    filename: artifact.filename,
+    format: artifact.format,
+    file_size: artifact.file_size,
+    download_url: '/api/documents/' + artifact.run_id + '/download',
+  };
+}
+
+// P1-5：通过 fetch 下载文书（支持认证头 + blob 触发浏览器保存）
+async function downloadDocumentFile(docFile) {
+  const headers = {};
+  // trusted_proxy 模式：网关注入 X-User-ID；JWT 模式：前端保存的 token（如有）
+  if (window.__authToken) {
+    headers['Authorization'] = 'Bearer ' + window.__authToken;
+  }
+  const resp = await fetch(docFile.download_url, { headers, credentials: 'same-origin' });
+  if (!resp.ok) {
+    let detail = '';
+    try {
+      const body = await resp.json();
+      detail = body.detail || '';
+    } catch (e) { /* ignore */ }
+    throw new Error(detail || ('HTTP ' + resp.status));
+  }
+  const blob = await resp.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = docFile.filename || 'document.docx';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // 重新生成
@@ -932,6 +1004,7 @@ function captureConversation() {
       content: msg.dataset.content || '',
       structured_answer: msg.dataset.structuredAnswer ? JSON.parse(msg.dataset.structuredAnswer) : null,
       attachments: JSON.parse(msg.dataset.attachments || '[]'),
+      artifacts: JSON.parse(msg.dataset.artifacts || '[]'),
       created_at: Date.now() / 1000,
     }))
     .filter(message => message.content);
@@ -1144,6 +1217,14 @@ function renderConversation(messages) {
         lastMsg.classList.add('msg-structured');
         els.chatArea.classList.add('la-active');
       }
+    }
+    // P1-6：恢复历史会话中已产出的文书下载按钮
+    if (role === 'agent' && Array.isArray(message.artifacts)) {
+      message.artifacts.forEach(artifact => {
+        if (artifact && artifact.type === 'document' && artifact.run_id) {
+          appendDocumentDownload(documentArtifactToDocFile(artifact));
+        }
+      });
     }
   });
 }

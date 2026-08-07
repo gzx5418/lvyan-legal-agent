@@ -425,20 +425,55 @@ class PostgresRunMetadataStore:
         thread_id: str,
         user_id: str,
     ) -> list[dict[str, Any]]:
+        """列出会话消息，并为已产出文书的 assistant 消息附带 ``artifacts``。
+
+        P1-6：历史会话恢复文书下载按钮。不新增 ``agent_messages`` 列，而是
+        通过 JOIN ``agent_runs`` 读取 ``document_file``（唯一事实来源）派生
+        ``artifacts``，并在读取时做 **public 化**：仅暴露 type / run_id /
+        filename / format / file_size，绝不泄露 ``output_path`` 等服务器路径。
+        """
         with self._connect() as conn:
             self._ensure_schema(conn)
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT run_id, role, content, attachments, created_at
-                    FROM agent_messages
-                    WHERE thread_id = %s AND user_id = %s
-                    ORDER BY message_id ASC
+                    SELECT m.run_id, m.role, m.content, m.attachments, m.created_at,
+                           r.document_file
+                    FROM agent_messages m
+                    LEFT JOIN agent_runs r ON r.run_id = m.run_id
+                    WHERE m.thread_id = %s AND m.user_id = %s
+                    ORDER BY m.message_id ASC
                     """,
                     (thread_id, user_id),
                 )
                 rows = cur.fetchall()
-        return [dict(row) for row in rows]
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            msg = {
+                "run_id": row["run_id"],
+                "role": row["role"],
+                "content": row["content"],
+                "attachments": row["attachments"] or [],
+                "created_at": row["created_at"],
+            }
+            doc_file = row.get("document_file")
+            has_doc = (
+                msg["role"] == "assistant"
+                and isinstance(doc_file, dict)
+                and doc_file.get("success")
+            )
+            if has_doc:
+                msg["artifacts"] = [
+                    {
+                        "type": "document",
+                        "run_id": msg["run_id"],
+                        "filename": doc_file.get("filename") or "法律文书.docx",
+                        "format": doc_file.get("format") or "docx",
+                        "file_size": doc_file.get("file_size") or 0,
+                    }
+                ]
+            messages.append(msg)
+        return messages
 
     def claim_hitl_run(
         self,

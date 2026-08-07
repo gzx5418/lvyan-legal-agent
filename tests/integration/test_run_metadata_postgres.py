@@ -98,6 +98,68 @@ def test_delete_thread_cascades_to_run_records():
     assert store.list_messages(thread_id, user_id) == []
 
 
+def test_list_messages_exposes_document_artifact():
+    """P1-6：产出文书的 run，list_messages 应为 assistant 消息附带 public artifacts。
+
+    覆盖：
+      - 未产出文书时 assistant 消息不含 artifacts；
+      - update_run(document_file=...) 后 list_messages 派生 artifacts
+        （type / run_id / filename / format / file_size）；
+      - 绝不泄露 ``output_path`` 等服务器内部路径。
+    """
+    dsn = os.getenv("LVYAN_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("LVYAN_TEST_POSTGRES_DSN is not configured")
+
+    suffix = uuid.uuid4().hex
+    user_id = f"test-user-{suffix}"
+    thread_id = f"test-thread-{suffix}"
+    run_id = f"test-run-{suffix}"
+    store = PostgresRunMetadataStore(dsn)
+
+    try:
+        store.create_run(
+            run_id=run_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            user_message="起诉",
+        )
+        store.append_message(run_id, thread_id, user_id, "assistant", "以下是起诉状")
+
+        messages = store.list_messages(thread_id, user_id)
+        assistant = [m for m in messages if m["role"] == "assistant"][0]
+        assert not assistant.get("artifacts")
+
+        store.update_run(
+            run_id,
+            status="completed",
+            document_file={
+                "success": True,
+                "filename": "民事起诉状.docx",
+                "format": "docx",
+                "file_size": 20480,
+                "output_path": "/app/outputs/run-xxx/民事起诉状.docx",
+            },
+        )
+        messages = store.list_messages(thread_id, user_id)
+        assistant = [m for m in messages if m["role"] == "assistant"][0]
+        assert assistant["artifacts"] == [
+            {
+                "type": "document",
+                "run_id": run_id,
+                "filename": "民事起诉状.docx",
+                "format": "docx",
+                "file_size": 20480,
+            }
+        ]
+        # 安全：public 化后绝不泄露服务器内部路径
+        assert "/app/outputs/" not in str(assistant)
+        assert "output_path" not in assistant["artifacts"][0]
+    finally:
+        store.update_run(run_id, status="completed")
+        store.delete_thread(thread_id, user_id)
+
+
 # ---------------------------------------------------------------------------
 # H2：多实例并发执行 _ensure_schema 必须幂等
 # ---------------------------------------------------------------------------

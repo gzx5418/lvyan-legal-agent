@@ -132,6 +132,49 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 
 
 # ---------------------------------------------------------------------------
+# P1-3：rebuild 跨进程互斥锁
+# ---------------------------------------------------------------------------
+def _acquire_rebuild_lock(manifests_dir: Path) -> bool:
+    """以原子创建 ``.rebuild.lock`` 文件的方式获取 rebuild 互斥锁。
+
+    跨 worker / 多实例（K8s 共享卷）同时发现索引失效时，只允许一个进程执行
+    rebuild，避免并发写同一批 temp 文件互相覆盖。锁文件超时（10 分钟）自动
+    视为过期并接管，防止进程崩溃残留锁导致永久阻塞。
+
+    Returns:
+        True 表示本进程获得锁；False 表示已有其他进程在重建。
+    """
+    lock_path = Path(manifests_dir) / ".rebuild.lock"
+    Path(manifests_dir).mkdir(parents=True, exist_ok=True)
+
+    # 过期锁清理：mtime 超过 10 分钟视为崩溃残留
+    try:
+        if lock_path.is_file() and (time.time() - lock_path.stat().st_mtime) > 600:
+            lock_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+
+
+def _release_rebuild_lock(manifests_dir: Path) -> None:
+    """释放 rebuild 锁（仅删除锁文件；如已被其他进程接管则保留）。"""
+    lock_path = Path(manifests_dir) / ".rebuild.lock"
+    try:
+        lock_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # manifest 写入 / 读取
 # ---------------------------------------------------------------------------
 def write_corpus_manifest(
@@ -404,42 +447,63 @@ def rebuild_corpus_indexes(
         _build_bm25_index,
         _serialize_bm25_index,
     )
-    from lvyan.scripts.ingest_laws import (
-        build_article_index,
-        save_index_json,
-    )
+    from lvyan.scripts.ingest_laws import build_article_index
 
     lawtext_dir = Path(lawtext_dir or LAWTEXT_DIR)
     manifests_dir = Path(manifests_dir or (AGENT_DIR / "knowledge" / "manifests"))
     manifests_dir.mkdir(parents=True, exist_ok=True)
 
-    _logger.info("[manifest] 重建索引：lawtext=%s", lawtext_dir)
+    # P1-3：跨进程互斥锁，防止多 worker / 多实例并发重建互相覆盖
+    if not _acquire_rebuild_lock(manifests_dir):
+        _logger.warning("[manifest] 另一进程正在重建索引，本次跳过")
+        # 等待片刻后直接读取（可能已被重建），若仍不一致如实报告
+        time.sleep(1.0)
+        invalidate_corpus_health_cache()
+        return verify_corpus_consistency(lawtext_dir, manifests_dir, force=True)
 
-    # 1) 全量扫描 + 切分
-    chunks = build_article_index(lawtext_dir)
-    _logger.info("[manifest] 扫描完成，chunks=%d", len(chunks))
+    try:
+        _logger.info("[manifest] 重建索引：lawtext=%s", lawtext_dir)
 
-    # 2) ArticleIndex（json + pickle，原子写）
-    article_json = manifests_dir / "article_index_v2.json"
-    article_pkl = manifests_dir / "article_index_v2.pkl"
-    save_index_json(chunks, article_json)
-    _atomic_write_bytes(
-        article_pkl,
-        pickle.dumps(
-            {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": chunks}
-        ),
-    )
+        # 1) 全量扫描 + 切分
+        chunks = build_article_index(lawtext_dir)
+        _logger.info("[manifest] 扫描完成，chunks=%d", len(chunks))
 
-    # 3) BM25（pkl + json，原子写）
-    bm25_pkl = manifests_dir / "bm25_index.pkl"
-    bm25_json = manifests_dir / "bm25_index.json"
-    index = _build_bm25_index(chunks)
-    serialized = _serialize_bm25_index(index)
-    _atomic_write_bytes(bm25_pkl, pickle.dumps(serialized))
-    _atomic_write_text(bm25_json, json.dumps(serialized, ensure_ascii=False))
+        # 2) ArticleIndex（json + pickle，P1-4 全部原子写）
+        article_json = manifests_dir / "article_index_v2.json"
+        article_pkl = manifests_dir / "article_index_v2.pkl"
+        _atomic_write_text(
+            article_json,
+            json.dumps(
+                {
+                    "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
+                    "chunks": [
+                        c.model_dump(mode="json") if not isinstance(c, dict) else c
+                        for c in chunks
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+        _atomic_write_bytes(
+            article_pkl,
+            pickle.dumps(
+                {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": chunks}
+            ),
+        )
 
-    # 4) 新 manifest（原子写）
-    write_corpus_manifest(chunks, lawtext_dir, manifests_dir)
+        # 3) BM25（pkl + json，原子写）
+        bm25_pkl = manifests_dir / "bm25_index.pkl"
+        bm25_json = manifests_dir / "bm25_index.json"
+        index = _build_bm25_index(chunks)
+        serialized = _serialize_bm25_index(index)
+        _atomic_write_bytes(bm25_pkl, pickle.dumps(serialized))
+        _atomic_write_text(bm25_json, json.dumps(serialized, ensure_ascii=False))
+
+        # 4) 新 manifest（原子写，最后生成 —— 作为「全部就绪」的信号）
+        write_corpus_manifest(chunks, lawtext_dir, manifests_dir)
+    finally:
+        _release_rebuild_lock(manifests_dir)
 
     # 5) 清理缓存并强制重新校验
     invalidate_corpus_health_cache()

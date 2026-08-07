@@ -340,8 +340,6 @@ def _legal_corpus_status() -> dict[str, Any]:
         # P0-B：仅当法库可用时才校验 manifest 一致性（法库不可用时直接
         # 判定 curated_only，避免从 TTL 缓存读到 stale 快照误覆盖 mode）。
         if available:
-            info["documents"] = sum(1 for _ in LAWTEXT_DIR.rglob("*.md"))
-
             from lvyan.retrieval.manifest import verify_corpus_consistency
 
             check = verify_corpus_consistency()
@@ -350,6 +348,9 @@ def _legal_corpus_status() -> dict[str, Any]:
             info["corpus_hash"] = check["current_corpus_hash"]
             if check["manifest"] is not None:
                 info["chunks"] = int(check["manifest"].get("chunks_count", 0)) or None
+                # P1-2：documents 直接取 manifest.lawtext_file_count，
+                # 不再每次 rglob 遍历目录（避免 TTL 刷新外的高频扫描）。
+                info["documents"] = int(check["manifest"].get("lawtext_file_count", 0)) or None
                 if check["consistent"]:
                     info["mode"] = "official_full"
                 else:
@@ -375,6 +376,39 @@ def _legal_corpus_status() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     return info
+
+
+def warm_corpus_in_background(
+    lawtext_dir: Path | None = None,
+    manifests_dir: Path | None = None,
+) -> None:
+    """P0：启动期预热/自愈法律索引（后台线程执行）。
+
+    在 ``create_app`` 启动阶段调用，通过 ``asyncio.to_thread`` 卸载到线程池，
+    不阻塞事件循环。调用 :func:`ensure_corpus_ready`：索引不一致（法库更新 /
+    manifest 缺失 / 磁盘索引与 manifest 错位）时自动原子重建，并重新生成
+    manifest —— 避免「readyz=503 → 无流量 → 永不修复」的恶性循环。
+
+    官方库不可用时直接返回（降级到精编库，无需重建）。
+    """
+    try:
+        if not is_official_db_available():
+            return
+        from lvyan.retrieval.manifest import ensure_corpus_ready
+
+        result = ensure_corpus_ready(lawtext_dir, manifests_dir)
+        if not result["consistent"]:
+            _logger.warning(
+                "法律索引启动预热未就绪（reason=%s）；/readyz 将报告 degraded",
+                result["reason"],
+            )
+        else:
+            _logger.info(
+                "法律索引启动预热完成（chunks=%s）",
+                result["manifest"].get("chunks_count") if result.get("manifest") else "?",
+            )
+    except Exception:  # noqa: BLE001 预热失败不阻断应用启动，readyz 会如实报告
+        _logger.exception("法律索引启动预热异常（忽略，/readyz 将如实报告）")
 
 
 def _check_model_gateway() -> str:
@@ -660,6 +694,30 @@ def _load_attachment_markdown(meta: dict[str, Any], fid: str) -> str:
     return meta.get("text_preview", "") or ""
 
 
+def _lifespan(app: FastAPI) -> Any:
+    """FastAPI lifespan：启动期后台预热/自愈法律索引（P0）。
+
+    通过 ``asyncio.to_thread`` 把 ``ensure_corpus_ready`` 卸载到线程池，
+    不阻塞事件循环。索引不一致时自动原子重建 + 重新生成 manifest，
+    避免「readyz=503 → 无流量 → 永不修复」的恶性循环。
+
+    预热失败不阻断启动：/readyz 会如实报告 degraded。
+    """
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _impl(app: FastAPI) -> Any:
+        import asyncio
+
+        try:
+            await asyncio.to_thread(warm_corpus_in_background)
+        except Exception:  # noqa: BLE001
+            _logger.exception("法律索引启动预热失败（lifespan）")
+        yield
+
+    return _impl(app)
+
+
 def create_app(
     runner: Any = None,
     memory: CaseMemory | None = None,
@@ -694,6 +752,7 @@ def create_app(
         docs_url=None if _is_prod else "/docs",
         redoc_url=None if _is_prod else "/redoc",
         openapi_url=None if _is_prod else "/openapi.json",
+        lifespan=_lifespan,
     )
 
     if metadata_store is None and runner is None and memory is None:
@@ -747,8 +806,11 @@ def create_app(
     @app.get("/api/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         """向后兼容的总体健康检查（livez + readyz 的混合视图）。"""
+        # P1-1：corpus 校验含全库 hash / 索引读取，卸载到线程池避免阻塞 event loop
+        import asyncio
+
         db = _check_database()
-        ret = _check_retrieval()
+        ret = await asyncio.to_thread(_check_retrieval)
         gw = _check_model_gateway()
         overall = "ok" if (db == "ok" and ret == "ok" and gw == "ok") else "degraded"
         return HealthResponse(status=overall, database=db, retrieval=ret, model_gateway=gw)
@@ -771,6 +833,10 @@ def create_app(
           生产模式下若为 memory（静默降级）→ not-ready。
         - ``object_storage``：保留位（当前未实现）
         """
+        # P1-1：corpus 校验含全库 hash / 磁盘索引读取，卸载到线程池避免阻塞
+        # event loop（TTL 到期刷新时会出现 5 分钟一次的同步磁盘扫描）。
+        import asyncio
+
         db = _check_database_ready()
         if db == "ok" and metadata_store is not None:
             healthcheck = getattr(metadata_store, "healthcheck", None)
@@ -780,7 +846,7 @@ def create_app(
                         db = "unavailable"
                 except Exception:  # noqa: BLE001
                     db = "unavailable"
-        ret = _check_retrieval()
+        ret = await asyncio.to_thread(_check_retrieval)
         gw = _check_model_gateway_ready()
 
         # P0-1：暴露实际 checkpointer 类型；生产模式下 memory = 降级
@@ -825,7 +891,7 @@ def create_app(
             and auth_status != "misconfigured"
         )
         # P0-4：法律语料库详细状态（透明披露「完整库」vs「精编子集」+ 规模统计）
-        legal_corpus = _legal_corpus_status()
+        legal_corpus = await asyncio.to_thread(_legal_corpus_status)
         # model_gateway 不可用不阻断 ready（可降级到规则路径）
         return JSONResponse(
             status_code=200 if ready else 503,
