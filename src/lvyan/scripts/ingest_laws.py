@@ -335,6 +335,60 @@ def save_index_json(chunks: list[ArticleChunk], output_path: Path) -> None:
     )
 
 
+def _save_article_index_pickle(chunks: list[ArticleChunk], pkl_path: Path) -> None:
+    """P0-2：把 ArticleChunk 列表序列化为 pickle（运行时加载比 JSON 快 3-5x）。
+
+    与 ``lvyan.retrieval.lexical._load_article_chunks`` 的 pickle schema 保持一致：
+    ``{"schema_version": int, "chunks": [ArticleChunk, ...]}``。
+    """
+    import pickle
+
+    pkl_path = Path(pkl_path)
+    pkl_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
+        "chunks": chunks,
+    }
+    with open(pkl_path, "wb") as f:
+        pickle.dump(payload, f)
+
+
+def prewarm_bm25_index(chunks: list[ArticleChunk], manifests_dir: Path) -> None:
+    """P0-2：构建并落盘全局 BM25 倒排索引（pickle + JSON）。
+
+    Docker 构建期调用，确保运行时首个用户请求无需等待 10-30s 索引构建。
+    复用 ``lvyan.retrieval.lexical`` 的构建 / 序列化逻辑，保证与运行时
+    加载逻辑完全一致（schema_version / signature 校验可命中缓存）。
+    """
+    import pickle
+
+    from lvyan.retrieval.lexical import (
+        ARTICLE_INDEX_SCHEMA_VERSION as LEX_SCHEMA_VERSION,
+        _build_bm25_index,
+        _serialize_bm25_index,
+    )
+
+    manifests_dir = Path(manifests_dir)
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+
+    bm25_pkl = manifests_dir / "bm25_index.pkl"
+    bm25_json = manifests_dir / "bm25_index.json"
+
+    print(f"[prewarm] 构建 BM25 倒排索引（{len(chunks)} chunks）...", file=sys.stderr)
+    index = _build_bm25_index(chunks)
+    serialized = _serialize_bm25_index(index)
+    # _serialize 已写入 schema_version，但显式校验避免未来漂移
+    assert serialized["schema_version"] == LEX_SCHEMA_VERSION
+
+    with open(bm25_pkl, "wb") as f:
+        pickle.dump(serialized, f)
+    print(f"[prewarm] 已写入 pickle BM25 索引 -> {bm25_pkl}", file=sys.stderr)
+
+    with open(bm25_json, "w", encoding="utf-8") as f:
+        json.dump(serialized, f, ensure_ascii=False)
+    print(f"[prewarm] 已写入 JSON BM25 索引 -> {bm25_json}", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # SubTask 7.3: 数据库/索引写入桩
 # ---------------------------------------------------------------------------
@@ -476,6 +530,15 @@ def main() -> None:
         action="store_true",
         help="打印统计信息",
     )
+    parser.add_argument(
+        "--prewarm",
+        action="store_true",
+        help=(
+            "P0-2：预热运行时缓存。除 JSON 索引外，额外生成 article_index_v2.pkl "
+            "（pickle 加速加载）与 bm25_index.pkl / bm25_index.json（全局 BM25 "
+            "倒排索引）。Docker 构建期使用，避免首个用户请求触发 10-30s 冷启动。"
+        ),
+    )
     args = parser.parse_args()
 
     lawtext_dir = args.lawtext_dir or settings.lawtext_dir
@@ -494,6 +557,13 @@ def main() -> None:
             continue
 
     save_index_json(chunks, args.output)
+
+    if args.prewarm:
+        # P0-2：生成 pickle 缓存 + BM25 倒排索引，供运行时直接加载
+        pkl_path = args.output.with_suffix(".pkl")
+        _save_article_index_pickle(chunks, pkl_path)
+        print(f"[ingest] 已写入 pickle 索引：{pkl_path}", file=sys.stderr)
+        prewarm_bm25_index(chunks, args.output.parent)
 
     if args.stats:
         with_article = sum(1 for c in chunks if c.article_number)

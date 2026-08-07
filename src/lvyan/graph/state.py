@@ -251,6 +251,11 @@ class GraphState(TypedDict):
     output_retry_needed: bool
 
     # --- 文书生成专用（覆盖） ---
-    # document 模式下 composer 写入的文书载荷（template_name + filled_fields），
-    # 供 tools/export.render_docx 渲染 DOCX；非 document 模式为 None
+    # document 模式下 composer 写入的文书载荷（template_name + filled_fields +
+    # output_path），供 legal_answer_finalizer 在 output_guardrail 之后渲染 DOCX；
+    # 非 document 模式为 None
     document_payload: dict | None
+    # P0-1：最终渲染的文书文件信息（output_path / format / file_size / success），
+    # 由 legal_answer_finalizer 在 guardrail 之后基于 final_output 写入，
+    # 确保 DOCX 与经过引用校验 / 隐私脱敏 / HITL 编辑后的正文一致。
+    document_file: dict | None

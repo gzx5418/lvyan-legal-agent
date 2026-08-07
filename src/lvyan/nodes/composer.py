@@ -6,8 +6,10 @@
   * light：简短咨询答复（用户目标 / 核心结论 / 关键法条 / 行动建议 / 风险声明）。
   * deep：完整案件分析报告（事实 / 法律关系 / 构成要件 / 争议焦点 / 双方主张 /
     证据对应 / 裁判倾向 / 法条引用 / 类案参考 / 法规冲突 / 行动建议 / 风险声明）。
-  * document：调用 :func:`lvyan.tools.export.render_docx` 生成正式文书
-    （起诉状 / 律师函 / 法律意见书 / 答辩状），DOCX 渲染失败时降级为 Markdown。
+  * document：构建文书 Markdown 草稿 + document_payload（template_name +
+    filled_fields + output_path）。P0-1 修复：composer 不再直接渲染 DOCX，
+    真正的 DOCX 渲染由 legal_answer_finalizer 在 output_guardrail 之后执行，
+    确保最终文件与经过引用校验 / 隐私脱敏 / HITL 编辑后的正文一致。
 - 融合 ``reasoning_result`` / ``statutes`` / ``cases`` / ``conflicts`` /
   ``missing_facts`` / ``risk_level`` / ``citation_audit`` 写入 ``final_output``。
 - 法条引用一律采用「《法律名》第X条」规范格式，并标注来源与有效性。
@@ -27,7 +29,6 @@ from typing import Any
 
 from lvyan.config import AGENT_DIR
 from lvyan.schemas import CaseState
-from lvyan.tools.export import ExportResult, render_docx
 
 _logger = logging.getLogger("lvyan.nodes.composer")
 
@@ -777,10 +778,17 @@ def _build_document_markdown(state: Any, doc_type: str) -> str:
 
 
 def _compose_document(state: Any) -> tuple[str, dict[str, Any]]:
-    """Document 模式：调用 render_docx 生成文书，失败降级为 Markdown。
+    """Document 模式：构建文书 Markdown 草稿 + document_payload。
 
-    返回 ``(output_text, document_payload)``，其中 ``document_payload`` 含
-    ``template_name`` 与 ``filled_fields``，供后续 ``render_docx`` 渲染。
+    P0-1 修复：本函数 **不再渲染 DOCX**。composer 在 citation_verifier /
+    output_guardrail 之前执行，若此时落盘 DOCX，后续的引用修复、隐私脱敏、
+    HITL 编辑都不会反映到已生成的文件中，导致最终文件与页面展示内容不一致。
+
+    现在仅生成 Markdown 草稿 + 文书载荷（含 output_path / template_name /
+    filled_fields），真正的 ``render_docx`` 由 legal_answer_finalizer 在
+    output_guardrail 之后基于最终 ``final_output`` 执行。
+
+    返回 ``(markdown, document_payload)``。
     """
     user_goal = str(_get(state, "user_goal", "") or "")
     case_type = _get(state, "case_type", None)
@@ -810,6 +818,7 @@ def _compose_document(state: Any) -> tuple[str, dict[str, Any]]:
 
     document_payload: dict[str, Any] = {
         "template_name": template or f"{doc_type}（无模板，Markdown 降级）",
+        "doc_type": doc_type,
         "filled_fields": {
             "doc_type": doc_type,
             "title": _doc_title(doc_type),
@@ -820,30 +829,11 @@ def _compose_document(state: Any) -> tuple[str, dict[str, Any]]:
             "statutes": statute_refs,
             "user_goal": user_goal,
             "output_path": output_path,
+            "template": template,
         },
     }
 
-    footer: str
-    try:
-        result: ExportResult = render_docx(markdown, output_path, template)
-        if result.success:
-            footer = (
-                f"\n\n---\n文书文件：{result.output_path}（格式：{result.format}）"
-            )
-            if result.error:
-                footer += f"\n⚠ {result.error}"
-        else:
-            footer = (
-                f"\n\n---\n⚠ 文书生成失败：{result.error}\n"
-                "以下为 Markdown 降级内容已保留在上方。"
-            )
-    except Exception as exc:  # noqa: BLE001  渲染异常不中断流程，降级为 Markdown
-        footer = (
-            f"\n\n---\n⚠ 文书渲染异常：{exc}\n"
-            "以下为 Markdown 降级内容已保留在上方。"
-        )
-
-    return markdown + footer, document_payload
+    return markdown, document_payload
 
 
 # ---------------------------------------------------------------------------
@@ -856,6 +846,8 @@ def composer(state: CaseState) -> dict[str, Any]:
         - ``final_output``: str（组装后的最终输出）
         - ``document_payload``: dict | None（document 模式的文书载荷，含
           ``template_name`` + ``filled_fields``；非 document 模式为 None）
+        - ``document_file``: None（composer 不再渲染文件；由 finalizer 写入）
+        - ``legal_answer``: dict | None（结构化输出初稿，由 finalizer 覆盖）
     """
     complexity = str(_get(state, "complexity", "light") or "light")
     risk_level = str(_get(state, "risk_level", "low") or "low")
@@ -908,6 +900,9 @@ def composer(state: CaseState) -> dict[str, Any]:
     result: dict[str, Any] = {
         "final_output": output,
         "document_payload": document_payload,
+        # P0-1：清空旧 document_file，确保重试 composer 时不会残留过期文件引用。
+        # 真正的文件由 legal_answer_finalizer 在 guardrail 之后写入。
+        "document_file": None,
         "legal_answer": legal_answer_dict,
     }
     return result

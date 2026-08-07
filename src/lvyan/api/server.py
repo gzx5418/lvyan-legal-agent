@@ -44,7 +44,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from lvyan.config import AGENT_DIR, is_official_db_available, settings
+from lvyan.config import (
+    AGENT_DIR,
+    LAWTEXT_DIR,
+    is_official_db_available,
+    is_official_law_db_required,
+    settings,
+)
 from lvyan.memory.store import CaseMemory
 from lvyan.memory.run_metadata import (
     PostgresRunMetadataStore,
@@ -275,13 +281,65 @@ def _check_database_ready() -> str:
 
 
 def _check_retrieval() -> str:
-    """检索服务可用性：精编知识库目录存在视为可用。"""
+    """检索服务可用性。
+
+    P0-4：``REQUIRE_OFFICIAL_LAW_DB=true``（生产默认）时，官方法律库缺失即视为
+    ``degraded``（/readyz 据此返回 not-ready），避免在仅精编知识库子集下承接
+    生产流量。未要求完整库时，精编知识库目录存在即视为 ``ok``（降级可用）。
+    """
     try:
-        return (
-            "ok" if is_official_db_available() or settings.knowledge_dir.is_dir() else "unavailable"
-        )
+        if is_official_db_available():
+            return "ok"
+        if is_official_law_db_required():
+            return "degraded"
+        # 未强制要求完整库：精编知识库存在即降级可用
+        return "ok" if settings.knowledge_dir.is_dir() else "unavailable"
     except Exception:  # noqa: BLE001
         return "unavailable"
+
+
+def _legal_corpus_status() -> dict[str, Any]:
+    """P0-4：法律语料库详细状态（供 /readyz 透明披露，区分「完整库」与「精编子集」）。
+
+    返回结构：
+        - mode: ``official_full``（官方法律库可用）/ ``curated_only``（仅精编子集）
+        - required: 是否强制要求完整库
+        - available: 完整库是否可用
+        - documents / chunks: 规模统计（chunks 读 article_index 缓存，缺失时为 null）
+    """
+    available = is_official_db_available()
+    required = is_official_law_db_required()
+    info: dict[str, Any] = {
+        "mode": "official_full" if available else "curated_only",
+        "required": required,
+        "available": available,
+        "lawtext_dir": str(LAWTEXT_DIR),
+        "documents": None,
+        "chunks": None,
+    }
+    # 尽力统计规模；缓存缺失或读取异常不阻断就绪检查
+    try:
+        if available:
+            info["documents"] = sum(1 for _ in LAWTEXT_DIR.rglob("*.md"))
+        pkl = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.pkl"
+        js = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.json"
+        if pkl.is_file():
+            import pickle
+
+            with open(pkl, "rb") as f:
+                cached = pickle.load(f)
+            if isinstance(cached, dict) and isinstance(cached.get("chunks"), list):
+                info["chunks"] = len(cached["chunks"])
+        elif js.is_file():
+            import json
+
+            with open(js, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict) and isinstance(raw.get("chunks"), list):
+                info["chunks"] = len(raw["chunks"])
+    except Exception:  # noqa: BLE001
+        pass
+    return info
 
 
 def _check_model_gateway() -> str:
@@ -731,6 +789,8 @@ def create_app(
             and metadata_status != "degraded"
             and auth_status != "misconfigured"
         )
+        # P0-4：法律语料库详细状态（透明披露「完整库」vs「精编子集」+ 规模统计）
+        legal_corpus = _legal_corpus_status()
         # model_gateway 不可用不阻断 ready（可降级到规则路径）
         return JSONResponse(
             status_code=200 if ready else 503,
@@ -744,6 +804,7 @@ def create_app(
                 "metadata_store": metadata_status,
                 "authentication": auth_status,
                 "object_storage": "unknown",
+                "legal_corpus": legal_corpus,
             },
         )
 

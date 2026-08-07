@@ -304,6 +304,22 @@ def is_official_db_available() -> bool:
     return LAWTEXT_DIR.is_dir() and any(LAWTEXT_DIR.iterdir())
 
 
+def is_official_law_db_required() -> bool:
+    """P0-4：是否强制要求完整官方法律库可用。
+
+    生产环境（``RUNTIME_MODE=production``）默认要求；可通过
+    ``REQUIRE_OFFICIAL_LAW_DB=false`` 显式放宽（如开发 / 预发联调）。
+    非生产环境默认不要求，除非显式设 ``REQUIRE_OFFICIAL_LAW_DB=true``。
+
+    ``/readyz`` 据此决定法律库缺失时是否返回 not-ready。
+    """
+    raw = os.getenv("REQUIRE_OFFICIAL_LAW_DB")
+    if raw is not None:
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    # 未显式设置时：生产模式默认要求，其余模式默认不要求
+    return is_production()
+
+
 def is_production() -> bool:
     """是否处于生产部署模式（``RUNTIME_MODE=production``）。
 
@@ -408,6 +424,7 @@ __all__ = [
     "Settings",
     "settings",
     "is_official_db_available",
+    "is_official_law_db_required",
     "is_production",
     "persistence_required",
     "durable_runtime_required",
