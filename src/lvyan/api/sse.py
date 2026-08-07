@@ -983,15 +983,19 @@ def format_sse_event(event: dict[str, Any]) -> str:
 PHASE_TOTAL = 6
 PHASE_MAP: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
-        "comprehension",
-        "理解问题",
-        ("preflight", "jurisdiction_triage", "fact_extractor", "missing_fact_assessor"),
+        "material_reading",
+        "读取材料",
+        ("preflight", "attachment_retriever"),
     ),
-    ("preparation", "整理材料", ("attachment_retriever", "planner")),
+    (
+        "fact_analysis",
+        "梳理案情",
+        ("jurisdiction_triage", "fact_extractor", "missing_fact_assessor", "planner"),
+    ),
     ("retrieval", "检索法律", ("parallel_retrieval", "authority_resolver")),
-    ("analysis", "分析争点", ("legal_reasoner",)),
-    ("verification", "校验依据", ("critic", "citation_verifier", "output_guardrail")),
-    ("generation", "生成结果", ("composer", "legal_answer_finalizer")),
+    ("analysis", "分析争点", ("legal_reasoner", "critic")),
+    ("drafting_validation", "起草与校验", ("composer", "citation_verifier", "output_guardrail")),
+    ("generation", "生成结果", ("legal_answer_finalizer",)),
 )
 _NODE_PHASE_IDX: dict[str, int] = {
     node: idx for idx, (_key, _label, nodes) in enumerate(PHASE_MAP) for node in nodes
@@ -1132,6 +1136,13 @@ async def _stream_graph_events(
                         legal_answer = update["legal_answer"]
                     if "document_file" in update:
                         document_file = update["document_file"]
+
+    # 图正常结束后，最后一个已启动阶段也必须被标记完成。否则最终阶段没有
+    # 后继阶段触发 progress，UI 会停在 5/6（83%）。
+    if max_phase_idx >= 0:
+        while completed_phases < max_phase_idx:
+            completed_phases += 1
+            await _publish_phase_progress(ctx, completed_phases)
 
     return final_output, legal_answer, document_file
 

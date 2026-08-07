@@ -1,11 +1,4 @@
-"""P2 回归测试：SSE 语义阶段进度事件（phase_start / phase_progress）。
-
-验证核心不变量：
-1. 节点按阶段分组，后端在「新阶段首个节点启动」时发布 phase_start；
-2. 阶段前进时补齐已完成的中间阶段（phase_progress，completed 为累计数）；
-3. 重跑旧阶段节点（critic 回退重试 legal_reasoner）不使进度回退；
-4. node_start / node_end 事件不受影响（向后兼容）。
-"""
+"""SSE 语义阶段进度的回归测试。"""
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +8,7 @@ from lvyan.api.sse import PHASE_TOTAL, RunContext, _stream_graph_events
 
 
 class _FakeGraph:
-    """Fake graph：astream 依次产出预设的 chunk 列表（v2 格式）。"""
+    """按预设顺序产出 LangGraph v2 tasks chunk 的最小测试图。"""
 
     def __init__(self, chunks: list[dict[str, Any]]) -> None:
         self._chunks = list(chunks)
@@ -26,7 +19,6 @@ class _FakeGraph:
 
 
 def _task_chunk(kind: str, name: str) -> dict[str, Any]:
-    """构造 v2 格式 tasks chunk：kind=input 表示节点开始；result 表示结束。"""
     if kind == "input":
         return {"type": "tasks", "data": {"id": name, "name": name, "input": {}}}
     return {"type": "tasks", "data": {"id": name, "name": name, "result": {}}}
@@ -44,20 +36,11 @@ def _run(graph: _FakeGraph) -> tuple[list[dict[str, Any]], RunContext]:
 
 
 def _phases(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [e for e in events if e["event"] in ("phase_start", "phase_progress")]
+    return [event for event in events if event["event"] in ("phase_start", "phase_progress")]
 
 
-# ---------------------------------------------------------------------------
-# 1. 顺序推进：阶段按序启动、中间阶段被补齐完成
-# ---------------------------------------------------------------------------
 def test_phase_events_in_forward_order():
-    """preflight→planner→parallel_retrieval→composer：阶段逐级推进。
-
-    - phase_start(comprehension) 先发布；
-    - 进入 preparation 时 comprehension 完成（completed=1）；
-    - 进入 retrieval 时 preparation 完成（completed=2）；
-    - 跳到 generation 时补发 retrieval/analysis/verification 三个完成事件。
-    """
+    """阶段按真实 DAG 顺序推进，EOF 时完成最后一个已启动阶段。"""
     graph = _FakeGraph(
         [
             _task_chunk("input", "preflight"),
@@ -73,31 +56,25 @@ def test_phase_events_in_forward_order():
     events, _ = _run(graph)
     phases = _phases(events)
 
-    seq = [(e["event"], e["phase"]) for e in phases]
-    assert seq == [
-        ("phase_start", "comprehension"),
-        ("phase_progress", "comprehension"),
-        ("phase_start", "preparation"),
-        ("phase_progress", "preparation"),
+    assert [(event["event"], event["phase"]) for event in phases] == [
+        ("phase_start", "material_reading"),
+        ("phase_progress", "material_reading"),
+        ("phase_start", "fact_analysis"),
+        ("phase_progress", "fact_analysis"),
         ("phase_start", "retrieval"),
         ("phase_progress", "retrieval"),
         ("phase_progress", "analysis"),
-        ("phase_progress", "verification"),
-        ("phase_start", "generation"),
+        ("phase_start", "drafting_validation"),
+        ("phase_progress", "drafting_validation"),
     ]
-
-    # completed 应为 1 基累计数，且 total 恒为阶段总数
-    progresses = [e for e in phases if e["event"] == "phase_progress"]
-    assert [e["completed"] for e in progresses] == [1, 2, 3, 4, 5]
-    assert all(e["total"] == PHASE_TOTAL for e in phases)
-    assert all(e.get("label") for e in phases), "阶段事件必须携带中文 label"
+    progresses = [event for event in phases if event["event"] == "phase_progress"]
+    assert [event["completed"] for event in progresses] == [1, 2, 3, 4, 5]
+    assert all(event["total"] == PHASE_TOTAL for event in phases)
+    assert all(event.get("label") for event in phases)
 
 
-# ---------------------------------------------------------------------------
-# 2. 跳阶段：跳过 preparation/retrieval（如无附件、HITL 恢复）也能补齐
-# ---------------------------------------------------------------------------
-def test_phase_events_skip_intermediate_phases():
-    """HITL 恢复只跑 finalizer：应从 comprehension 直接跳到 generation。"""
+def test_phase_events_skip_intermediate_phases_and_flush_final_completion():
+    """只跑 finalizer 也会补齐 1/6 到 6/6。"""
     graph = _FakeGraph(
         [
             _task_chunk("input", "legal_answer_finalizer"),
@@ -107,30 +84,25 @@ def test_phase_events_skip_intermediate_phases():
     events, _ = _run(graph)
     phases = _phases(events)
 
-    seq = [(e["event"], e["phase"]) for e in phases]
-    # 直接跳到 generation：先补发全部 5 个阶段完成，再发布 generation 启动
-    assert seq == [
-        ("phase_progress", "comprehension"),
-        ("phase_progress", "preparation"),
+    assert [(event["event"], event["phase"]) for event in phases] == [
+        ("phase_progress", "material_reading"),
+        ("phase_progress", "fact_analysis"),
         ("phase_progress", "retrieval"),
         ("phase_progress", "analysis"),
-        ("phase_progress", "verification"),
+        ("phase_progress", "drafting_validation"),
         ("phase_start", "generation"),
+        ("phase_progress", "generation"),
     ]
-    progresses = [e for e in phases if e["event"] == "phase_progress"]
-    assert [e["completed"] for e in progresses] == [1, 2, 3, 4, 5]
+    progresses = [event for event in phases if event["event"] == "phase_progress"]
+    assert [event["completed"] for event in progresses] == [1, 2, 3, 4, 5, 6]
 
 
-# ---------------------------------------------------------------------------
-# 3. 重跑不回退：critic 回退重试 legal_reasoner 不再发阶段事件
-# ---------------------------------------------------------------------------
 def test_phase_events_do_not_regress_on_rerun():
-    """generation 阶段开始后重跑 analysis 节点（重试），不应产生新的阶段事件。"""
+    """重跑旧阶段节点不会让单调进度回退或重复发起阶段。"""
     graph = _FakeGraph(
         [
             _task_chunk("input", "preflight"),
             _task_chunk("input", "composer"),
-            # 回退重试（critic→legal_reasoner→composer 再次执行）
             _task_chunk("input", "legal_reasoner"),
             _task_chunk("result", "legal_reasoner"),
             _task_chunk("input", "composer"),
@@ -140,18 +112,52 @@ def test_phase_events_do_not_regress_on_rerun():
     events, _ = _run(graph)
     phases = _phases(events)
 
-    # 前 2 个事件：comprehension 启动 → 跳转到 generation 前补发完成事件
-    assert (phases[0]["event"], phases[0]["phase"]) == ("phase_start", "comprehension")
-    # 重跑节点不应再触发任何阶段事件（进度单调）
-    starts = [e for e in phases if e["event"] == "phase_start"]
-    assert [e["phase"] for e in starts] == ["comprehension", "generation"]
-    progresses = [e for e in phases if e["event"] == "phase_progress"]
-    assert [e["completed"] for e in progresses] == [1, 2, 3, 4, 5]
+    starts = [event for event in phases if event["event"] == "phase_start"]
+    assert [event["phase"] for event in starts] == ["material_reading", "drafting_validation"]
+    progresses = [event for event in phases if event["event"] == "phase_progress"]
+    assert [event["completed"] for event in progresses] == [1, 2, 3, 4, 5]
 
 
-# ---------------------------------------------------------------------------
-# 4. 向后兼容：node_start / node_end 事件仍正常发布
-# ---------------------------------------------------------------------------
+def test_phase_events_follow_composer_to_finalizer_main_chain():
+    """校验不会在 citation_verifier 之前被宣告完成，完整运行必须到 6/6。"""
+    graph = _FakeGraph(
+        [
+            _task_chunk("input", name)
+            for name in (
+                "preflight",
+                "attachment_retriever",
+                "jurisdiction_triage",
+                "fact_extractor",
+                "missing_fact_assessor",
+                "planner",
+                "parallel_retrieval",
+                "authority_resolver",
+                "legal_reasoner",
+                "critic",
+                "composer",
+                "citation_verifier",
+                "output_guardrail",
+                "legal_answer_finalizer",
+            )
+        ]
+    )
+    events, _ = _run(graph)
+    phases = _phases(events)
+
+    starts = [event["phase"] for event in phases if event["event"] == "phase_start"]
+    progresses = [event for event in phases if event["event"] == "phase_progress"]
+    assert starts == [
+        "material_reading",
+        "fact_analysis",
+        "retrieval",
+        "analysis",
+        "drafting_validation",
+        "generation",
+    ]
+    assert [event["completed"] for event in progresses] == [1, 2, 3, 4, 5, 6]
+    assert [event["phase"] for event in progresses] == starts
+
+
 def test_phase_events_do_not_break_node_events():
     graph = _FakeGraph(
         [
@@ -162,8 +168,8 @@ def test_phase_events_do_not_break_node_events():
         ]
     )
     events, _ = _run(graph)
-    node_events = [e for e in events if e["event"] in ("node_start", "node_end")]
-    assert [e["node"] for e in node_events] == [
+    node_events = [event for event in events if event["event"] in ("node_start", "node_end")]
+    assert [event["node"] for event in node_events] == [
         "preflight",
         "preflight",
         "composer",

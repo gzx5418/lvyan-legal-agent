@@ -456,6 +456,7 @@ async function listenSSE(runId) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let terminalReceived = false;
 
   try {
     while (true) {
@@ -470,12 +471,20 @@ async function listenSSE(runId) {
         const dataLine = frame.split('\n').find(line => line.startsWith('data:'));
         if (dataLine) {
           try {
-            handleSSEEvent(JSON.parse(dataLine.slice(5).trim()));
+            const event = JSON.parse(dataLine.slice(5).trim());
+            if (['final_output', 'error', 'cancelled'].includes(event.event)) {
+              terminalReceived = true;
+            }
+            handleSSEEvent(event);
           } catch (err) {
             console.error('SSE parse error:', err);
           }
         }
       }
+    }
+    if (!terminalReceived && state.isRunning && !controller.signal.aborted) {
+      updateLastAgentMessage('连接意外结束，请重新连接或刷新查看运行状态。');
+      resetRunState();
     }
   } catch (err) {
     if (err.name === 'AbortError') return; // 主动停止，静默退出
