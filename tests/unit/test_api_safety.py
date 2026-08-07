@@ -1197,3 +1197,98 @@ def test_build_final_output_event_helper_without_structured():
     event = _build_final_output_event(ctx)
     assert event["output"] == "# MD"
     assert "answer" not in event
+
+
+# ---------------------------------------------------------------------------
+# P1-1：SSE document_file 只暴露 public 视图（不含 output_path）
+# ---------------------------------------------------------------------------
+def test_build_final_output_event_document_file_public_view():
+    """_build_final_output_event 对 document_file 应输出 public 视图。
+
+    P1-1：绝不包含 output_path 等服务器内部路径；必须提供 download_url。
+    """
+    from lvyan.api.sse import RunContext, _build_final_output_event
+
+    ctx = RunContext("run-doc-1", "t1")
+    ctx.final_output = "# 起诉状"
+    ctx.document_file = {
+        "output_path": "/app/outputs/run-doc-1-起诉状.docx",
+        "format": "docx",
+        "file_size": 12345,
+        "success": True,
+        "filename": "民事起诉状.docx",
+    }
+    event = _build_final_output_event(ctx)
+
+    doc = event["document_file"]
+    assert "output_path" not in doc, "public 视图不得包含 output_path"
+    assert "/app/" not in str(doc), "public 视图不得泄露服务器路径"
+    assert doc["filename"] == "民事起诉状.docx"
+    assert doc["format"] == "docx"
+    assert doc["file_size"] == 12345
+    assert doc["download_url"] == "/api/documents/run-doc-1/download"
+
+
+def test_build_final_output_event_document_file_success_false():
+    """document_file.success=False 时不推送下载入口。"""
+    from lvyan.api.sse import RunContext, _build_final_output_event
+
+    ctx = RunContext("run-doc-2", "t1")
+    ctx.final_output = "# 报告"
+    ctx.document_file = {
+        "output_path": "/app/outputs/run-doc-2-报告.docx",
+        "format": "md",
+        "file_size": 0,
+        "success": False,
+        "error": "渲染异常",
+    }
+    event = _build_final_output_event(ctx)
+    assert "document_file" not in event, "渲染失败不应提供下载入口"
+
+
+# ---------------------------------------------------------------------------
+# P1-4：生产环境未启用认证时禁用文书下载
+# ---------------------------------------------------------------------------
+def test_download_disabled_in_production_without_auth(monkeypatch):
+    """生产环境 + AUTH_ENABLED=false → 下载端点返回 403。"""
+    import lvyan.api.server as server_mod
+
+    # 构造可导入的 app（使用内存/无 DB 的轻量环境）
+    from lvyan.api.server import create_app
+
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+
+    # mock is_production=True, is_auth_enabled=False（下载端点函数内 import）
+    monkeypatch.setattr(
+        "lvyan.config.is_production", lambda: True
+    )
+    monkeypatch.setattr(
+        "lvyan.api.auth.is_auth_enabled", lambda: False
+    )
+
+    resp = client.get("/api/documents/any-run/download")
+    assert resp.status_code == 403
+    assert "禁用" in resp.json().get("detail", "")
+
+
+def test_download_not_blocked_in_dev_without_auth(monkeypatch):
+    """开发模式（非生产）+ 无认证 → 不被 P1-4 拦截（走到后续逻辑）。
+
+    P1-4 仅在生产模式 + 未启用认证时禁用下载；开发模式不应被误伤。
+    """
+    from lvyan.api.server import create_app
+
+    monkeypatch.setattr("lvyan.config.is_production", lambda: False)
+    monkeypatch.setattr("lvyan.api.auth.is_auth_enabled", lambda: False)
+
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    resp = client.get("/api/documents/run-x/download")
+    # 不被 403「生产禁用」拦截即可（后续可能 404/503，取决于 metadata_store）
+    assert resp.status_code != 403
+    assert "禁用" not in resp.text

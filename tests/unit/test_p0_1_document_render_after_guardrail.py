@@ -128,8 +128,11 @@ def test_finalizer_renders_docx_from_final_output(monkeypatch):
     assert doc_file["success"] is True
     assert doc_file["format"] == "docx"
     assert doc_file["file_size"] == 123
-    # final_output 应被追加「文书文件」页脚
-    assert "文书文件" in result["final_output"]
+    # P1-2：final_output 页脚不再显示服务器物理路径（避免 /app/outputs/... 泄露）
+    assert "文书已生成" in result["final_output"], "页脚应提示文书已生成"
+    assert "/outputs/" not in result["final_output"], "页脚不得暴露物理路径"
+    # P2：document_file 应携带安全文件名（不含 run_id / 物理路径）
+    assert doc_file["filename"] and doc_file["filename"].endswith(".docx")
 
 
 # ---------------------------------------------------------------------------

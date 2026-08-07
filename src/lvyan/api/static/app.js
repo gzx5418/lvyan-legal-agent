@@ -448,6 +448,10 @@ function handleSSEEvent(event) {
       } else {
         updateLastAgentMessage(event.output || '(无输出)');
       }
+      // P1-3：文书已生成 → 在最后一条 Agent 消息中追加 DOCX 下载按钮
+      if (event.document_file && event.document_file.download_url) {
+        appendDocumentDownload(event.document_file);
+      }
       finalizeRun();
       break;
 
@@ -790,6 +794,28 @@ function updateLastAgentMessageStructured(answer, markdownFallback) {
     body.appendChild(createMsgActions(markdownFallback));
   }
 
+  els.chatArea.scrollTop = els.chatArea.scrollHeight;
+}
+
+// P1-3：文书下载按钮
+function appendDocumentDownload(docFile) {
+  const agentMessages = els.messages.querySelectorAll('.msg-agent');
+  const lastMsg = agentMessages[agentMessages.length - 1];
+  if (!lastMsg) return;
+  // 避免重复追加
+  if (lastMsg.querySelector('.doc-download-btn')) return;
+  const body = lastMsg.querySelector('.msg-body');
+  if (!body) return;
+  const wrapper = document.createElement('div');
+  wrapper.className = 'doc-download-wrapper';
+  const sizeKb = docFile.file_size ? (docFile.file_size / 1024).toFixed(1) + ' KB' : '';
+  const btn = document.createElement('a');
+  btn.className = 'doc-download-btn';
+  btn.href = docFile.download_url;
+  btn.download = docFile.filename || 'document.docx';
+  btn.innerHTML = '⬇ 下载文书 ' + (docFile.filename || '') + (sizeKb ? ' (' + sizeKb + ')' : '');
+  wrapper.appendChild(btn);
+  body.appendChild(wrapper);
   els.chatArea.scrollTop = els.chatArea.scrollHeight;
 }
 

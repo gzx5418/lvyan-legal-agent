@@ -285,14 +285,16 @@ def _load_article_chunks() -> list[Any]:
     # 用函数内 import 解 lexical._compute_chunk_signature，此处安全）。
     cache_trusted = True
     try:
-        from lvyan.retrieval.manifest import verify_corpus_consistency
+        from lvyan.retrieval.manifest import ensure_corpus_ready
 
-        check = verify_corpus_consistency()
+        # P0-3：自愈入口。索引不一致时自动原子重建（含重新生成 manifest），
+        # 避免「readyz=503 → 无流量 → 永不修复」的恶性循环。
+        check = ensure_corpus_ready()
         if not check["consistent"]:
             cache_trusted = False
             log(
-                f"[BM25] corpus_manifest 不一致（reason={check['reason']}），"
-                f"丢弃缓存并现场重建索引"
+                f"[BM25] corpus_manifest 不一致且重建后仍未修复（reason={check['reason']}），"
+                f"按原逻辑降级"
             )
     except Exception as exc:  # noqa: BLE001 校验失败不阻断加载，降级到原逻辑
         log(f"[BM25] manifest 校验异常（忽略，按原逻辑加载）：{exc}")

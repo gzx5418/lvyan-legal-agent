@@ -568,6 +568,30 @@ body.sidebar-collapsed #main { margin-left: 0; }
   transition: opacity 0.15s;
 }
 .msg-agent:hover .msg-actions { opacity: 1; }
+/* P1-3：文书下载按钮 */
+.doc-download-wrapper {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+.doc-download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #fff;
+  background: var(--accent, #2563eb);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.doc-download-btn:hover {
+  opacity: 0.85;
+  color: #fff;
+}
 .msg-action-btn {
   background: none;
   border: 1px solid var(--border);

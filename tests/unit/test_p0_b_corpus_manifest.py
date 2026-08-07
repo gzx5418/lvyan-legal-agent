@@ -1,4 +1,4 @@
-"""P0-B 回归测试：corpus_manifest 法库/索引一致性校验。
+"""P0-B 回归测试：corpus_manifest 法库/索引一致性校验（含 P0-1/P0-2/P0-3 增强）。
 
 验证核心不变量：
 1. ``compute_corpus_hash`` 对同一法库内容稳定，对文件变更敏感；
@@ -7,9 +7,13 @@
 3. 法库内容变更（模拟 submodule 升级 / 挂载卷覆盖）后 ``corpus_hash`` 不匹配
    → ``consistent=False, reason="lawtext_changed"``；
 4. 空索引（构建时 submodule 未检出）→ ``consistent=False, reason="empty_index"``；
-5. BM25 signature 与 chunks signature 不一致 → ``consistent=False``；
+5. manifest 内部 BM25 signature 与 chunks signature 不一致 → ``consistent=False``；
 6. manifest 缺失 → ``consistent=False, reason="manifest_missing"``；
-7. ``_load_article_chunks`` 在 manifest 不一致时跳过缓存、现场重建。
+7. P0-1：``verify_corpus_consistency`` 默认带 TTL 快照缓存，TTL 内不重复全库扫描；
+8. P0-2：真实磁盘文件校验 —— article_index.pkl / bm25_index.pkl 与 manifest 不一致
+   时返回 ``article_index_*`` / ``bm25_*`` 系列原因；
+9. P0-3：``rebuild_corpus_indexes`` 原子重建三件套并重新生成 manifest；
+   ``ensure_corpus_ready`` 自愈入口在索引不一致时自动重建。
 """
 from __future__ import annotations
 
@@ -22,7 +26,9 @@ import pytest
 from lvyan.retrieval.manifest import (
     MANIFEST_SCHEMA_VERSION,
     compute_corpus_hash,
+    invalidate_corpus_health_cache,
     load_corpus_manifest,
+    rebuild_corpus_indexes,
     verify_corpus_consistency,
     write_corpus_manifest,
 )
@@ -55,6 +61,44 @@ def _make_lawtext_dir(tmp_path: Path, files: dict[str, str] | None = None) -> Pa
     for name, content in files.items():
         (lawtext / name).write_text(content, encoding="utf-8")
     return lawtext
+
+
+def _write_full_index_set(
+    chunks: list[Any],
+    lawtext_dir: Path,
+    manifests_dir: Path,
+) -> None:
+    """P0-2 辅助：生成完整的索引三件套（article_index + bm25 + manifest）。
+
+    与 ``rebuild_corpus_indexes`` 内部产物一致，供测试验证真实磁盘文件校验。
+    先写 manifest 再补 index 文件（模拟预热的产物布局）。
+    """
+    import pickle
+
+    from lvyan.retrieval.lexical import (
+        ARTICLE_INDEX_SCHEMA_VERSION,
+        _build_bm25_index,
+        _serialize_bm25_index,
+    )
+
+    manifests_dir = Path(manifests_dir)
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+
+    # manifest
+    write_corpus_manifest(chunks, lawtext_dir, manifests_dir)
+
+    # article_index_v2.pkl
+    with open(manifests_dir / "article_index_v2.pkl", "wb") as f:
+        pickle.dump(
+            {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": chunks},
+            f,
+        )
+
+    # bm25_index.pkl
+    index = _build_bm25_index(chunks)
+    serialized = _serialize_bm25_index(index)
+    with open(manifests_dir / "bm25_index.pkl", "wb") as f:
+        pickle.dump(serialized, f)
 
 
 # ---------------------------------------------------------------------------
@@ -96,17 +140,17 @@ def test_corpus_hash_empty_dir():
 
 
 # ---------------------------------------------------------------------------
-# 2. write + verify 一致场景
+# 2. write + verify 一致场景（含真实磁盘文件）
 # ---------------------------------------------------------------------------
 def test_manifest_consistent_when_corpus_matches(tmp_path):
-    """法库未变更时 verify_corpus_consistency 应返回 consistent=True。"""
+    """完整索引三件套一致时 verify_corpus_consistency 应返回 consistent=True。"""
     lawtext = _make_lawtext_dir(tmp_path, {"law1.md": "# 测试法\n\n第一条 内容\n"})
     chunks = [_make_chunk()]
     manifests_dir = tmp_path / "manifests"
 
-    write_corpus_manifest(chunks, lawtext, manifests_dir)
+    _write_full_index_set(chunks, lawtext, manifests_dir)
 
-    result = verify_corpus_consistency(lawtext, manifests_dir)
+    result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
     assert result["consistent"] is True
     assert result["reason"] is None
     assert result["manifest"] is not None
@@ -123,12 +167,12 @@ def test_manifest_inconsistent_when_lawtext_changed(tmp_path):
     chunks = [_make_chunk(text="第一条 旧内容")]
     manifests_dir = tmp_path / "manifests"
 
-    write_corpus_manifest(chunks, lawtext, manifests_dir)
+    _write_full_index_set(chunks, lawtext, manifests_dir)
 
     # 模拟运行时法库已更新（submodule 升级）
     (lawtext / "law1.md").write_text("# 测试法\n\n第一条 新内容\n", encoding="utf-8")
 
-    result = verify_corpus_consistency(lawtext, manifests_dir)
+    result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
     assert result["consistent"] is False
     assert result["reason"] == "lawtext_changed"
     assert result["current_corpus_hash"] != result["manifest"]["corpus_hash"]
@@ -145,8 +189,7 @@ def test_manifest_inconsistent_when_empty_index(tmp_path):
     # 构建期法库为空，生成空索引 manifest
     write_corpus_manifest([], lawtext, manifests_dir)
 
-    # 运行时法库仍为空（corpus_hash 匹配），但 chunks_count=0
-    result = verify_corpus_consistency(lawtext, manifests_dir)
+    result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
     assert result["consistent"] is False
     assert result["reason"] == "empty_index"
 
@@ -169,21 +212,21 @@ def test_empty_index_with_mounted_full_corpus(tmp_path):
     runtime_lawtext.mkdir()
     (runtime_lawtext / "law1.md").write_text("# 完整法\n\n第一条 内容\n", encoding="utf-8")
 
-    result = verify_corpus_consistency(runtime_lawtext, manifests_dir)
+    result = verify_corpus_consistency(runtime_lawtext, manifests_dir, force=True)
     assert result["consistent"] is False
     # corpus_hash 不匹配（构建时空 vs 运行时有文件）
     assert result["reason"] == "lawtext_changed"
 
 
 # ---------------------------------------------------------------------------
-# 6. signature 不匹配 → signature_mismatch
+# 6. manifest 内部字段不一致
 # ---------------------------------------------------------------------------
 def test_manifest_inconsistent_on_signature_mismatch(tmp_path):
     """BM25 signature 与 chunks signature 不一致 → signature_mismatch。"""
     lawtext = _make_lawtext_dir(tmp_path)
     chunks = [_make_chunk()]
     manifests_dir = tmp_path / "manifests"
-    write_corpus_manifest(chunks, lawtext, manifests_dir)
+    _write_full_index_set(chunks, lawtext, manifests_dir)
 
     # 篡改 manifest 的 bm25_signature
     manifest_path = manifests_dir / "corpus_manifest.json"
@@ -191,123 +234,263 @@ def test_manifest_inconsistent_on_signature_mismatch(tmp_path):
     raw["bm25_signature"] = "tampered00000000"
     manifest_path.write_text(json.dumps(raw), encoding="utf-8")
 
-    result = verify_corpus_consistency(lawtext, manifests_dir)
+    result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
     assert result["consistent"] is False
     assert result["reason"] == "signature_mismatch"
 
 
-# ---------------------------------------------------------------------------
-# 7. manifest 缺失 → manifest_missing
-# ---------------------------------------------------------------------------
 def test_manifest_missing(tmp_path):
     """manifest 不存在 → manifest_missing。"""
     lawtext = _make_lawtext_dir(tmp_path)
-    result = verify_corpus_consistency(lawtext, tmp_path / "no_manifests")
+    result = verify_corpus_consistency(lawtext, tmp_path / "no_manifests", force=True)
     assert result["consistent"] is False
     assert result["reason"] == "manifest_missing"
     assert result["manifest"] is None
 
 
-# ---------------------------------------------------------------------------
-# 8. manifest schema 版本不匹配
-# ---------------------------------------------------------------------------
 def test_manifest_schema_mismatch(tmp_path):
     """manifest_schema_version 不匹配 → manifest_schema_mismatch。"""
     lawtext = _make_lawtext_dir(tmp_path)
     chunks = [_make_chunk()]
     manifests_dir = tmp_path / "manifests"
-    write_corpus_manifest(chunks, lawtext, manifests_dir)
+    _write_full_index_set(chunks, lawtext, manifests_dir)
 
     manifest_path = manifests_dir / "corpus_manifest.json"
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     raw["manifest_schema_version"] = 999
     manifest_path.write_text(json.dumps(raw), encoding="utf-8")
 
-    result = verify_corpus_consistency(lawtext, manifests_dir)
+    result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
     assert result["consistent"] is False
     assert result["reason"] == "manifest_schema_mismatch"
 
 
-# ---------------------------------------------------------------------------
-# 9. bm25_n_docs 与 chunks_count 不匹配
-# ---------------------------------------------------------------------------
 def test_bm25_doc_count_mismatch(tmp_path):
     """bm25_n_docs != chunks_count → bm25_doc_count_mismatch。"""
     lawtext = _make_lawtext_dir(tmp_path)
     chunks = [_make_chunk()]
     manifests_dir = tmp_path / "manifests"
-    write_corpus_manifest(chunks, lawtext, manifests_dir)
+    _write_full_index_set(chunks, lawtext, manifests_dir)
 
     manifest_path = manifests_dir / "corpus_manifest.json"
     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     raw["bm25_n_docs"] = 999
     manifest_path.write_text(json.dumps(raw), encoding="utf-8")
 
-    result = verify_corpus_consistency(lawtext, manifests_dir)
+    result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
     assert result["consistent"] is False
     assert result["reason"] == "bm25_doc_count_mismatch"
 
 
 # ---------------------------------------------------------------------------
-# 10. _load_article_chunks 在 manifest 不一致时跳过缓存
+# 7. P0-2：真实磁盘文件校验
 # ---------------------------------------------------------------------------
-def test_load_article_chunks_skips_cache_on_mismatch(tmp_path, monkeypatch):
-    """manifest 不一致时 _load_article_chunks 应跳过 pickle/JSON 缓存、现场重建。
+def test_article_index_missing(tmp_path):
+    """manifest 存在但 article_index_v2.pkl 缺失 → article_index_missing。"""
+    lawtext = _make_lawtext_dir(tmp_path)
+    chunks = [_make_chunk()]
+    manifests_dir = tmp_path / "manifests"
+    # 只写 manifest，不写 index 文件
+    write_corpus_manifest(chunks, lawtext, manifests_dir)
 
-    模拟：pickle 缓存存在但 manifest 缺失（或法库已变更）。
-    _load_article_chunks 应忽略缓存，调用 build_article_index 重建。
-    """
-    from lvyan.retrieval import lexical
+    result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
+    assert result["consistent"] is False
+    assert result["reason"] == "article_index_missing"
 
-    # 构造一个陈旧的 pickle 缓存
-    manifests_dir = lexical.AGENT_DIR / "knowledge" / "manifests"
-    manifests_dir.mkdir(parents=True, exist_ok=True)
 
-    # 写入一个 pickle 缓存（schema_version 匹配，含旧 chunks）
+def test_article_index_signature_mismatch(tmp_path):
+    """磁盘 article_index.pkl 的 chunks 与 manifest 不匹配 → signature 不一致。"""
     import pickle
 
+    lawtext = _make_lawtext_dir(tmp_path)
+    chunks = [_make_chunk(text="第一条 内容")]
+    manifests_dir = tmp_path / "manifests"
+    _write_full_index_set(chunks, lawtext, manifests_dir)
+
+    # 用不同内容的 chunks 覆盖 article_index_v2.pkl（法库变了但索引没重建）
     stale_chunks = [_make_chunk(chunk_id="stale#art1", text="旧内容")]
-    with open(lexical._ARTICLE_INDEX_PKL, "wb") as f:
+    from lvyan.retrieval.lexical import ARTICLE_INDEX_SCHEMA_VERSION
+
+    with open(manifests_dir / "article_index_v2.pkl", "wb") as f:
         pickle.dump(
-            {"schema_version": lexical.ARTICLE_INDEX_SCHEMA_VERSION, "chunks": stale_chunks},
+            {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": stale_chunks},
             f,
         )
 
-    # 确保没有 manifest（或 manifest 不一致）→ cache_trusted=False
-    manifest_path = manifests_dir / "corpus_manifest.json"
-    if manifest_path.exists():
-        manifest_path.unlink()
+    result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
+    assert result["consistent"] is False
+    assert result["reason"] == "article_index_signature_mismatch"
 
-    # mock build_article_index 返回新 chunks
-    rebuilt_chunks = [_make_chunk(chunk_id="fresh#art1", text="新内容")]
-    call_count = {"build": 0}
 
-    def _fake_build():
-        call_count["build"] += 1
-        return rebuilt_chunks
+def test_bm25_index_missing(tmp_path):
+    """article_index 存在但 bm25_index.pkl 缺失 → bm25_index_missing。"""
+    import pickle
 
-    # 重置全局缓存
-    monkeypatch.setattr(lexical, "_GLOBAL_CHUNKS_CACHE", None)
-    # mock build_article_index（在函数内部 lazy import）
-    import lvyan.scripts.ingest_laws as ingest_mod
+    lawtext = _make_lawtext_dir(tmp_path)
+    chunks = [_make_chunk()]
+    manifests_dir = tmp_path / "manifests"
+    _write_full_index_set(chunks, lawtext, manifests_dir)
 
-    monkeypatch.setattr(ingest_mod, "build_article_index", _fake_build)
-    # mock save_index_json 避免写文件
-    monkeypatch.setattr(ingest_mod, "save_index_json", lambda *a, **kw: None)
+    (manifests_dir / "bm25_index.pkl").unlink()
 
-    try:
-        result = lexical._load_article_chunks()
-    finally:
-        # 清理测试产生的 pickle
-        if lexical._ARTICLE_INDEX_PKL.exists():
-            lexical._ARTICLE_INDEX_PKL.unlink()
+    result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
+    assert result["consistent"] is False
+    assert result["reason"] == "bm25_index_missing"
 
-    assert call_count["build"] == 1, "manifest 不一致时应调用 build_article_index 重建"
-    assert result is rebuilt_chunks, "应返回重建的 chunks 而非陈旧缓存"
+
+def test_bm25_signature_mismatch(tmp_path):
+    """磁盘 bm25_index.pkl 的 signature 与 manifest 不匹配 → bm25_signature_mismatch。"""
+    import pickle
+
+    from lvyan.retrieval.lexical import _build_bm25_index, _serialize_bm25_index
+
+    lawtext = _make_lawtext_dir(tmp_path)
+    chunks = [_make_chunk(text="第一条 内容")]
+    manifests_dir = tmp_path / "manifests"
+    _write_full_index_set(chunks, lawtext, manifests_dir)
+
+    # 用不同 chunks 构建 BM25（模拟索引与 manifest 错位）
+    stale_chunks = [_make_chunk(chunk_id="stale#art1", text="旧内容")]
+    stale_index = _serialize_bm25_index(_build_bm25_index(stale_chunks))
+    with open(manifests_dir / "bm25_index.pkl", "wb") as f:
+        pickle.dump(stale_index, f)
+
+    result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
+    assert result["consistent"] is False
+    assert result["reason"] == "bm25_signature_mismatch"
 
 
 # ---------------------------------------------------------------------------
-# 11. load_corpus_manifest 缺失/损坏
+# 8. P0-1：TTL 快照缓存
+# ---------------------------------------------------------------------------
+def test_verify_uses_ttl_cache(monkeypatch, tmp_path):
+    """verify_corpus_consistency 默认带 TTL 缓存：TTL 内不重复全库扫描。"""
+    lawtext = _make_lawtext_dir(tmp_path, {"law1.md": "# 测试法\n\n第一条 内容\n"})
+    chunks = [_make_chunk()]
+    manifests_dir = tmp_path / "manifests"
+    _write_full_index_set(chunks, lawtext, manifests_dir)
+
+    # 首次调用 → 缓存 miss → 计算 hash
+    r1 = verify_corpus_consistency(lawtext, manifests_dir)
+    assert r1["consistent"] is True
+
+    # 法库被修改，但 TTL 未过期 → 缓存快照仍返回旧结果（不重新扫描）
+    (lawtext / "law1.md").write_text("# 测试法\n\n第一条 新内容\n", encoding="utf-8")
+    r2 = verify_corpus_consistency(lawtext, manifests_dir)
+    assert r2["consistent"] is True, "TTL 内应返回缓存快照，不重新扫描法库"
+
+    # force=True → 绕过缓存 → 检测到法库变更
+    r3 = verify_corpus_consistency(lawtext, manifests_dir, force=True)
+    assert r3["consistent"] is False
+    assert r3["reason"] == "lawtext_changed"
+
+
+def test_invalidate_cache(tmp_path):
+    """invalidate_corpus_health_cache 后下次校验实时。"""
+    lawtext = _make_lawtext_dir(tmp_path, {"law1.md": "# 测试法\n\n第一条 内容\n"})
+    chunks = [_make_chunk()]
+    manifests_dir = tmp_path / "manifests"
+    _write_full_index_set(chunks, lawtext, manifests_dir)
+
+    verify_corpus_consistency(lawtext, manifests_dir)
+    # 法库变更 + 重建索引三件套 + 清缓存
+    (lawtext / "law1.md").write_text("# 测试法\n\n第一条 新内容\n", encoding="utf-8")
+    _write_full_index_set([_make_chunk(text="第一条 新内容")], lawtext, manifests_dir)
+    invalidate_corpus_health_cache()
+
+    result = verify_corpus_consistency(lawtext, manifests_dir)
+    assert result["consistent"] is True, "清缓存后应使用新索引实时校验"
+
+
+# ---------------------------------------------------------------------------
+# 9. P0-3：rebuild_corpus_indexes 原子重建
+# ---------------------------------------------------------------------------
+def test_rebuild_corpus_indexes_heals_mismatch(tmp_path):
+    """rebuild 应重建索引三件套并重新生成 manifest，最终 consistent=True。"""
+    lawtext = _make_lawtext_dir(tmp_path, {"law1.md": "# 测试法\n\n第一条 内容\n"})
+    manifests_dir = tmp_path / "manifests"
+
+    # 法库存在但无任何索引 → ensure 触发重建
+    result = rebuild_corpus_indexes(lawtext, manifests_dir)
+    assert result["consistent"] is True, f"重建后应一致，实际 reason={result['reason']}"
+
+    # 三件套都应存在
+    assert (manifests_dir / "corpus_manifest.json").is_file()
+    assert (manifests_dir / "article_index_v2.pkl").is_file()
+    assert (manifests_dir / "bm25_index.pkl").is_file()
+
+    # 新 manifest 与磁盘文件一致
+    verify_result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
+    assert verify_result["consistent"] is True
+
+
+def test_rebuild_after_lawtext_change(tmp_path):
+    """法库更新后 rebuild 应重建索引并对齐新法库。"""
+    lawtext = _make_lawtext_dir(tmp_path, {"law1.md": "# 测试法\n\n第一条 内容\n"})
+    manifests_dir = tmp_path / "manifests"
+    rebuild_corpus_indexes(lawtext, manifests_dir)
+    assert verify_corpus_consistency(lawtext, manifests_dir, force=True)["consistent"]
+
+    # 法库更新（新增法条文件）
+    (lawtext / "law2.md").write_text("# 测试法2\n\n第一条 新内容\n", encoding="utf-8")
+
+    # 重建前：不一致
+    before = verify_corpus_consistency(lawtext, manifests_dir, force=True)
+    assert before["consistent"] is False
+    assert before["reason"] == "lawtext_changed"
+
+    # 重建后：一致
+    result = rebuild_corpus_indexes(lawtext, manifests_dir)
+    assert result["consistent"] is True
+    assert verify_corpus_consistency(lawtext, manifests_dir, force=True)["consistent"] is True
+
+
+def test_load_article_chunks_heals_via_ensure_corpus_ready(tmp_path, monkeypatch):
+    """_load_article_chunks 在 manifest 不一致时应通过 ensure_corpus_ready 自愈。
+
+    模拟：法库存在但索引缺失（manifest 缺失）。_load_article_chunks 应触发
+    自动重建，返回真实构建的 chunks，而非空缓存。
+    """
+    import lvyan.config as cfg_mod
+    from lvyan.retrieval import lexical
+
+    # 构造临时法库，patch config 让 manifest 校验/重建都指向隔离目录。
+    # manifests_dir 由 AGENT_DIR / "knowledge" / "manifests" 推导。
+    lawtext = _make_lawtext_dir(tmp_path, {"law1.md": "# 测试法\n\n第一条 内容\n"})
+    manifests_dir = tmp_path / "knowledge" / "manifests"
+    monkeypatch.setattr(cfg_mod, "LAWTEXT_DIR", lawtext)
+    monkeypatch.setattr(cfg_mod, "AGENT_DIR", tmp_path)
+
+    # rebuild 内部依赖 lexical._ARTICLE_INDEX_* 常量（在 import 时基于 AGENT_DIR 固化），
+    # 需同步 patch 到隔离路径
+    monkeypatch.setattr(lexical, "_ARTICLE_INDEX_FILE", manifests_dir / "article_index_v2.json")
+    monkeypatch.setattr(lexical, "_ARTICLE_INDEX_PKL", manifests_dir / "article_index_v2.pkl")
+    monkeypatch.setattr(lexical, "_BM25_INDEX_FILE", manifests_dir / "bm25_index.json")
+    monkeypatch.setattr(lexical, "_BM25_INDEX_PKL", manifests_dir / "bm25_index.pkl")
+    monkeypatch.setattr(lexical, "_GLOBAL_CHUNKS_CACHE", None)
+    # 确保 manifest 模块的路径常量也指向隔离目录
+    import lvyan.retrieval.manifest as manifest_mod
+
+    monkeypatch.setattr(manifest_mod, "LAWTEXT_DIR", lawtext)
+    monkeypatch.setattr(manifest_mod, "AGENT_DIR", tmp_path)
+
+    try:
+        result = lexical._load_article_chunks()
+        assert isinstance(result, list)
+        # 自愈后应成功加载真实 chunks（非空，因为法库有内容）
+        assert len(result) >= 1
+        # 隔离目录应已生成三件套
+        assert (manifests_dir / "corpus_manifest.json").is_file()
+        assert (manifests_dir / "article_index_v2.pkl").is_file()
+        assert (manifests_dir / "bm25_index.pkl").is_file()
+    finally:
+        invalidate_corpus_health_cache()
+        # 恢复 lexical 的路径常量（避免影响后续测试）
+        monkeypatch.undo()
+
+
+# ---------------------------------------------------------------------------
+# 10. load_corpus_manifest 缺失/损坏
 # ---------------------------------------------------------------------------
 def test_load_manifest_returns_none_when_missing(tmp_path):
     assert load_corpus_manifest(tmp_path / "nonexistent") is None

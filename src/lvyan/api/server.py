@@ -337,41 +337,41 @@ def _legal_corpus_status() -> dict[str, Any]:
     }
     # 尽力统计规模；缓存缺失或读取异常不阻断就绪检查
     try:
+        # P0-B：仅当法库可用时才校验 manifest 一致性（法库不可用时直接
+        # 判定 curated_only，避免从 TTL 缓存读到 stale 快照误覆盖 mode）。
         if available:
             info["documents"] = sum(1 for _ in LAWTEXT_DIR.rglob("*.md"))
 
-        # P0-B：优先读 manifest 获取一致性状态与规模
-        from lvyan.retrieval.manifest import verify_corpus_consistency
+            from lvyan.retrieval.manifest import verify_corpus_consistency
 
-        check = verify_corpus_consistency()
-        info["index_consistent"] = check["consistent"]
-        info["index_mismatch_reason"] = check["reason"]
-        info["corpus_hash"] = check["current_corpus_hash"]
-        if check["manifest"] is not None:
-            info["chunks"] = int(check["manifest"].get("chunks_count", 0)) or None
-            # 法库已变更但 manifest 记录了旧规模 —— 以 manifest 为准披露
-            if check["consistent"]:
-                info["mode"] = "official_full"
+            check = verify_corpus_consistency()
+            info["index_consistent"] = check["consistent"]
+            info["index_mismatch_reason"] = check["reason"]
+            info["corpus_hash"] = check["current_corpus_hash"]
+            if check["manifest"] is not None:
+                info["chunks"] = int(check["manifest"].get("chunks_count", 0)) or None
+                if check["consistent"]:
+                    info["mode"] = "official_full"
+                else:
+                    info["mode"] = "index_mismatch"
             else:
-                info["mode"] = "index_mismatch"
-        else:
-            # manifest 缺失：回退到直接读 article_index 文件（兼容旧部署）
-            pkl = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.pkl"
-            js = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.json"
-            if pkl.is_file():
-                import pickle
+                # manifest 缺失：回退到直接读 article_index 文件（兼容旧部署）
+                pkl = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.pkl"
+                js = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.json"
+                if pkl.is_file():
+                    import pickle
 
-                with open(pkl, "rb") as f:
-                    cached = pickle.load(f)
-                if isinstance(cached, dict) and isinstance(cached.get("chunks"), list):
-                    info["chunks"] = len(cached["chunks"])
-            elif js.is_file():
-                import json
+                    with open(pkl, "rb") as f:
+                        cached = pickle.load(f)
+                    if isinstance(cached, dict) and isinstance(cached.get("chunks"), list):
+                        info["chunks"] = len(cached["chunks"])
+                elif js.is_file():
+                    import json
 
-                with open(js, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-                if isinstance(raw, dict) and isinstance(raw.get("chunks"), list):
-                    info["chunks"] = len(raw["chunks"])
+                    with open(js, "r", encoding="utf-8") as f:
+                        raw = json.load(f)
+                    if isinstance(raw, dict) and isinstance(raw.get("chunks"), list):
+                        info["chunks"] = len(raw["chunks"])
     except Exception:  # noqa: BLE001
         pass
     return info
@@ -1059,11 +1059,16 @@ def create_app(
                     if legal_answer:
                         event["schema_version"] = legal_answer.get("schema_version", "legal_answer_v1")
                         event["answer"] = legal_answer
-                    # P1-A：与 live 路径 _build_final_output_event 保持一致，
-                    # 刷新恢复时也推送 document_file，前端据此渲染下载入口。
+                    # P1-A/P1-1：与 live 路径 _build_final_output_event 保持一致，
+                    # 刷新恢复时也推送 document_file **public 视图**（不含 output_path）。
                     doc_file = durable_run.get("document_file")
-                    if doc_file:
-                        event["document_file"] = doc_file
+                    if doc_file and isinstance(doc_file, dict) and doc_file.get("success"):
+                        event["document_file"] = {
+                            "filename": doc_file.get("filename") or "法律文书.docx",
+                            "format": doc_file.get("format") or "docx",
+                            "file_size": doc_file.get("file_size") or 0,
+                            "download_url": f"/api/documents/{run_id}/download",
+                        }
                     yield format_sse_event(event)
                 elif status == "failed":
                     # W4：与 live 路径 _fail_run 保持一致，包含 code 字段供前端分类
@@ -1512,7 +1517,18 @@ def create_app(
         - ownership 校验：仅 run 的所有者可下载
         - path traversal 防护：文件必须在 AGENT_DIR/outputs 内
         - 不暴露服务器内部路径：FileResponse 使用安全 filename
+        - P1-4：生产环境未启用认证时禁用下载（文书含诉讼材料等敏感信息，
+          不允许匿名访问）
         """
+        # 0. P1-4：生产环境必须启用认证才允许下载文书
+        from lvyan.config import is_production
+
+        if is_production() and not is_auth_enabled():
+            raise HTTPException(
+                status_code=403,
+                detail="生产环境未启用认证，文档下载已禁用；请配置 AUTH_ENABLED=true",
+            )
+
         # 1. 获取 run 记录
         if metadata_store is not None:
             try:
@@ -1557,8 +1573,8 @@ def create_app(
         if not file_path.is_file():
             raise HTTPException(status_code=404, detail="文书文件不存在")
 
-        # 5. 安全下载（不暴露服务器路径）
-        safe_filename = f"{run_id}.docx"
+        # 5. 安全下载（不暴露服务器路径；P2：使用安全文件名，而非 run_id）
+        safe_filename = doc_file.get("filename") or f"{run_id}.docx"
         return FileResponse(
             path=str(file_path),
             filename=safe_filename,

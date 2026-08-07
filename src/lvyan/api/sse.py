@@ -947,13 +947,21 @@ def _build_final_output_event(ctx: "RunContext") -> dict[str, Any]:
     P0-3 去重：不再单独发送 ``markdown_fallback``。``output`` 字段同时承担
     「旧前端 Markdown 来源」与「新前端 fallback 来源」两种角色，避免同一份
     完整 Markdown 在单次 SSE 中被发送两次。
+
+    P1-1：``document_file`` 只暴露 **public 视图**（filename / format / file_size /
+    download_url），绝不包含 ``output_path`` 等服务器内部路径。
     """
     event: dict[str, Any] = {"event": "final_output", "output": ctx.final_output}
     if ctx.legal_answer:
         event["schema_version"] = ctx.legal_answer.get("schema_version", "legal_answer_v1")
         event["answer"] = ctx.legal_answer
-    if ctx.document_file:
-        event["document_file"] = ctx.document_file
+    if ctx.document_file and ctx.document_file.get("success"):
+        event["document_file"] = {
+            "filename": ctx.document_file.get("filename") or "法律文书.docx",
+            "format": ctx.document_file.get("format") or "docx",
+            "file_size": ctx.document_file.get("file_size") or 0,
+            "download_url": f"/api/documents/{ctx.run_id}/download",
+        }
     return event
 
 

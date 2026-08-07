@@ -54,6 +54,24 @@ def _redact_string_fields(answer: dict[str, Any]) -> dict[str, Any]:
     return _redact_recursive(answer)
 
 
+def _public_filename(payload: dict[str, Any]) -> str:
+    """P2：生成不暴露服务器路径的安全下载文件名。
+
+    优先使用 ``document_payload.filled_fields.title``（如「民事起诉状」），
+    其次用 doc_type，最后回退到通用名。绝不包含 run_id / 内部路径。
+    """
+    from lvyan.nodes.composer import _doc_title
+
+    fields = payload.get("filled_fields") or {}
+    title = str(fields.get("title") or "")
+    if title and title.strip():
+        return f"{title.strip()}.docx"
+    doc_type = str(payload.get("doc_type") or "")
+    if doc_type:
+        return f"{_doc_title(doc_type)}.docx"
+    return "法律文书.docx"
+
+
 def _render_document_file(state: Any) -> dict[str, Any]:
     """P0-1：在 output_guardrail 之后基于最终 final_output 渲染 DOCX。
 
@@ -61,9 +79,10 @@ def _render_document_file(state: Any) -> dict[str, Any]:
     隐私脱敏、HITL 编辑后的 ``final_output`` 调用 ``render_docx`` 落盘。
 
     返回更新字典：
-        - ``final_output``: 追加「文书文件：...」页脚后的最终正文（仅成功时）
-        - ``document_file``: 文件信息 dict（output_path / format / file_size /
-          success / error）；payload 缺失时为 None
+        - ``final_output``: 追加「文书已生成，可通过下方按钮下载」页脚（仅成功时，
+          **不包含服务器物理路径**，避免路径泄露）
+        - ``document_file``: 内部文件信息 dict（output_path / format / file_size /
+          success / error / filename）；payload 缺失时为 None
     """
     payload = _get(state, "document_payload", None)
     final_output = str(_get(state, "final_output", "") or "")
@@ -94,11 +113,13 @@ def _render_document_file(state: Any) -> dict[str, Any]:
             "file_size": result.file_size,
             "success": bool(result.success),
             "error": result.error or None,
+            # P2：安全文件名（供下载端点使用，不暴露 run_id / 物理路径）
+            "filename": _public_filename(payload),
         }
-        # 在正文末尾追加文书文件信息（与原 composer 行为一致，供前端展示下载入口）
+        # P1-2：页脚不再显示服务器物理路径，避免 /app/outputs/... 泄露给浏览器
         if result.success:
             footer = (
-                f"\n\n---\n文书文件：{result.output_path}（格式：{result.format}）"
+                f"\n\n---\n文书已生成，可通过下方按钮下载（格式：{result.format}）。"
             )
             if result.error:
                 footer += f"\n⚠ {result.error}"
@@ -115,6 +136,7 @@ def _render_document_file(state: Any) -> dict[str, Any]:
                 "file_size": 0,
                 "success": False,
                 "error": f"渲染异常：{exc}",
+                "filename": _public_filename(payload),
             }
         }
 
