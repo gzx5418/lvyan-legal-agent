@@ -125,7 +125,7 @@ def missing_fact_assessor(state: CaseState) -> dict[str, Any]:
     路由逻辑在 :mod:`lvyan.graph.routing` 的 :func:`route_after_missing_fact`
     中实现，本节点只需确保 ``missing_facts`` 正确传递/补充。
     """
-    # TODO: 接入 LLM 增强抽取/判断
+    # 当前使用规则引擎做缺失事实评估；可接入 LLM 做语义级增强
     missing_facts = _get(state, "missing_facts", []) or []
     # 已有缺失事实评估时不重复追加，避免 missing_facts 列表出现重复项
     if missing_facts:

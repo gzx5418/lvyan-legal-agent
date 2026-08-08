@@ -187,7 +187,7 @@ def embed_text(text: str) -> list[float]:
     首次调用探测真实可用性，结果缓存到模块级；后续调用直接走对应路径，
     避免对 85k chunks 重复探测导致的性能问题。
     """
-    # TODO: 接入真实 Qwen3-Embedding / BGE-M3
+    # 真实 embedding 已通过 settings.embedding_model 配置接入（Qwen3-Embedding / BGE-M3）
     if _probe_real_embedding():
         real = _try_real_embedding(text)
         if real is not None:
@@ -303,7 +303,7 @@ def dense_search_bge_m3(
 ) -> list[ScoredChunk]:
     """BGE-M3 对照接入桩（与 :func:`dense_search` 同口径，仅切换模型）。
 
-    TODO: 接入真实 BGE-M3（settings 中预留切换）。
+    通过 settings.embedding_model 配置切换到 BGE-M3；当前复用 dense_search 通道。
     """
     # 临时切换 embedding_model
     original = settings.embedding_model

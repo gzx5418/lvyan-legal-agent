@@ -123,7 +123,7 @@ def case_difference_compare(state: CaseState) -> dict[str, Any]:
           回写其 ``case_differences``；否则返回 ``case_differences`` 作为
           顶层字段（由调用方按需合并）。
     """
-    # TODO: 接入 LLM 做语义级差异抽取
+    # 当前使用关键词匹配做差异抽取；可接入 LLM 做语义级增强
     cases = _get(state, "cases", []) or []
     current_case_type = _get(state, "case_type", None)
 

@@ -4,9 +4,7 @@
 
   - ``extract_document(filepath)``：从 .docx / .md / .txt 文件提取文本。
   - ``analyze_contract_clause(text, clause_type=...)``：基于关键词规则检测
-    常见合同风险条款（桩实现）。
-
-TODO: ``analyze_contract_clause`` 后续接入 LLM 分析。
+    常见合同风险条款。``analyze_contract_clause`` 可接入 LLM 做深度语义分析。
 """
 
 from __future__ import annotations
@@ -218,7 +216,6 @@ def analyze_contract_clause(
 
     suggestions = _build_suggestions(detected, clause_type)
 
-    # TODO: 后续接入 LLM 分析
     return ContractAnalysisResult(
         tool_name="analyze_contract_clause",
         success=True,

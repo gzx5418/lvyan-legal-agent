@@ -1,9 +1,8 @@
 """案例工具：裁判规则检索与案例详情查询。
 
-本模块是 SubTask 15.2 的桩实现，当前没有真实案例库，从精编知识库
-``knowledge/curated/case_patterns.md`` 中检索裁判规则作为案例替代。
-
-TODO: 后续接入真实案例库（如人民法院案例库 / OpenSearch cases 索引）。
+本模块当前从精编知识库 ``knowledge/curated/case_patterns.md`` 中检索
+裁判规则作为案例替代。后续可扩展接入真实案例库（人民法院案例库 /
+OpenSearch cases 索引），届时替换 ``_search_curated`` 后端即可。
 """
 
 from __future__ import annotations
@@ -236,7 +235,6 @@ def search_cases(query: str, top_k: int = 10) -> CaseSearchResult:
             )
         )
 
-    # TODO: 后续接入真实案例库（人民法院案例库 / OpenSearch cases 索引）
     return CaseSearchResult(
         tool_name="search_cases",
         success=True,

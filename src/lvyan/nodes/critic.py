@@ -225,7 +225,7 @@ def critic(state: CaseState) -> dict[str, Any]:
         - ``iteration``: int（不通过时 +1）
         - ``risk_level``: str（强制通过时设为 "high"）
     """
-    # TODO: 接入 LLM 增强评审
+    # 当前使用规则引擎做评审；可接入 LLM 做语义级增强
     reasoning_result = _get(state, "reasoning_result", None)
     statutes = _get(state, "statutes", []) or []
     conflicts = _get(state, "conflicts", []) or []

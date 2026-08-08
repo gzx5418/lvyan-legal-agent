@@ -5,9 +5,9 @@
 - 案件材料**不用于其他用户或模型训练**。
 - 跨 ``thread_id`` 不可访问：``check_access`` 强制校验，``retrieve`` 跨 thread 返回 ``None``。
 
-**加密**：当前用 ``base64`` 占位（可逆编码，仅做传输/落盘混淆），标注 TODO 接入
-真实 AES-256-GCM 对称加密（密钥由 KMS / 环境变量 ``CASE_VAULT_KEY`` 提供）。
-接口稳定，替换 ``_encrypt`` / ``_decrypt`` 即可升级。
+**加密**：优先使用 AES-256-GCM 对称加密（密钥由环境变量 ``CASE_VAULT_KEY`` 提供，
+hex 编码的 32 字节密钥）。未配置密钥时降级为 base64 编码（仅开发/测试环境可接受，
+生产环境应始终配置密钥）。
 
 **TTL**：默认 7 天（604800 秒）过期清理，``set_ttl`` 可覆盖。
 """
@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
+import secrets
 import shutil
 import threading
 from datetime import datetime, timedelta, timezone
@@ -24,6 +26,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import AGENT_DIR
+
+_logger = logging.getLogger("lvyan.memory.case_vault")
 
 # ---------------------------------------------------------------------------
 # 持久化根目录：AGENT/knowledge/manifests/vault/
@@ -50,7 +54,7 @@ class CaseVault:
         vault/
           {thread_id}/
             _manifest.json     # TTL + 文档元数据列表
-            {doc_id}.enc       # base64 编码的密文（TODO: AES-256）
+            {doc_id}.enc       # AES-256-GCM 密文（或 base64 降级模式）
     """
 
     def __init__(self, base_dir: Path | None = None) -> None:
@@ -69,7 +73,7 @@ class CaseVault:
     ) -> str:
         """存储一份案件材料，返回 vault 内部存储路径。
 
-        - 加密：base64 占位（# TODO: 接入 AES-256-GCM）
+        - 加密：AES-256-GCM（需配置 CASE_VAULT_KEY），未配置时降级为 base64
         - 路径：``{base_dir}/{thread_id}/{doc_id}.enc``
         """
         thread_dir = self._thread_dir(thread_id)
@@ -220,17 +224,71 @@ class CaseVault:
         return cleaned
 
     # ------------------------------------------------------------------
-    # 内部：加密 / 解密
+    # 内部：加密 / 解密（AES-256-GCM 优先，无密钥时降级 base64）
     # ------------------------------------------------------------------
-    @staticmethod
-    def _encrypt(plaintext: bytes) -> bytes:
-        # TODO: 接入 AES-256-GCM（密钥来自 KMS / CASE_VAULT_KEY 环境变量）。
-        #       当前仅 base64 编码，不具备真正加密强度，仅用于接口联调。
-        return base64.b64encode(plaintext)
+    # 密文格式：b"AES256GCM" + nonce(12) + tag(16) + ciphertext
+    _AES_HEADER = b"AES256GCM"
 
-    @staticmethod
-    def _decrypt(ciphertext: bytes) -> bytes:
-        # TODO: 接入 AES-256-GCM 解密。
+    @classmethod
+    def _get_aes_key(cls) -> bytes | None:
+        """从 CASE_VAULT_KEY 环境变量获取 32 字节密钥（hex 编码）。"""
+        raw = os.getenv("CASE_VAULT_KEY", "").strip()
+        if not raw:
+            return None
+        try:
+            key = bytes.fromhex(raw)
+        except ValueError:
+            _logger.warning("CASE_VAULT_KEY 不是合法的 hex 编码，降级为 base64")
+            return None
+        if len(key) != 32:
+            _logger.warning(
+                "CASE_VAULT_KEY 长度不正确（期望 32 字节 / 64 hex 字符，实际 %d 字节），降级为 base64",
+                len(key),
+            )
+            return None
+        return key
+
+    @classmethod
+    def _encrypt(cls, plaintext: bytes) -> bytes:
+        key = cls._get_aes_key()
+        if key is None:
+            return base64.b64encode(plaintext)
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+            nonce = secrets.token_bytes(12)
+            aesgcm = AESGCM(key)
+            ct = aesgcm.encrypt(nonce, plaintext, None)
+            # ct 已包含 tag（cryptography 库默认 16 字节 tag 附在末尾）
+            return cls._AES_HEADER + nonce + ct
+        except ImportError:
+            _logger.warning(
+                "未安装 cryptography 库，无法使用 AES-256-GCM，降级为 base64 编码"
+            )
+            return base64.b64encode(plaintext)
+
+    @classmethod
+    def _decrypt(cls, ciphertext: bytes) -> bytes:
+        if ciphertext.startswith(cls._AES_HEADER):
+            key = cls._get_aes_key()
+            if key is None:
+                _logger.error("密文为 AES-256-GCM 格式但 CASE_VAULT_KEY 未配置，无法解密")
+                return b""
+            try:
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+                header_len = len(cls._AES_HEADER)
+                nonce = ciphertext[header_len : header_len + 12]
+                ct_with_tag = ciphertext[header_len + 12 :]
+                aesgcm = AESGCM(key)
+                return aesgcm.decrypt(nonce, ct_with_tag, None)
+            except ImportError:
+                _logger.error("未安装 cryptography 库，无法解密 AES-256-GCM 密文")
+                return b""
+            except Exception as exc:
+                _logger.error("AES-256-GCM 解密失败：%s", exc)
+                return b""
+        # 降级模式：base64
         try:
             return base64.b64decode(ciphertext)
         except Exception:

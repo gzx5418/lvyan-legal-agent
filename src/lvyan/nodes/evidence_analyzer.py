@@ -140,7 +140,7 @@ def evidence_analyzer(state: CaseState) -> dict[str, Any]:
     返回更新字典（追加语义）：
         - ``evidence_requirements``: list[EvidenceRequirement]
     """
-    # TODO: 接入 LLM 增强证据缺口判断
+    # 当前使用规则引擎做证据缺口判断；可接入 LLM 做语义级增强
     case_type = _get(state, "case_type", None)
     facts = _get(state, "facts", []) or []
 
@@ -370,7 +370,7 @@ def authority_resolver(state: CaseState) -> dict[str, Any]:
           直接消费）
         - ``conflicts``: list[AuthorityConflict]（追加语义）
     """
-    # TODO: 接入 LLM 增强权威解析
+    # 当前使用规则引擎做权威解析；可接入 LLM 做语义级增强
     statutes = _get(state, "statutes", []) or []
 
     # --- 去重 ---

@@ -24,8 +24,16 @@ from pydantic import BaseModel, Field
 def _load_dotenv() -> None:
     """从 AGENT/.env 加载环境变量（不覆盖已有值）。
 
-    支持 ``KEY=VALUE`` 格式，忽略注释行（#开头）和空行。
-    值两侧的引号会被去除。
+    支持格式::
+
+        KEY=VALUE
+        KEY="VALUE"         # 双引号包裹
+        KEY='VALUE'         # 单引号包裹
+        KEY=VALUE  # 行内注释（未加引号时）
+        export KEY=VALUE    # 兼容 shell export 前缀
+
+    忽略注释行（# 开头）和空行。值两侧的引号会被去除。
+    引号内的 ``#`` 不视为注释。
     """
     env_path = AGENT_DIR / ".env"
     if not env_path.is_file():
@@ -36,14 +44,23 @@ def _load_dotenv() -> None:
             continue
         if "=" not in line:
             continue
+        # 兼容 export 前缀
+        if line.startswith("export "):
+            line = line[7:].strip()
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip()
         # 去除值两侧引号
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            # 引号内内容原样保留（# 不视为注释）
             value = value[1:-1]
+        else:
+            # 未加引号时去除行内注释（# 后面的内容）
+            comment_idx = value.find(" #")
+            if comment_idx >= 0:
+                value = value[:comment_idx].rstrip()
         # 不覆盖已有环境变量
-        if key not in os.environ:
+        if key and key not in os.environ:
             os.environ[key] = value
 
 

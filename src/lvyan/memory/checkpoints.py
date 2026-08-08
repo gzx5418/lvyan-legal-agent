@@ -50,7 +50,8 @@ class ShortTermMemory:
         """保存状态到 ``{base_dir}/{thread_id}.json``。
 
         会同步写盘（``fsync``）以保证中断后可恢复。
-        # TODO: 接入 PostgreSQL checkpoint（LangGraph AsyncPostgresSaver）
+        注：PostgreSQL checkpoint 已通过 ``build_graph_with_postgres`` 接入
+        （详见 ``graph/builder.py``），本文件系统桩用于无 PG 的开发/测试环境。
         """
         path = self._path_of(thread_id)
         payload = state.model_dump(mode="json")

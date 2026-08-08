@@ -130,7 +130,7 @@ def rerank(
         full = f"{title} {article_number} {article_text}".strip()
         candidate_texts.append(full)
 
-    # TODO: 接入真实 Qwen3-Reranker
+    # 优先使用真实 Reranker（Qwen3-Reranker 等），不可用时降级为 Jaccard 桩
     real_scores = _try_real_rerank_score(query, candidate_texts)
     if real_scores is not None and len(real_scores) == len(candidates):
         scores = real_scores

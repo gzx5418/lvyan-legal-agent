@@ -158,7 +158,7 @@ def jurisdiction_triage(state: CaseState) -> dict[str, Any]:
         - ``risk_level``: low / medium / high
         - ``missing_facts``: 涉外案件追加非阻断风险提示
     """
-    # TODO: 接入 LLM 增强抽取/判断
+    # 当前使用关键词规则做分流判断；可接入 LLM 做语义级增强
     user_goal = _get(state, "user_goal", "") or ""
 
     # --- 管辖判断 ---

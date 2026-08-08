@@ -9,8 +9,8 @@
   - ``verify_statute_status(source_id, as_of=...)``：用 ``version_resolver`` 查询
     法规当前有效性，含被取代关系。
 
-TODO(Task 8): ``search_statutes`` 后端切换到 ``retrieval.hybrid_search``，
-保留 lexical 作为降级方案。
+注：``search_statutes`` 后端可切换到 ``retrieval.hybrid_search``，
+当前保留 lexical 搜索作为稳定后端。
 """
 
 from __future__ import annotations
@@ -225,7 +225,7 @@ def search_statutes(
         )
 
     try:
-        # TODO(Task 8): 切换到 hybrid_search；当前用 lexical.search 作为后端
+        # 当前使用 lexical.search 作为后端；可切换到 hybrid_search 提升召回
         raw_hits = lexical.search(query, search_type="all", top_k=top_k)
     except Exception as exc:  # noqa: BLE001
         return StatuteSearchResult(

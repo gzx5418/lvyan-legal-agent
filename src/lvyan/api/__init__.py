@@ -11,8 +11,9 @@ from .models import (
     HealthResponse,
     NodeTrace,
 )
+from .run_context import RunContext
 from .server import app, create_app
-from .sse import RunContext, RunManager, format_sse_event
+from .sse import RunManager, format_sse_event
 
 __all__ = [
     "AgentRunRequest",
