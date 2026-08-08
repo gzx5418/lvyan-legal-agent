@@ -9,6 +9,7 @@
   一次修复重试，返回 ``BaseModel`` 实例（P3-21）。
 - 自动调用 :func:`lvyan.observability.tracing.record_llm_call` 上报成本与 Langfuse。
 - ``llm_available``：快速判断网关是否配置，供调用方决定是否走 LLM 路径。
+- 内置指数退避重试（瞬时网络抖动 / 429 限流 / 502-504 网关异常自动重试）。
 
 降级策略
 --------
@@ -34,19 +35,53 @@ T = TypeVar("T", bound=BaseModel)
 # 模块级 httpx client 缓存
 _HTTP_CLIENT: Any = None
 
+# 重试配置
+_MAX_RETRIES: int = 3
+_RETRY_BASE_DELAY: float = 0.5
+_RETRY_MAX_DELAY: float = 8.0
+_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 502, 503, 504})
+
 
 def _get_http_client() -> Any:
-    """获取或创建模块级 httpx.Client。"""
+    """获取或创建模块级 httpx.Client（含连接池限制）。"""
     global _HTTP_CLIENT
     if _HTTP_CLIENT is not None:
         return _HTTP_CLIENT
     try:
         import httpx  # type: ignore[import-untyped]
 
-        _HTTP_CLIENT = httpx.Client(timeout=60.0)
+        _HTTP_CLIENT = httpx.Client(
+            timeout=60.0,
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=30.0,
+            ),
+        )
     except ImportError:
         _logger.debug("httpx 未安装，LLM 调用不可用")
     return _HTTP_CLIENT
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """判断异常是否可重试（网络抖动 / 限流 / 网关异常）。"""
+    try:
+        import httpx as _httpx
+    except ImportError:
+        return False
+    if isinstance(exc, (_httpx.ConnectError, _httpx.ReadTimeout, _httpx.WriteTimeout)):
+        return True
+    if isinstance(exc, _httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_STATUS_CODES
+    return False
+
+
+def _retry_delay(attempt: int) -> float:
+    """指数退避延迟（含抖动），attempt 从 0 起。"""
+    import random
+
+    delay = min(_RETRY_BASE_DELAY * (2 ** attempt), _RETRY_MAX_DELAY)
+    return delay * (0.5 + random.random() * 0.5)
 
 
 def llm_available() -> bool:
@@ -125,34 +160,48 @@ def chat(
     used_model = model or settings.chat_model
     prompt_preview = (messages[-1].get("content", "") if messages else "")[:200]
     t0 = time.monotonic()
+    last_exc: Exception | None = None
 
-    try:
-        resp = client.post(
-            f"{gateway.rstrip('/')}/v1/chat/completions",
-            json={
-                "model": used_model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
-            headers=_build_headers(),
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"].strip()
-        latency_ms = (time.monotonic() - t0) * 1000
+    for attempt in range(_MAX_RETRIES):
+        try:
+            resp = client.post(
+                f"{gateway.rstrip('/')}/v1/chat/completions",
+                json={
+                    "model": used_model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                headers=_build_headers(),
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"].strip()
+            latency_ms = (time.monotonic() - t0) * 1000
 
-        # 提取 token 用量
-        usage = data.get("usage", {})
-        tokens_in = usage.get("prompt_tokens", 0)
-        tokens_out = usage.get("completion_tokens", 0)
+            usage = data.get("usage", {})
+            tokens_in = usage.get("prompt_tokens", 0)
+            tokens_out = usage.get("completion_tokens", 0)
 
-        _record_call(used_model, prompt_preview, content[:200], latency_ms, tokens_in, tokens_out)
-        return content if content else None
-    except Exception as exc:  # noqa: BLE001
-        _logger.debug("LLM chat 调用失败 (model=%s): %s", used_model, exc)
-        return None
+            _record_call(
+                used_model, prompt_preview, content[:200], latency_ms, tokens_in, tokens_out
+            )
+            return content if content else None
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
+                delay = _retry_delay(attempt)
+                _logger.debug(
+                    "LLM chat 可重试异常 (attempt=%d, model=%s, delay=%.1fs): %s",
+                    attempt + 1, used_model, delay, exc,
+                )
+                time.sleep(delay)
+                continue
+            break
+
+    _logger.debug("LLM chat 调用失败 (model=%s, attempts=%d): %s", used_model, _MAX_RETRIES, last_exc)
+    return None
 
 
 def _strip_json_fences(text: str) -> str:
@@ -228,44 +277,60 @@ def chat_json(
     used_model = model or settings.chat_model
     prompt_preview = (messages[-1].get("content", "") if messages else "")[:200]
     t0 = time.monotonic()
+    last_exc: Exception | None = None
 
-    try:
-        payload: dict[str, Any] = {
-            "model": used_model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"},
-        }
-        resp = client.post(
-            f"{gateway.rstrip('/')}/v1/chat/completions",
-            json=payload,
-            headers=_build_headers(),
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"].strip()
-        latency_ms = (time.monotonic() - t0) * 1000
+    for attempt in range(_MAX_RETRIES):
+        try:
+            payload: dict[str, Any] = {
+                "model": used_model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+            }
+            resp = client.post(
+                f"{gateway.rstrip('/')}/v1/chat/completions",
+                json=payload,
+                headers=_build_headers(),
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"].strip()
+            latency_ms = (time.monotonic() - t0) * 1000
 
-        usage = data.get("usage", {})
-        tokens_in = usage.get("prompt_tokens", 0)
-        tokens_out = usage.get("completion_tokens", 0)
-        _record_call(used_model, prompt_preview, content[:200], latency_ms, tokens_in, tokens_out)
+            usage = data.get("usage", {})
+            tokens_in = usage.get("prompt_tokens", 0)
+            tokens_out = usage.get("completion_tokens", 0)
+            _record_call(
+                used_model, prompt_preview, content[:200], latency_ms, tokens_in, tokens_out
+            )
 
-        # 解析 JSON
-        json_str = _extract_json_object(content)
-        if json_str is None:
-            _logger.warning("LLM JSON 输出无法提取对象: %s", content[:200])
-            return None
-        result = json.loads(json_str)
-        if not isinstance(result, dict):
-            _logger.warning("LLM JSON 输出不是 dict: %s", type(result))
-            return None
-        return result
-    except Exception as exc:  # noqa: BLE001
-        _logger.debug("LLM chat_json 调用失败 (model=%s): %s", used_model, exc)
-        return None
+            json_str = _extract_json_object(content)
+            if json_str is None:
+                _logger.warning("LLM JSON 输出无法提取对象: %s", content[:200])
+                return None
+            result = json.loads(json_str)
+            if not isinstance(result, dict):
+                _logger.warning("LLM JSON 输出不是 dict: %s", type(result))
+                return None
+            return result
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
+                delay = _retry_delay(attempt)
+                _logger.debug(
+                    "LLM chat_json 可重试异常 (attempt=%d, model=%s, delay=%.1fs): %s",
+                    attempt + 1, used_model, delay, exc,
+                )
+                time.sleep(delay)
+                continue
+            break
+
+    _logger.debug(
+        "LLM chat_json 调用失败 (model=%s, attempts=%d): %s", used_model, _MAX_RETRIES, last_exc
+    )
+    return None
 
 
 def chat_structured(

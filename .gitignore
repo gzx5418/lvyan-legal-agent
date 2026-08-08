@@ -46,6 +46,11 @@ Thumbs.db
 *.log
 tmp/
 
+# 调试与临时报告（运行时生成，不入库）
+debug_*.py
+*_report.md
+!README.md
+
 # 用户上传的文件（运行时生成，不入库）
 data/uploads/
 # CaseMemory 会话索引（运行时生成，不入库）

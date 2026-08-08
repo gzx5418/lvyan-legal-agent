@@ -51,6 +51,7 @@ from lvyan.config import (
     is_official_law_db_required,
     settings,
 )
+from lvyan.api.rate_limit import RateLimitMiddleware
 from lvyan.memory.store import CaseMemory
 from lvyan.memory.case_workspace import (
     CaseWorkspaceStore,
@@ -843,6 +844,9 @@ def create_app(
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Authorization", "X-User-ID"],
     )
+
+    # P1-4：基于滑动窗口的速率限制（防止未认证场景下的资源滥用）
+    app.add_middleware(RateLimitMiddleware)
 
     # W11：安全响应头中间件，防止 MIME 嗅探 / 点击劫持 / 协议降级
     @app.middleware("http")
