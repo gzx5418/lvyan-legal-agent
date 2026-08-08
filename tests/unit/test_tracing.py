@@ -194,8 +194,12 @@ def test_record_llm_call_no_op_without_langfuse(monkeypatch):
     monkeypatch.setattr(tracing, "_langfuse_client", None, raising=False)
     # 不应抛出
     record_llm_call(
-        model="qwen", prompt="你好", response="你好",
-        tokens_in=10, tokens_out=5, cost=0.001,
+        model="qwen",
+        prompt="你好",
+        response="你好",
+        tokens_in=10,
+        tokens_out=5,
+        cost=0.001,
     )
 
 
@@ -217,12 +221,20 @@ def test_record_llm_call_tracks_cost(monkeypatch):
     tracing.set_cost_thread("cost-test-thread")
     try:
         record_llm_call(
-            model="qwen", prompt="p", response="r",
-            tokens_in=100, tokens_out=20, cost=0.02,
+            model="qwen",
+            prompt="p",
+            response="r",
+            tokens_in=100,
+            tokens_out=20,
+            cost=0.02,
         )
         record_llm_call(
-            model="qwen", prompt="p2", response="r2",
-            tokens_in=50, tokens_out=10, cost=0.01,
+            model="qwen",
+            prompt="p2",
+            response="r2",
+            tokens_in=50,
+            tokens_out=10,
+            cost=0.01,
         )
     finally:
         tracing.set_cost_thread(None)

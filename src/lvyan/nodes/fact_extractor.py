@@ -51,21 +51,73 @@ _TIME_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 # 当事人关键词
 _PARTY_KEYWORDS: tuple[str, ...] = (
-    "我", "公司", "房东", "租客", "对方", "老板", "用人单位",
-    "雇主", "雇员", "甲方", "乙方", "原告", "被告", "丈夫", "妻子",
+    "我",
+    "公司",
+    "房东",
+    "租客",
+    "对方",
+    "老板",
+    "用人单位",
+    "雇主",
+    "雇员",
+    "甲方",
+    "乙方",
+    "原告",
+    "被告",
+    "丈夫",
+    "妻子",
 )
 
 # 行为关键词
 _ACTION_KEYWORDS: tuple[str, ...] = (
-    "辞退", "解除", "违约", "赔偿", "受伤", "签订",
-    "入职", "离职", "欠款", "拖欠", "解雇", "开除", "解约",
-    "起诉", "仲裁", "调解",
+    "辞退",
+    "解除",
+    "违约",
+    "赔偿",
+    "受伤",
+    "签订",
+    "入职",
+    "离职",
+    "欠款",
+    "拖欠",
+    "解雇",
+    "开除",
+    "解约",
+    "起诉",
+    "仲裁",
+    "调解",
 )
 
 # 各案由的应收集事实清单：(fact_key, question, reason, is_blocking)
 # is_blocking 全部为 False：不阻断主流程，让 composer 输出基于现有信息的法律分析，
 # 同时在末尾提示用户补充关键事实以获得更精确的结论。
 _REQUIRED_FACTS_BY_CASE_TYPE: dict[str, list[tuple[str, str, str, bool]]] = {
+    "工伤认定": [
+        (
+            "labor_relationship",
+            "您与用人单位是否存在劳动关系（劳动合同、工资流水、社保、工牌或考勤等）？",
+            "劳动关系是申请工伤认定的前提；并非必须以书面劳动合同作为唯一证明。",
+            False,
+        ),
+        (
+            "commute_time_route",
+            "事故发生时是否正处于上下班的合理时间、合理路线（从何处到何处、是否有绕行）？",
+            "《工伤保险条例》第十四条第（六）项要求属于上下班途中。",
+            False,
+        ),
+        (
+            "traffic_responsibility",
+            "交警出具的道路交通事故责任认定书如何划分责任（无责、次责、同责、主责或全责）？",
+            "通勤交通事故是否属于工伤，关键在于是否为本人非主要责任。",
+            False,
+        ),
+        (
+            "injury_and_treatment",
+            "是否受伤并已就医？请补充诊断证明、病历或住院记录。",
+            "医疗材料用于证明事故伤害事实，并作为工伤认定申请材料。",
+            False,
+        ),
+    ],
     "劳动争议": [
         (
             "labor_contract",
@@ -152,6 +204,19 @@ _REQUIRED_FACTS_BY_CASE_TYPE: dict[str, list[tuple[str, str, str, bool]]] = {
 
 # fact_key → 已提及检测关键词（用于判断事实是否已出现在已有 facts 中）
 _FACT_KEY_HINTS: dict[str, tuple[str, ...]] = {
+    "labor_relationship": (
+        "劳动关系",
+        "劳动合同",
+        "入职",
+        "给公司工作",
+        "工资",
+        "社保",
+        "工牌",
+        "考勤",
+    ),
+    "commute_time_route": ("上班", "下班", "上下班", "通勤", "途中", "路线", "住址", "工作地点"),
+    "traffic_responsibility": ("责任认定", "主责", "全责", "次责", "同责", "无责", "交警"),
+    "injury_and_treatment": ("受伤", "就医", "医院", "诊断", "病历", "住院"),
     "labor_contract": ("劳动合同", "签合同", "合同"),
     "employment_duration": ("入职", "在职", "工作多久", "工作年限"),
     "salary_payment": ("工资", "银行", "转账", "现金"),
@@ -218,8 +283,7 @@ def _extract_times(text: str) -> list[tuple[str, int]]:
         for m in pattern.finditer(text):
             # 检查是否与已匹配范围重叠
             overlaps = any(
-                not (m.end() <= start or m.start() >= end)
-                for start, end in matched_ranges
+                not (m.end() <= start or m.start() >= end) for start, end in matched_ranges
             )
             if overlaps:
                 continue
@@ -272,7 +336,7 @@ def _build_timeline(text: str) -> list[TimelineEvent]:
     events: list[TimelineEvent] = []
     for time_str, start_pos in _extract_times(text):
         # 取时间之后到下一个标点之间的文本作为描述片段
-        after = text[start_pos + len(time_str):]
+        after = text[start_pos + len(time_str) :]
         segment_parts: list[str] = []
         for ch in after:
             if ch in "，。、,.;；！!？?":
@@ -312,9 +376,7 @@ def _fact_already_mentioned(fact_key: str, text: str) -> bool:
     return any(h in text for h in hints)
 
 
-def _assess_missing_facts(
-    case_type: str | None, facts: list[Fact]
-) -> list[MissingFact]:
+def _assess_missing_facts(case_type: str | None, facts: list[Fact]) -> list[MissingFact]:
     """根据案由评估缺失事实。
 
     对每个案由预设的关键事实清单，检查已有 facts 是否已提及；
@@ -325,9 +387,7 @@ def _assess_missing_facts(
 
     required = _REQUIRED_FACTS_BY_CASE_TYPE[case_type]
     # 把已有 facts 的 content 拼接成文本用于命中检查（兼容 Fact 对象与 dict）
-    existing_text = " ".join(
-        str(_get(f, "content", "")) for f in (facts or [])
-    )
+    existing_text = " ".join(str(_get(f, "content", "")) for f in (facts or []))
 
     missing: list[MissingFact] = []
     for fact_key, question, reason, is_blocking in required:
@@ -371,8 +431,7 @@ def _try_llm_extract_facts(
         f"\n此前对话摘要：\n{conversation_summary}\n" if conversation_summary.strip() else ""
     )
     system_prompt = (
-        "你是法律事实抽取助手。从用户描述中抽取结构化事实与时间线。"
-        "只输出 JSON，不要解释。"
+        "你是法律事实抽取助手。从用户描述中抽取结构化事实与时间线。只输出 JSON，不要解释。"
     )
     user_prompt = (
         f"{case_hint}\n用户描述：{user_goal}\n{context_block}{history_block}\n"

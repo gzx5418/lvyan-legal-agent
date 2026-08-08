@@ -239,9 +239,7 @@ def _compute_citation_metrics(
     return total, valid, fabricated, accuracy, fab_rate
 
 
-def _compute_case_number_metrics(
-    text: str, known_case_numbers: set[str]
-) -> tuple[int, int, float]:
+def _compute_case_number_metrics(text: str, known_case_numbers: set[str]) -> tuple[int, int, float]:
     """计算案号虚构指标。
 
     Args:
@@ -272,9 +270,7 @@ def _compute_coverage(golden_items: list[str], actual_items: list[str]) -> float
     return covered / len(golden_items)
 
 
-def _is_overconfident(
-    actual_tendency: str, golden_tendency_cn: str
-) -> bool:
+def _is_overconfident(actual_tendency: str, golden_tendency_cn: str) -> bool:
     """判断是否过度确定：实际乐观但金标应为胶着/较不利。"""
     golden_enum = TENDENCY_CN_TO_ENUM.get(golden_tendency_cn, "")
     if not golden_enum:
@@ -316,16 +312,12 @@ def evaluate_answer(
 
     # 法条引用指标
     citation_report = validate_citations(reasoning_result, statutes)
-    total, valid, fabricated, accuracy, fab_rate = _compute_citation_metrics(
-        citation_report
-    )
+    total, valid, fabricated, accuracy, fab_rate = _compute_citation_metrics(citation_report)
 
     # 案号指标
     text = _reasoning_text(reasoning_result)
     known_case_numbers = _get_case_numbers_from_state(state)
-    total_cn, fab_cn, cn_fab_rate = _compute_case_number_metrics(
-        text, known_case_numbers
-    )
+    total_cn, fab_cn, cn_fab_rate = _compute_case_number_metrics(text, known_case_numbers)
 
     has_golden = bool(answer_golden)
     result = AnswerEvalResult(
@@ -351,16 +343,12 @@ def evaluate_answer(
     actual_issues: list[str] = [
         str(x) for x in (_get(reasoning_result, "disputed_focus", []) or [])
     ]
-    result.disputed_issue_coverage = round(
-        _compute_coverage(golden_issues, actual_issues), 4
-    )
+    result.disputed_issue_coverage = round(_compute_coverage(golden_issues, actual_issues), 4)
 
     # 证据缺口召回率
     golden_gaps = answer_golden.get("evidence_gaps", []) or []
     actual_gaps = _get_evidence_gap_phrases(state)
-    result.evidence_gap_recall = round(
-        _compute_coverage(golden_gaps, actual_gaps), 4
-    )
+    result.evidence_gap_recall = round(_compute_coverage(golden_gaps, actual_gaps), 4)
 
     # 反方论点覆盖率
     golden_defendant = answer_golden.get("defendant_arguments", []) or []
@@ -444,15 +432,11 @@ def evaluate_answer_batch(
         report.avg_statute_accuracy = round(sum_accuracy / n_citation, 4)
         report.avg_fabrication_rate = round(sum_fab_rate / n_citation, 4)
     if n_case_number > 0:
-        report.avg_case_number_fabrication_rate = round(
-            sum_cn_fab_rate / n_case_number, 4
-        )
+        report.avg_case_number_fabrication_rate = round(sum_cn_fab_rate / n_case_number, 4)
     if n_evaluated > 0:
         report.avg_disputed_issue_coverage = round(sum_issue_cov / n_evaluated, 4)
         report.avg_evidence_gap_recall = round(sum_gap_recall / n_evaluated, 4)
-        report.avg_defendant_argument_coverage = round(
-            sum_defendant_cov / n_evaluated, 4
-        )
+        report.avg_defendant_argument_coverage = round(sum_defendant_cov / n_evaluated, 4)
         report.overconfidence_ratio = round(overconfident_count / n_evaluated, 4)
 
     return report

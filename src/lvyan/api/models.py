@@ -33,7 +33,9 @@ class AgentRunRequest(BaseModel):
         description="会话线程 ID；为空时新生成。仅允许字母、数字、下划线、连字符。",
     )
     complexity: Literal["light", "deep", "document"] | None = Field(
-        default=None, description="输出复杂度档位；为空时默认 light"
+        default=None,
+        deprecated=True,
+        description="已弃用，仅兼容旧客户端；回答形态由当前问题意图判定",
     )
     attachments: list[str] | None = Field(
         default=None,
@@ -128,7 +130,9 @@ class UploadResponse(BaseModel):
     content_type: str
     text_preview: str = Field(default="", description="文本文件前 500 字预览")
     category: str = Field(default="unknown", description="文件类别：text/doc/image/unknown")
-    markdown: str = Field(default="", description="转换后的 Markdown 全文（文本/文档/图片识别结果）")
+    markdown: str = Field(
+        default="", description="转换后的 Markdown 全文（文本/文档/图片识别结果）"
+    )
     char_count: int = Field(default=0, description="Markdown 字符数")
     converter: str = Field(default="none", description="使用的转换器：direct/markitdown/vision")
 

@@ -31,9 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="lvyan",
         description="律言法律智能体 — 命令行运行入口",
     )
-    parser.add_argument(
-        "query", nargs="?", default=None, help="法律问题描述或合同文件文本"
-    )
+    parser.add_argument("query", nargs="?", default=None, help="法律问题描述或合同文件文本")
     parser.add_argument(
         "--mode",
         choices=["light", "deep", "document"],

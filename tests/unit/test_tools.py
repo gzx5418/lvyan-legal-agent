@@ -286,7 +286,9 @@ def test_generate_evidence_checklist_with_obtained_facts():
     """传入已持有证据应标记 obtained=True。"""
     result = generate_evidence_checklist(
         "劳动争议",
-        facts=[{"obtained_evidence": ["劳动合同", "工资流水"]}],  # "工资流水" 模糊匹配 "工资流水/工资条"
+        facts=[
+            {"obtained_evidence": ["劳动合同", "工资流水"]}
+        ],  # "工资流水" 模糊匹配 "工资流水/工资条"
     )
     assert result.success is True
     by_name = {item.name: item for item in result.required_evidence}
@@ -315,7 +317,12 @@ def test_build_case_timeline_sorts_by_date():
     events = [
         {"date": "2024-03-15", "description": "签订合同", "involved_parties": ["甲", "乙"]},
         {"date": "2024-01-10", "description": "初次接触", "involved_parties": ["甲"]},
-        {"date": "2024-06-01", "description": "发生争议", "involved_parties": ["甲", "乙"], "is_key_date": True},
+        {
+            "date": "2024-06-01",
+            "description": "发生争议",
+            "involved_parties": ["甲", "乙"],
+            "is_key_date": True,
+        },
         {"date": "2024-04-20", "description": "交付货物"},
     ]
 

@@ -138,8 +138,7 @@ def rerank(
         # Jaccard 桩
         query_tokens = _tokenize_set(query)
         scores = [
-            _jaccard_similarity(query_tokens, _tokenize_set(text))
-            for text in candidate_texts
+            _jaccard_similarity(query_tokens, _tokenize_set(text)) for text in candidate_texts
         ]
 
     # 用 rerank score 更新 candidates

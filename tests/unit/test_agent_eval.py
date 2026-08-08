@@ -101,7 +101,7 @@ def _make_record(
 # ---------------------------------------------------------------------------
 def test_agent_eval_result_has_all_metric_fields():
     """AgentEvalResult 应含全部 Agent 评测指标字段。"""
-    result = AgentEvalResult(query_id="test_001")
+    AgentEvalResult(query_id="test_001")
     required_fields = {
         "query_id",
         "tool_selection_accuracy",
@@ -127,7 +127,7 @@ def test_agent_eval_result_has_all_metric_fields():
 
 def test_agent_eval_report_has_all_metric_fields():
     """AgentEvalReport 应含全部聚合指标字段。"""
-    report = AgentEvalReport()
+    AgentEvalReport()
     required_fields = {
         "total_runs",
         "avg_tool_selection_accuracy",
@@ -157,7 +157,7 @@ def test_tool_call_record_fields():
 
 def test_agent_run_record_fields():
     """AgentRunRecord 应含运行记录全部字段。"""
-    record = AgentRunRecord(query_id="q1")
+    AgentRunRecord(query_id="q1")
     required_fields = {
         "query_id",
         "state",
@@ -198,9 +198,7 @@ def test_tool_selection_accuracy_partial():
 
 def test_tool_selection_accuracy_no_expected():
     """无金标序列 → accuracy=1.0（无约束）。"""
-    accuracy = _compute_tool_selection_accuracy(
-        actual=["search_statutes"], expected=[]
-    )
+    accuracy = _compute_tool_selection_accuracy(actual=["search_statutes"], expected=[])
     assert accuracy == 1.0
 
 

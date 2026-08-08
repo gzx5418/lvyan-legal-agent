@@ -73,9 +73,7 @@ def test_search_statutes_as_of_filter():
     # 验证：不返回 2021 年后才生效的版本（如《民法典》2021-01-01 生效）
     for r in results:
         assert not (
-            "民法典" in r.title
-            and r.effective_date is not None
-            and r.effective_date > cutoff
+            "民法典" in r.title and r.effective_date is not None and r.effective_date > cutoff
         ), f"《民法典》2021 版本不应出现在 as_of={cutoff} 的查询结果中"
 
     # only_effective=True 同时要求 status="effective"
@@ -111,9 +109,7 @@ def test_search_statutes_only_effective():
     )
 
     for r in results:
-        assert r.status != "repealed", (
-            f"only_effective=True 不应返回 repealed 结果：{r.title}"
-        )
+        assert r.status != "repealed", f"only_effective=True 不应返回 repealed 结果：{r.title}"
 
 
 def test_search_statutes_only_effective_includes_repealed_when_disabled():
@@ -209,8 +205,7 @@ def test_verify_statute_status_as_of_before_effective():
 
     result = verify_statute_status(meta.source_id, as_of=as_of)
     assert result.is_effective_as_of is False, (
-        f"as_of={as_of} 早于 effective_date={meta.effective_date}，"
-        f"应判定为无效：{meta.title}"
+        f"as_of={as_of} 早于 effective_date={meta.effective_date}，应判定为无效：{meta.title}"
     )
 
 
@@ -242,8 +237,7 @@ def test_recall_gap_regression_personal_info():
     assert results, "召回漏洞回归：应返回至少一条结果"
 
     has_personal_info = any(
-        "个人信息" in r.article_text or "隐私" in r.article_text
-        for r in results
+        "个人信息" in r.article_text or "隐私" in r.article_text for r in results
     )
     assert has_personal_info, (
         "召回漏洞回归：返回结果中应至少有一条 article_text 含「个人信息」或「隐私」，"

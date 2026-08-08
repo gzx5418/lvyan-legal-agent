@@ -183,9 +183,7 @@ def test_request_cancel_and_is_cancel_requested_with_stub_store():
 
     stub = _StubStore()
     mgr = RunManager(metadata_store=stub)
-    status, _msg = asyncio.new_event_loop().run_until_complete(
-        mgr.cancel_run("run-remote", "u1")
-    )
+    status, _msg = asyncio.new_event_loop().run_until_complete(mgr.cancel_run("run-remote", "u1"))
     assert status == "cancel_requested"
     assert stub.is_cancel_requested("run-remote", "u1") is True
 
@@ -267,9 +265,7 @@ def test_auth_mode_trusted_proxy_rejects_bearer_only(monkeypatch):
     from lvyan.api.auth import get_current_user_id
 
     with pytest.raises(HTTPException) as exc:
-        get_current_user_id(
-            _Req(), x_user_id=None, authorization="Bearer some.jwt.token"
-        )
+        get_current_user_id(_Req(), x_user_id=None, authorization="Bearer some.jwt.token")
     assert exc.value.status_code == 401
 
 
@@ -373,9 +369,7 @@ def test_create_app_production_raises_on_metadata_store_failure(monkeypatch):
 
         create_app()
     # 可能是 PersistenceUnavailable 或 RuntimeError（validate_runtime_config）
-    assert "PersistenceUnavailable" in type(exc.value).__name__ or isinstance(
-        exc.value, Exception
-    )
+    assert "PersistenceUnavailable" in type(exc.value).__name__ or isinstance(exc.value, Exception)
 
 
 # ---------------------------------------------------------------------------
@@ -648,7 +642,6 @@ def test_ensure_schema_creates_version_table_and_skips_applied():
     store.dsn = "postgresql://x"
     store._schema_ready = False
 
-    applied_versions: list[str] = []
     executed_sqls: list[str] = []
 
     class _FakeCursor:
@@ -1003,7 +996,6 @@ def test_resolve_hitl_claim_failure_rolls_back_db():
     def _boom_start(ctx, awaitable):
         raise RuntimeError("event loop closed")
 
-    monkeypatch_setattr = type(mgr)._start_task
     mgr._start_task = _boom_start  # type: ignore
 
     loop = asyncio.new_event_loop()
@@ -1251,7 +1243,6 @@ def test_build_final_output_event_document_file_success_false():
 # ---------------------------------------------------------------------------
 def test_download_disabled_in_production_without_auth(monkeypatch):
     """生产环境 + AUTH_ENABLED=false → 下载端点返回 403。"""
-    import lvyan.api.server as server_mod
 
     # 构造可导入的 app（使用内存/无 DB 的轻量环境）
     from lvyan.api.server import create_app
@@ -1262,12 +1253,8 @@ def test_download_disabled_in_production_without_auth(monkeypatch):
     client = TestClient(app)
 
     # mock is_production=True, is_auth_enabled=False（下载端点函数内 import）
-    monkeypatch.setattr(
-        "lvyan.config.is_production", lambda: True
-    )
-    monkeypatch.setattr(
-        "lvyan.api.auth.is_auth_enabled", lambda: False
-    )
+    monkeypatch.setattr("lvyan.config.is_production", lambda: True)
+    monkeypatch.setattr("lvyan.api.auth.is_auth_enabled", lambda: False)
 
     resp = client.get("/api/documents/any-run/download")
     assert resp.status_code == 403
@@ -1292,3 +1279,54 @@ def test_download_not_blocked_in_dev_without_auth(monkeypatch):
     # 不被 403「生产禁用」拦截即可（后续可能 404/503，取决于 metadata_store）
     assert resp.status_code != 403
     assert "禁用" not in resp.text
+
+
+def test_delete_history_initializes_shared_graph_after_restart(monkeypatch, tmp_path):
+    """元数据已恢复、图尚未初始化时，删除历史也必须可用。"""
+    from fastapi.testclient import TestClient
+
+    from lvyan.api import server as server_mod
+    from lvyan.api.server import create_app
+    from lvyan.memory.store import CaseMemory
+
+    deleted_checkpoint_ids: list[str] = []
+    initialized: list[bool] = []
+    graph_holder = {"graph": None}
+
+    class _Checkpoint:
+        def delete_thread(self, thread_id):
+            deleted_checkpoint_ids.append(thread_id)
+
+    class _Graph:
+        checkpointer = _Checkpoint()
+
+    class _MetadataStore:
+        def get_thread(self, thread_id):
+            return {"thread_id": thread_id, "user_id": "anonymous"}
+
+        def has_active_runs(self, thread_id):
+            return False
+
+        def delete_thread(self, thread_id, user_id):
+            return True
+
+    shared_memory = CaseMemory(
+        graph_resolver=lambda: graph_holder["graph"],
+        index_path=tmp_path / "thread_index.json",
+    )
+
+    async def _initialize_graph():
+        initialized.append(True)
+        graph_holder["graph"] = _Graph()
+        return graph_holder["graph"]
+
+    monkeypatch.setattr(server_mod, "get_case_memory", lambda: shared_memory)
+    monkeypatch.setattr("lvyan.runtime.get_shared_graph_async", _initialize_graph)
+    app = create_app(runner=lambda *_args, **_kwargs: None, metadata_store=_MetadataStore())
+
+    with TestClient(app) as client:
+        response = client.delete("/api/agent/state/thread-from-before-restart")
+
+    assert response.status_code == 200
+    assert initialized == [True]
+    assert deleted_checkpoint_ids == ["thread-from-before-restart"]

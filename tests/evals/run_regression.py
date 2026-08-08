@@ -209,16 +209,12 @@ def parse_thresholds(threshold_str: str | None) -> dict[str, float]:
         k = k.strip()
         v = v.strip()
         if k not in DEFAULT_THRESHOLDS:
-            raise ValueError(
-                f"未知阈值项 '{k}'，支持的阈值: {sorted(DEFAULT_THRESHOLDS.keys())}"
-            )
+            raise ValueError(f"未知阈值项 '{k}'，支持的阈值: {sorted(DEFAULT_THRESHOLDS.keys())}")
         thresholds[k] = float(v)
     return thresholds
 
 
-def _check_thresholds(
-    report: AnswerEvalReport, thresholds: dict[str, float]
-) -> list[str]:
+def _check_thresholds(report: AnswerEvalReport, thresholds: dict[str, float]) -> list[str]:
     """检查回答评测报告是否满足阈值，返回违反项描述列表。"""
     violations: list[str] = []
     metric_map = {
@@ -232,14 +228,10 @@ def _check_thresholds(
             continue
         if key in _MIN_METRICS:
             if value < threshold:
-                violations.append(
-                    f"{key}={value:.4f} 低于阈值 {threshold}（要求 >= {threshold}）"
-                )
+                violations.append(f"{key}={value:.4f} 低于阈值 {threshold}（要求 >= {threshold}）")
         elif key in _MAX_METRICS:
             if value > threshold:
-                violations.append(
-                    f"{key}={value:.4f} 超过阈值 {threshold}（要求 <= {threshold}）"
-                )
+                violations.append(f"{key}={value:.4f} 超过阈值 {threshold}（要求 <= {threshold}）")
     return violations
 
 
@@ -315,16 +307,26 @@ def _format_regression_report(report: RegressionReport) -> str:
     )
     lines.append(sep)
     metrics = report.metrics
-    lines.append(f"  法条引用准确率       : {metrics.get('avg_statute_accuracy', 0):.4f}"
-                 f"  (阈值 >= {report.thresholds.get('statute_accuracy', 0.9)})")
-    lines.append(f"  虚构法条率           : {metrics.get('avg_fabrication_rate', 0):.4f}"
-                 f"  (阈值 <= {report.thresholds.get('fabrication_rate', 0.05)})")
-    lines.append(f"  虚构案号率           : {metrics.get('avg_case_number_fabrication_rate', 0):.4f}")
+    lines.append(
+        f"  法条引用准确率       : {metrics.get('avg_statute_accuracy', 0):.4f}"
+        f"  (阈值 >= {report.thresholds.get('statute_accuracy', 0.9)})"
+    )
+    lines.append(
+        f"  虚构法条率           : {metrics.get('avg_fabrication_rate', 0):.4f}"
+        f"  (阈值 <= {report.thresholds.get('fabrication_rate', 0.05)})"
+    )
+    lines.append(
+        f"  虚构案号率           : {metrics.get('avg_case_number_fabrication_rate', 0):.4f}"
+    )
     lines.append(f"  争议焦点覆盖率       : {metrics.get('avg_disputed_issue_coverage', 0):.4f}")
     lines.append(f"  证据缺口召回率       : {metrics.get('avg_evidence_gap_recall', 0):.4f}")
-    lines.append(f"  反方论点覆盖率       : {metrics.get('avg_defendant_argument_coverage', 0):.4f}")
-    lines.append(f"  过度确定性比例       : {metrics.get('overconfidence_ratio', 0):.4f}"
-                 f"  (阈值 <= {report.thresholds.get('overconfidence', 0.1)})")
+    lines.append(
+        f"  反方论点覆盖率       : {metrics.get('avg_defendant_argument_coverage', 0):.4f}"
+    )
+    lines.append(
+        f"  过度确定性比例       : {metrics.get('overconfidence_ratio', 0):.4f}"
+        f"  (阈值 <= {report.thresholds.get('overconfidence', 0.1)})"
+    )
     if report.threshold_violations:
         lines.append("-" * 70)
         lines.append("  阈值违反项：")

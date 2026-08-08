@@ -1,4 +1,4 @@
-"""隐私脱敏验证器（SubTask 14.2）。
+r"""隐私脱敏验证器（SubTask 14.2）。
 
 对最终输出文本进行隐私脱敏，识别并掩码以下敏感信息：
 
@@ -65,18 +65,14 @@ _BANK_CARD_RE = re.compile(r"(?<!\d)\d{16,19}(?!\d)")
 
 # 银行卡号（上下文关键词模式）：需在「卡号/账号/银行卡/账户」等关键词附近，
 # 避免将日期、法条编号等纯数字串误判为银行卡号
-_BANK_CARD_CONTEXT_RE = re.compile(
-    r"(?:卡号|账号|银行卡|账户|开户行)\s*[:：]?\s*(\d{16,19})"
-)
+_BANK_CARD_CONTEXT_RE = re.compile(r"(?:卡号|账号|银行卡|账户|开户行)\s*[:：]?\s*(\d{16,19})")
 
 # 邮箱
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 # 病历号 / 门诊号 / 住院号：关键词 + 可选分隔符 + 数字
 # 命中「病历号: 123456」「门诊号123456」「住院号：123456」等
-_MEDICAL_RECORD_RE = re.compile(
-    r"(?:病历号|门诊号|住院号|病案号|就诊号)\s*[:：]?\s*\d{4,20}"
-)
+_MEDICAL_RECORD_RE = re.compile(r"(?:病历号|门诊号|住院号|病案号|就诊号)\s*[:：]?\s*\d{4,20}")
 
 # 住址：保守匹配，要求同时出现省/市/区/县等行政区划关键词与路/号/街道等细节
 # 模式 1：XX省XX市XX区/县 + 后续地址片段
@@ -188,9 +184,7 @@ def redact_privacy(text: str) -> PrivacyRedactionResult:
 # ---------------------------------------------------------------------------
 # sanitize_privacy：带位置信息的脱敏（SubTask 14.2 spec 接口）
 # ---------------------------------------------------------------------------
-SanitizedItemType = Literal[
-    "id_card", "bank_card", "phone", "email", "medical_record"
-]
+SanitizedItemType = Literal["id_card", "bank_card", "phone", "email", "medical_record"]
 
 # 脱敏类型优先级（同位置重叠时高优先级保留）：身份证 > 手机 > 银行卡 > 邮箱 > 病历
 _SANITIZE_PRIORITY: dict[str, int] = {
@@ -242,35 +236,25 @@ def sanitize_privacy(text: str) -> tuple[str, list[SanitizedItem]]:
 
     # 1. 身份证号
     for m in _ID_CARD_RE.finditer(text):
-        raw_matches.append(
-            (m.start(), m.end(), "id_card", "[身份证号已脱敏]", 1)
-        )
+        raw_matches.append((m.start(), m.end(), "id_card", "[身份证号已脱敏]", 1))
 
     # 2. 手机号（保留前 3 后 4）
     for m in _PHONE_RE.finditer(text):
-        raw_matches.append(
-            (m.start(), m.end(), "phone", _phone_mask(m.group(0)), 2)
-        )
+        raw_matches.append((m.start(), m.end(), "phone", _phone_mask(m.group(0)), 2))
 
     # 3. 银行卡号（上下文关键词模式，避免日期 / 法条编号误判）
     for m in _BANK_CARD_CONTEXT_RE.finditer(text):
         # group(1) 是纯数字部分，定位其精确位置
         start, end = m.start(1), m.end(1)
-        raw_matches.append(
-            (start, end, "bank_card", "[银行卡号已脱敏]", 3)
-        )
+        raw_matches.append((start, end, "bank_card", "[银行卡号已脱敏]", 3))
 
     # 4. 邮箱
     for m in _EMAIL_RE.finditer(text):
-        raw_matches.append(
-            (m.start(), m.end(), "email", "[邮箱已脱敏]", 4)
-        )
+        raw_matches.append((m.start(), m.end(), "email", "[邮箱已脱敏]", 4))
 
     # 5. 病历号 / 门诊号 / 住院号
     for m in _MEDICAL_RECORD_RE.finditer(text):
-        raw_matches.append(
-            (m.start(), m.end(), "medical_record", "[病历号已脱敏]", 5)
-        )
+        raw_matches.append((m.start(), m.end(), "medical_record", "[病历号已脱敏]", 5))
 
     # 按位置升序、同位置按优先级升序排序
     raw_matches.sort(key=lambda x: (x[0], x[4]))

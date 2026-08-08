@@ -41,14 +41,35 @@ _PHONE_RE = re.compile(r"\b1[3-9]\d{9}\b")
 
 # 偏好字段名黑名单：任何含这些关键字的字段直接丢弃
 _SENSITIVE_KEY_KEYWORDS = (
-    "id_card", "idcard", "id_number", "identity", "身份证",
-    "bank_card", "bankcard", "bank_account", "card_number", "银行卡",
-    "phone", "mobile", "电话", "手机",
-    "password", "passwd", "token", "secret", "密码",
-    "medical", "病历", "病史",
-    "contract_text", "合同原文", "合同内容",
-    "evidence", "证据",
-    "chat_history", "聊天记录",
+    "id_card",
+    "idcard",
+    "id_number",
+    "identity",
+    "身份证",
+    "bank_card",
+    "bankcard",
+    "bank_account",
+    "card_number",
+    "银行卡",
+    "phone",
+    "mobile",
+    "电话",
+    "手机",
+    "password",
+    "passwd",
+    "token",
+    "secret",
+    "密码",
+    "medical",
+    "病历",
+    "病史",
+    "contract_text",
+    "合同原文",
+    "合同内容",
+    "evidence",
+    "证据",
+    "chat_history",
+    "聊天记录",
 )
 
 # 已知允许保留的字段白名单（与 UserPreference 字段对应）
@@ -134,7 +155,9 @@ class UserPreferences:
         会强制 ``pref.user_id = user_id``，并对落盘内容做 sanitize。
         """
         # 确保 user_id 一致
-        pref = pref.model_copy(update={"user_id": user_id, "updated_at": datetime.now(timezone.utc)})
+        pref = pref.model_copy(
+            update={"user_id": user_id, "updated_at": datetime.now(timezone.utc)}
+        )
         self._write(user_id, pref)
 
     def update(self, user_id: str, **kwargs: Any) -> None:

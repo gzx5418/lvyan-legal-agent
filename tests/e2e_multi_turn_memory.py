@@ -87,7 +87,7 @@ def consume_stream(run_id: str, timeout: float = 300.0) -> tuple[str, list[str],
 
 def run_round(label: str, query: str, thread_id: str | None) -> dict:
     """执行一轮：启动 → 流式消费 → 返回汇总 dict。"""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"[{label}] 启动请求")
     print(f"  query    = {query}")
     print(f"  thread_id= {thread_id}")
@@ -98,7 +98,7 @@ def run_round(label: str, query: str, thread_id: str | None) -> dict:
     new_thread = start_resp.get("thread_id", "")
     print(f"  run_id   = {run_id}")
     print(f"  thread_id= {new_thread}")
-    print(f"  status   = {start_resp.get('status','')}")
+    print(f"  status   = {start_resp.get('status', '')}")
 
     final_output, events, traces = consume_stream(run_id, timeout=600)
     elapsed = time.time() - started
@@ -144,7 +144,7 @@ def write_report(r1: dict, r2: dict, analysis: dict, out_path: Path) -> None:
     lines.append(f"- thread_id: {r1['thread_id']}")
     lines.append(f"- 耗时: {r1['elapsed']:.1f}s")
     lines.append(f"- events: {r1['events']}")
-    lines.append(f"- nodes: {[t.get('node','?') for t in r1['node_traces']]}")
+    lines.append(f"- nodes: {[t.get('node', '?') for t in r1['node_traces']]}")
     lines.append("\n### final_output\n")
     lines.append(r1["final_output"] or "(空)")
 
@@ -154,14 +154,16 @@ def write_report(r1: dict, r2: dict, analysis: dict, out_path: Path) -> None:
     lines.append(f"- thread_id: {r2['thread_id']}")
     lines.append(f"- 耗时: {r2['elapsed']:.1f}s")
     lines.append(f"- events: {r2['events']}")
-    lines.append(f"- nodes: {[t.get('node','?') for t in r2['node_traces']]}")
+    lines.append(f"- nodes: {[t.get('node', '?') for t in r2['node_traces']]}")
     lines.append("\n### final_output\n")
     lines.append(r2["final_output"] or "(空)")
 
     lines.append("\n\n## 多轮记忆验证\n")
     lines.append(f"- 命中关键词: {analysis['matched']}")
     lines.append(f"- 未命中: {analysis['missing']}")
-    lines.append(f"- 判定: {'✓ 通过：轮2引用了轮1上下文' if analysis['referenced'] else '✗ 未通过：轮2未引用轮1上下文'}")
+    lines.append(
+        f"- 判定: {'✓ 通过：轮2引用了轮1上下文' if analysis['referenced'] else '✗ 未通过：轮2未引用轮1上下文'}"
+    )
 
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -196,8 +198,10 @@ def main() -> int:
 
     # 验证：thread_id 是否一致
     same_thread = r1["thread_id"] == r2["thread_id"]
-    print(f"\n{'='*70}")
-    print(f"thread_id 一致性: {'✓' if same_thread else '✗'} ({r1['thread_id']} vs {r2['thread_id']})")
+    print(f"\n{'=' * 70}")
+    print(
+        f"thread_id 一致性: {'✓' if same_thread else '✗'} ({r1['thread_id']} vs {r2['thread_id']})"
+    )
 
     # 分析轮2是否引用轮1
     analysis = analyze_round2_references(r2["final_output"])

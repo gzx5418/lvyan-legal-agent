@@ -55,6 +55,7 @@ Manifest schema
       "generated_at": "<ISO8601>"
     }
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -137,7 +138,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 # 锁文件内容 = "pid:uuid" 形式的 owner 令牌。释放时校验内容仍属于当前进程，
 # 避免「进程 A 超时被接管 → B 持锁 → A 结束释放锁时误删 B 的锁」竞态。
 _REBUILD_LOCK_STALE_SECONDS = 600.0  # 崩溃残留锁超过此时间视为过期
-_REBUILD_LOCK_WAIT_SECONDS = 120.0   # 未抢到锁时最多等待其他进程重建完成
+_REBUILD_LOCK_WAIT_SECONDS = 120.0  # 未抢到锁时最多等待其他进程重建完成
 
 
 def _acquire_rebuild_lock(manifests_dir: Path) -> str | None:
@@ -157,9 +158,10 @@ def _acquire_rebuild_lock(manifests_dir: Path) -> str | None:
 
     # 过期锁清理：mtime 超过阈值视为崩溃残留
     try:
-        if lock_path.is_file() and (
-            time.time() - lock_path.stat().st_mtime
-        ) > _REBUILD_LOCK_STALE_SECONDS:
+        if (
+            lock_path.is_file()
+            and (time.time() - lock_path.stat().st_mtime) > _REBUILD_LOCK_STALE_SECONDS
+        ):
             lock_path.unlink(missing_ok=True)
     except OSError:
         pass
@@ -237,7 +239,9 @@ def write_corpus_manifest(
         "article_index_schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
         "corpus_hash": compute_corpus_hash(lawtext_dir),
         "lawtext_dir": str(lawtext_dir),
-        "lawtext_file_count": sum(1 for _ in Path(lawtext_dir).rglob("*.md")) if Path(lawtext_dir).is_dir() else 0,
+        "lawtext_file_count": sum(1 for _ in Path(lawtext_dir).rglob("*.md"))
+        if Path(lawtext_dir).is_dir()
+        else 0,
         "chunks_count": len(chunks),
         "chunks_signature": chunks_sig,
         "bm25_signature": chunks_sig,  # BM25 由同一批 chunks 构建
@@ -256,7 +260,9 @@ def write_corpus_manifest(
 
 def load_corpus_manifest(manifests_dir: Path | None = None) -> dict[str, Any] | None:
     """读取 corpus_manifest.json；不存在或损坏返回 None。"""
-    manifest_path = Path(manifests_dir or (AGENT_DIR / "knowledge" / "manifests")) / "corpus_manifest.json"
+    manifest_path = (
+        Path(manifests_dir or (AGENT_DIR / "knowledge" / "manifests")) / "corpus_manifest.json"
+    )
     if not manifest_path.is_file():
         return None
     try:
@@ -302,7 +308,9 @@ def _verify_disk_indexes(
             cached = pickle.load(f)
     except Exception:  # noqa: BLE001
         return "article_index_unreadable"
-    if not isinstance(cached, dict) or cached.get("schema_version") != manifest.get("article_index_schema_version"):
+    if not isinstance(cached, dict) or cached.get("schema_version") != manifest.get(
+        "article_index_schema_version"
+    ):
         return "article_index_schema_mismatch"
     disk_chunks = cached.get("chunks")
     if not isinstance(disk_chunks, list):
@@ -512,8 +520,7 @@ def rebuild_corpus_indexes(
                 {
                     "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
                     "chunks": [
-                        c.model_dump(mode="json") if not isinstance(c, dict) else c
-                        for c in chunks
+                        c.model_dump(mode="json") if not isinstance(c, dict) else c for c in chunks
                     ],
                 },
                 ensure_ascii=False,
@@ -522,9 +529,7 @@ def rebuild_corpus_indexes(
         )
         _atomic_write_bytes(
             article_pkl,
-            pickle.dumps(
-                {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": chunks}
-            ),
+            pickle.dumps({"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": chunks}),
         )
 
         # 3) BM25（pkl + json，原子写）
@@ -567,8 +572,11 @@ def ensure_corpus_ready(
 
     # 仅当法库非空且 manifest 缺失/不一致时才值得重建
     reason = check["reason"]
-    if reason == "manifest_missing" or reason == "lawtext_changed" or reason == "empty_index" or (
-        reason and reason.startswith(("article_index_", "bm25_"))
+    if (
+        reason == "manifest_missing"
+        or reason == "lawtext_changed"
+        or reason == "empty_index"
+        or (reason and reason.startswith(("article_index_", "bm25_")))
     ):
         _logger.warning("[manifest] 索引不一致（reason=%s），自动重建", reason)
         return rebuild_corpus_indexes(lawtext_dir, manifests_dir)

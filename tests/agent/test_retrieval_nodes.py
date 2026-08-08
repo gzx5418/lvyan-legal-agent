@@ -156,7 +156,8 @@ def test_evidence_analyzer_marks_met_when_evidence_provided():
     requirements = result["evidence_requirements"]
     # 找到对应「劳动合同」的 requirement，应标 met
     met_names = [
-        r for r in requirements
+        r
+        for r in requirements
         if getattr(r, "current_status", "") == "met"
         and any("劳动合同" in t for t in getattr(r, "evidence_types", []))
     ]
@@ -310,9 +311,7 @@ def test_authority_resolver_version_conflict():
     result = authority_resolver(state)
     conflicts = result.get("conflicts", [])
     assert isinstance(conflicts, list)
-    version_conflicts = [
-        c for c in conflicts if getattr(c, "conflict_type", "") == "version"
-    ]
+    version_conflicts = [c for c in conflicts if getattr(c, "conflict_type", "") == "version"]
     assert len(version_conflicts) >= 1, f"应至少有 1 个 version 冲突，实际：{conflicts}"
     # 验证冲突字段
     vc = version_conflicts[0]
@@ -336,8 +335,7 @@ def test_authority_resolver_no_version_conflict_when_single_version():
     }
     result = authority_resolver(state)
     version_conflicts = [
-        c for c in result.get("conflicts", [])
-        if getattr(c, "conflict_type", "") == "version"
+        c for c in result.get("conflicts", []) if getattr(c, "conflict_type", "") == "version"
     ]
     assert len(version_conflicts) == 0
 
@@ -364,10 +362,11 @@ def test_authority_resolver_hierarchy_conflict():
     }
     result = authority_resolver(state)
     hierarchy_conflicts = [
-        c for c in result.get("conflicts", [])
-        if getattr(c, "conflict_type", "") == "hierarchy"
+        c for c in result.get("conflicts", []) if getattr(c, "conflict_type", "") == "hierarchy"
     ]
-    assert len(hierarchy_conflicts) >= 1, f"应至少有 1 个 hierarchy 冲突，实际：{result.get('conflicts', [])}"
+    assert len(hierarchy_conflicts) >= 1, (
+        f"应至少有 1 个 hierarchy 冲突，实际：{result.get('conflicts', [])}"
+    )
 
 
 # ---------------------------------------------------------------------------

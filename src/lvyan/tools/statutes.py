@@ -392,7 +392,11 @@ def verify_statute_status(source_id: str, as_of: str | None = None) -> StatuteSt
             groups = build_version_groups(same_title_metas)
             if groups:
                 current = groups[0].current_effective
-                if current is not None and current.source_id != source_id and meta.status == "effective":
+                if (
+                    current is not None
+                    and current.source_id != source_id
+                    and meta.status == "effective"
+                ):
                     superseded_by = current.source_id
     except Exception:
         pass

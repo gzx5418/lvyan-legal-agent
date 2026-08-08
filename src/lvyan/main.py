@@ -66,9 +66,7 @@ def run_agent_with_state(
     """
     resolved_thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"
     run_id = f"run-{uuid.uuid4().hex}"
-    initial = _build_initial_state(
-        run_id, resolved_thread_id, query, complexity, case_type
-    )
+    initial = _build_initial_state(run_id, resolved_thread_id, query, complexity, case_type)
     # P1-5 修复：CLI / Python API 改用共享图实例（同一 checkpointer），
     # 与 API 入口保持单一状态源，支持 interrupt resume
     graph = get_shared_graph()
@@ -80,6 +78,7 @@ def run_agent_with_state(
     # 图提前结束时（如 ask_user 路由），生成 fallback 输出
     if not final_output:
         from lvyan.api.sse import _build_fallback_output
+
         final_output = _build_fallback_output(state_dict, query)
 
     return AgentResult(
@@ -124,9 +123,7 @@ def stream_agent(
     """
     resolved_thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"
     run_id = f"run-{uuid.uuid4().hex}"
-    initial = _build_initial_state(
-        run_id, resolved_thread_id, query, complexity, case_type
-    )
+    initial = _build_initial_state(run_id, resolved_thread_id, query, complexity, case_type)
     # P1-5 修复：CLI 流式入口同样使用共享图实例
     graph = get_shared_graph()
     config = {"configurable": {"thread_id": resolved_thread_id}}

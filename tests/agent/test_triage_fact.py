@@ -44,6 +44,54 @@ def test_jurisdiction_mainland():
     assert result["case_type"] == "劳动争议"
 
 
+def test_commute_traffic_accident_routes_to_work_injury_recognition():
+    """上班途中骑车发生交通事故，应优先进入工伤认定而非解除劳动合同模板。"""
+    state = {"user_goal": "我上班骑车发生车祸，属于工伤吗"}
+    result = jurisdiction_triage(state)
+    assert result["case_type"] == "工伤认定"
+
+
+def test_follow_up_uses_conversation_context_when_current_question_is_elliptical():
+    """“需要哪些文件”应继承同一会话已经确定的工伤认定上下文。"""
+    result = jurisdiction_triage(
+        {
+            "user_goal": "那我需要准备哪些文件",
+            "conversation_summary": "用户：上班途中发生车祸，属于工伤吗\n助手：按工伤认定分析。",
+        }
+    )
+    assert result["case_type"] == "工伤认定"
+
+
+def test_follow_up_uses_most_recent_user_topic_after_topic_switch():
+    """旧工伤话题不能覆盖最近已经切换到的押金合同话题。"""
+    result = jurisdiction_triage(
+        {
+            "user_goal": "那需要准备什么材料",
+            "conversation_summary": (
+                "【用户】上班途中发生车祸，属于工伤吗\n\n"
+                "【助手】需要核实事故责任。\n\n"
+                "【用户】现在想问房东不退押金怎么办\n\n"
+                "【助手】可以先核对租赁合同。"
+            ),
+        }
+    )
+    assert result["case_type"] == "合同纠纷"
+
+
+def test_work_injury_missing_facts_focus_on_commute_and_responsibility():
+    """工伤认定应追问通勤路线、事故责任和伤情，不应追问经济补偿基数。"""
+    state = {
+        "user_goal": "我上班骑车发生车祸，属于工伤吗",
+        "case_type": "工伤认定",
+        "facts": [],
+    }
+    result = fact_extractor(state)
+    questions = " ".join(getattr(item, "question", "") for item in result["missing_facts"])
+    assert "责任认定书" in questions
+    assert "合理时间、合理路线" in questions
+    assert "月均工资" not in questions
+
+
 # ---------------------------------------------------------------------------
 # 测试 3：复杂度分级
 # ---------------------------------------------------------------------------
@@ -66,6 +114,20 @@ def test_complexity_document():
     state = {"user_goal": "帮我起草起诉状"}
     result = jurisdiction_triage(state)
     assert result["complexity"] == "document"
+
+
+def test_complexity_ignores_preselected_mode_and_follows_question_intent():
+    """前端遗留的深度/文书模式不应覆盖当前问题的自适应判断。"""
+    assert (
+        jurisdiction_triage({"user_goal": "那我需要准备哪些文件", "complexity": "deep"})[
+            "complexity"
+        ]
+        == "light"
+    )
+    assert (
+        jurisdiction_triage({"user_goal": "请帮我起草起诉状", "complexity": "light"})["complexity"]
+        == "document"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -106,11 +168,7 @@ def test_missing_facts_labor_contract_blocking():
     # 找出与"劳动合同"相关的缺失项
     labor_contract_items = []
     for m in missing:
-        text = (
-            getattr(m, "fact_key", "")
-            + getattr(m, "question", "")
-            + getattr(m, "reason", "")
-        )
+        text = getattr(m, "fact_key", "") + getattr(m, "question", "") + getattr(m, "reason", "")
         if "劳动合同" in text or "labor_contract" in text:
             labor_contract_items.append(m)
     assert len(labor_contract_items) >= 1, "应包含关于劳动合同的缺失事实"
@@ -134,8 +192,9 @@ def test_missing_fact_assessor_also_detects_blocking():
 
     # 再调用 missing_fact_assessor，应返回 {}（不重复追加）
     result = missing_fact_assessor(state)
-    assert result == {} or "missing_facts" not in result, \
+    assert result == {} or "missing_facts" not in result, (
         "missing_fact_assessor 不应重复追加 missing_facts"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +212,16 @@ def test_planner_generates_plan_and_queries():
     # 所有 PlanStep 初始状态应为 pending
     for step in plan:
         assert getattr(step, "status", "") == "pending"
+
+
+def test_work_injury_planner_queries_work_injury_regulation():
+    """工伤认定检索应以《工伤保险条例》及通勤责任要件为中心。"""
+    result = planner({"user_goal": "我上班骑车发生车祸，属于工伤吗", "case_type": "工伤认定"})
+    query_texts = " ".join(
+        getattr(query, "query_text", "") for query in result["retrieval_queries"]
+    )
+    assert "工伤保险条例" in query_texts
+    assert "非本人主要责任" in query_texts
 
 
 # ---------------------------------------------------------------------------

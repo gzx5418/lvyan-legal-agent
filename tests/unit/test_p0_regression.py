@@ -391,7 +391,7 @@ class TestAttachmentOwnerNotSwallowed:
             raise OSError("file not found")
         except (OSError,):
             pass  # 正常捕获
-        except:
+        except BaseException:
             pytest.fail("OSError 应被正常捕获")
 
     def test_json_decode_error_still_caught(self):
@@ -401,7 +401,7 @@ class TestAttachmentOwnerNotSwallowed:
             raise json.JSONDecodeError("bad json", "", 0)
         except (json.JSONDecodeError,):
             pass
-        except:
+        except BaseException:
             pytest.fail("JSONDecodeError 应被正常捕获")
 
 

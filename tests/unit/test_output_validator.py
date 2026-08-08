@@ -161,7 +161,6 @@ def test_light_mode_valid():
     statutes = [_make_authority()]
     result = validate_output(_LIGHT_VALID, "light", statutes)
     # 允许有 warning，但不应有 error
-    errors = [e for e in result.errors if e.error_type != "missing_section"]
     assert result.passed is True
 
 
@@ -339,7 +338,10 @@ def test_numeric_probability_percentage():
 # ---------------------------------------------------------------------------
 def test_numeric_probability_win_rate():
     """输出含「胜诉率80」→ numeric_probability error。"""
-    text = _LIGHT_VALID.replace("以上内容仅供参考，不构成正式法律意见。", "") + "\n胜诉率80\n仅供参考。\n"
+    text = (
+        _LIGHT_VALID.replace("以上内容仅供参考，不构成正式法律意见。", "")
+        + "\n胜诉率80\n仅供参考。\n"
+    )
     result = validate_output(text, "light", [_make_authority()])
     assert result.passed is False
     assert any(e.error_type == "numeric_probability" for e in result.errors)
@@ -388,8 +390,7 @@ def test_valid_citation_no_error():
     statutes = [_make_authority(article_number="第五百七十七条")]
     result = validate_output(_LIGHT_VALID, "light", statutes)
     citation_errors = [
-        e for e in result.errors
-        if e.error_type in ("invalid_citation", "missing_citation")
+        e for e in result.errors if e.error_type in ("invalid_citation", "missing_citation")
     ]
     assert len(citation_errors) == 0
 
@@ -423,6 +424,7 @@ def test_unknown_complexity_falls_back_to_light():
 # risk_statement_missing / numeric_probability_detected / suggestions）
 # ===========================================================================
 
+
 # ---------------------------------------------------------------------------
 # 16. structural_issues：结构缺失问题文本列表
 # ---------------------------------------------------------------------------
@@ -444,9 +446,9 @@ def test_structural_issues_missing_section():
     # structural_issues 应为非空 list[str]
     assert isinstance(result.structural_issues, list)
     assert len(result.structural_issues) > 0
-    # 缺「关键法条引用」「行动建议」章节
+    # 缺「法律依据」「后续动作」章节
     combined = " ".join(result.structural_issues)
-    assert "关键法条引用" in combined or "行动建议" in combined
+    assert "法律依据" in combined or "后续动作" in combined
 
 
 def test_structural_issues_empty_when_no_missing():

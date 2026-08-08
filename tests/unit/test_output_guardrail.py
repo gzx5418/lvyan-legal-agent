@@ -197,7 +197,9 @@ def test_invalid_citation_removed():
     state = _make_state(text, statutes=[_make_authority(article_number="第五百七十七条")])
     result = output_guardrail(state)
     # 9999 不应出现在最终输出中（或至少被标注警告）
-    assert "第九千九百九十九条" not in result["final_output"] or "校验备注" in result["final_output"]
+    assert (
+        "第九千九百九十九条" not in result["final_output"] or "校验备注" in result["final_output"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +337,7 @@ def test_return_structure():
 # ===========================================================================
 # 12-15. HITL 开启时 interrupt 行为（mock interrupt）
 # ===========================================================================
+
 
 def _make_irreversible_state() -> dict:
     """构造含不可逆操作（发送律师函）的 state。"""

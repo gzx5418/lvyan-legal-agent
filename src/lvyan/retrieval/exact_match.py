@@ -19,8 +19,17 @@ _ARTICLE_NO_RE = re.compile(r"《([^》]+)》第([一二三四五六七八九十
 
 # 中文数字 → 阿拉伯数字 用于归一化比对
 _CN_DIGIT = {
-    "零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4,
-    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
 }
 
 
@@ -103,7 +112,7 @@ def _match_law_title(query_name: str, chunk_title: str) -> bool:
         return True
     # 兼容「民法典」匹配「中华人民共和国民法典」（去掉国名前缀）
     for prefix in ("中华人民共和国", "全国人民代表大会", "全国人大常委会"):
-        if ct.startswith(prefix) and qn in ct[len(prefix):]:
+        if ct.startswith(prefix) and qn in ct[len(prefix) :]:
             return True
     return False
 

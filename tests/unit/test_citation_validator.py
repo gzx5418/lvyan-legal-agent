@@ -60,9 +60,7 @@ def _make_reasoning_result(
     if elements is None:
         elements = ["合同关系成立（已满足）", "违约行为（已满足）"]
     if key_factors is None:
-        key_factors = [
-            "依据《中华人民共和国民法典》第五百七十七条，违约方应承担违约责任"
-        ]
+        key_factors = ["依据《中华人民共和国民法典》第五百七十七条，违约方应承担违约责任"]
     return ReasoningResult(
         legal_relationship="合同纠纷",
         elements=elements,
@@ -146,11 +144,11 @@ def test_validate_citations_fabricated(monkeypatch: pytest.MonkeyPatch):
     statutes = [_make_authority(article_number="第五百七十七条")]
     report = validate_citations(rr, statutes)
     assert report.passed is False
-    not_found_issues = [
-        i for i in report.issues if i.issue_type == "not_found"
-    ]
+    not_found_issues = [i for i in report.issues if i.issue_type == "not_found"]
     assert len(not_found_issues) >= 1
-    assert any("9999" in i.citation_id or "九千九百九十九" in i.citation_id for i in not_found_issues)
+    assert any(
+        "9999" in i.citation_id or "九千九百九十九" in i.citation_id for i in not_found_issues
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +172,7 @@ def test_validate_citations_content_mismatch(monkeypatch: pytest.MonkeyPatch):
         )
     ]
     report = validate_citations(rr, statutes)
-    mismatch_issues = [
-        i for i in report.issues if i.issue_type == "content_mismatch"
-    ]
+    [i for i in report.issues if i.issue_type == "content_mismatch"]
     # 应检测到内容不匹配（或 not_found，取决于条文号匹配）
     assert report.passed is False
 
@@ -196,9 +192,7 @@ def test_validate_citations_invalid_status_repealed(
     statutes = [_make_authority(status="repealed")]
     report = validate_citations(rr, statutes)
     assert report.passed is False
-    status_issues = [
-        i for i in report.issues if i.issue_type == "invalid_status"
-    ]
+    status_issues = [i for i in report.issues if i.issue_type == "invalid_status"]
     assert len(status_issues) >= 1
     assert all(i.actual == "repealed" for i in status_issues)
 
@@ -215,9 +209,7 @@ def test_validate_citations_chinese_arabic_interchange(
         _mock_verify_statute_status("effective"),
     )
     rr = _make_reasoning_result(
-        key_factors=[
-            "依据《中华人民共和国劳动合同法》第四十七条计算经济补偿"
-        ]
+        key_factors=["依据《中华人民共和国劳动合同法》第四十七条计算经济补偿"]
     )
     statutes = [
         _make_authority(

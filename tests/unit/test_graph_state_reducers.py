@@ -85,7 +85,10 @@ def test_merge_authorities_no_duplication_when_returning_full_list():
     """
     old = [_make_auth(source_id=f"src-{i}", article_number=f"第{i}条") for i in range(10)]
     # 节点返回完整列表（同 10 条，分数略高模拟 rerank）
-    new = [_make_auth(source_id=f"src-{i}", article_number=f"第{i}条", rerank_score=0.9) for i in range(10)]
+    new = [
+        _make_auth(source_id=f"src-{i}", article_number=f"第{i}条", rerank_score=0.9)
+        for i in range(10)
+    ]
 
     merged = merge_authorities(old, new)
 

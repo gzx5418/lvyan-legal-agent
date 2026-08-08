@@ -399,7 +399,9 @@ def _format_report(report: EvalReport) -> str:
     lines: list[str] = []
     sep = "=" * 70
     lines.append(sep)
-    lines.append(f"  检索评测报告 [{report.label}]  (top_k={report.top_k}, queries={report.total_queries})")
+    lines.append(
+        f"  检索评测报告 [{report.label}]  (top_k={report.top_k}, queries={report.total_queries})"
+    )
     lines.append(sep)
     lines.append(f"  Recall@k          : {report.avg_recall_at_k:.4f}")
     lines.append(f"  MRR               : {report.avg_mrr:.4f}")
@@ -408,7 +410,9 @@ def _format_report(report: EvalReport) -> str:
     lines.append(f"  正确版本命中率     : {report.version_hit_rate:.4f}")
     lines.append(f"  废止法规误召回率   : {report.repealed_recall_rate:.4f}")
     lines.append("-" * 70)
-    lines.append(f"  {'qid':<14} {'category':<10} {'hit':<4} {'rank':<5} {'recall':<7} {'rr':<6} {'ndcg':<6}")
+    lines.append(
+        f"  {'qid':<14} {'category':<10} {'hit':<4} {'rank':<5} {'recall':<7} {'rr':<6} {'ndcg':<6}"
+    )
     lines.append("-" * 70)
     for q in report.per_query:
         rank_str = str(q.hit_rank) if q.hit_rank is not None else "-"
@@ -510,9 +514,7 @@ def main() -> None:
         out: dict[str, Any] = {"baseline": baseline.to_dict()}
         if reranker is not None:
             out["reranker"] = reranker.to_dict()
-        Path(args.json).write_text(
-            json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        Path(args.json).write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n[Eval] JSON 报告已写入: {args.json}", file=sys.stderr)
 
 

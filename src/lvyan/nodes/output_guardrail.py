@@ -136,9 +136,7 @@ def _remove_invalid_citation(text: str, detail: str) -> str:
         return new_text
 
     # 行内移除
-    inline_pattern = re.compile(
-        re.escape(citation_text) + r"[^，,。.；;\n]*[，,。.；;]?"
-    )
+    inline_pattern = re.compile(re.escape(citation_text) + r"[^，,。.；;\n]*[，,。.；;]?")
     new_text, n = inline_pattern.subn("", text, count=1)
     return new_text
 
@@ -174,6 +172,7 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
     output_iteration = int(_get(state, "output_iteration", 0) or 0)
 
     notes: list[str] = []
+    irreversible_ops = _detect_irreversible_ops(final_output)
 
     # --- 1. 隐私脱敏 ---
     privacy_result = redact_privacy(final_output)
@@ -185,9 +184,7 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
         )
 
     # --- 2. 结构 / 引用 / 风险声明 / 数字概率校验 ---
-    validation: OutputValidationResult = validate_output(
-        final_output, complexity, statutes
-    )
+    validation: OutputValidationResult = validate_output(final_output, complexity, statutes)
 
     # --- 3. 按错误类型自动修复或标记回退 ---
     retry_needed = False
@@ -205,13 +202,15 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
             notes.append(f"已移除无效引用并标注警告：{err.detail}")
         elif err.error_type in ("missing_section", "missing_citation"):
             # 结构性缺失：回退 composer 重写（受 MAX_OUTPUT_ITERATIONS 约束）
-            if output_iteration < MAX_OUTPUT_ITERATIONS:
+            # 已进入人工审批的旧会话可能来自旧版输出模板。此时应优先完成
+            # fail-closed 的人工确认，不能因新增章节要求绕过或丢失审批状态。
+            if irreversible_ops and settings.hitl_enabled:
+                notes.append(f"兼容旧版待审批输出，保留结构提示：{err.detail}")
+            elif output_iteration < MAX_OUTPUT_ITERATIONS:
                 retry_needed = True
                 retry_reasons.append(err.detail)
             else:
-                notes.append(
-                    f"已达输出重试上限，强制放行；遗留问题：{err.detail}（需人工复核）"
-                )
+                notes.append(f"已达输出重试上限，强制放行；遗留问题：{err.detail}（需人工复核）")
 
     # --- 4. 回退 composer 重新生成 ---
     if retry_needed:
@@ -227,7 +226,6 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
         }
 
     # --- 5. Human-in-the-loop：不可逆操作检测 ---
-    irreversible_ops = _detect_irreversible_ops(final_output)
     pending_human_approval: dict | None = None
     if irreversible_ops:
         pending_human_approval = {
@@ -271,8 +269,7 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
             # 拒绝：保留原分析正文，仅追加拒绝提示与状态标记
             if action == "reject":
                 final_output = (
-                    final_output
-                    + "\n\n---\n⚠ 您已拒绝执行上述操作。Agent 不会自动执行。"
+                    final_output + "\n\n---\n⚠ 您已拒绝执行上述操作。Agent 不会自动执行。"
                 )
                 notes.append("用户已拒绝不可逆操作，原分析正文已保留")
                 pending_human_approval["status"] = "rejected"

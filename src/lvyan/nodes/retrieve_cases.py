@@ -42,8 +42,8 @@ def _keyword_overlap(text_a: str, text_b: str) -> float:
     """
     if not text_a or not text_b:
         return 0.0
-    a_grams = {text_a[i:i + 2] for i in range(len(text_a) - 1) if text_a[i:i + 2].strip()}
-    b_grams = {text_b[i:i + 2] for i in range(len(text_b) - 1) if text_b[i:i + 2].strip()}
+    a_grams = {text_a[i : i + 2] for i in range(len(text_a) - 1) if text_a[i : i + 2].strip()}
+    b_grams = {text_b[i : i + 2] for i in range(len(text_b) - 1) if text_b[i : i + 2].strip()}
     if not a_grams or not b_grams:
         return 0.0
     overlap = len(a_grams & b_grams)
@@ -95,9 +95,7 @@ def _build_difference(
     return {
         "case_id": case_id,
         "case_type": case_type,
-        "case_type_diff": bool(
-            current_case_type and case_type and current_case_type != case_type
-        ),
+        "case_type_diff": bool(current_case_type and case_type and current_case_type != case_type),
         "facts_similarity": facts_sim,
         "evidence_similarity": evidence_sim,
         "ruling_summary": ruling_summary,
@@ -142,9 +140,7 @@ def case_difference_compare(state: CaseState) -> dict[str, Any]:
     current_evidence_text = " ".join(evidence_parts)
 
     differences = [
-        _build_difference(
-            case, current_case_type, current_facts_text, current_evidence_text
-        )
+        _build_difference(case, current_case_type, current_facts_text, current_evidence_text)
         for case in cases
     ]
 

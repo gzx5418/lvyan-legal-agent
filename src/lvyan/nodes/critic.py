@@ -133,9 +133,10 @@ def _check_over_inference(
 
     # 过度推断：满足率低却标注倾向原告
     # 规则：≥3 个要件未满足，或满足率 < 40%
-    if (
-        unsatisfied >= 3 or satisfaction_rate < 0.4
-    ) and tendency in ("favorable", "somewhat_favorable"):
+    if (unsatisfied >= 3 or satisfaction_rate < 0.4) and tendency in (
+        "favorable",
+        "somewhat_favorable",
+    ):
         return (
             f"过度推断：{unsatisfied}/{total} 个构成要件未满足"
             f"（满足率 {satisfaction_rate:.0%}），却标注裁判倾向为「{tendency}」",
@@ -240,9 +241,7 @@ def critic(state: CaseState) -> dict[str, Any]:
         suggestions.append("先执行 legal_reasoner 节点生成推理结果")
     else:
         # --- 检查 1：遗漏反方论点 ---
-        issue, suggestion = _check_missing_defendant_arguments(
-            reasoning_result, statutes
-        )
+        issue, suggestion = _check_missing_defendant_arguments(reasoning_result, statutes)
         if issue:
             issues.append(issue)
             suggestions.append(suggestion)

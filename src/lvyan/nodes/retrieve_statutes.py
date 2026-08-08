@@ -231,16 +231,14 @@ def _parallel_search_statutes(
     # 多个查询：用线程池并行
     if _CONCURRENT_EXECUTOR is None:
         from concurrent.futures import ThreadPoolExecutor
+
         _CONCURRENT_EXECUTOR = ThreadPoolExecutor(
             max_workers=min(len(valid_queries), 4),
             thread_name_prefix="lvyan-search",
         )
 
     try:
-        futures = [
-            _CONCURRENT_EXECUTOR.submit(_safe_search, qt)
-            for qt in valid_queries
-        ]
+        futures = [_CONCURRENT_EXECUTOR.submit(_safe_search, qt) for qt in valid_queries]
         results_nested: list[list[Authority]] = []
         for fut in futures:
             try:
@@ -333,9 +331,8 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
     global _CONCURRENT_EXECUTOR
     if _CONCURRENT_EXECUTOR is None:
         from concurrent.futures import ThreadPoolExecutor
-        _CONCURRENT_EXECUTOR = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="lvyan-search"
-        )
+
+        _CONCURRENT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="lvyan-search")
 
     stat_future = _CONCURRENT_EXECUTOR.submit(_search_statutes_job)
     case_future = _CONCURRENT_EXECUTOR.submit(_search_cases_job)
@@ -351,9 +348,7 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
 
     # --- 更新 plan ---
     plan = _get(state, "plan", []) or []
-    updated_plan = _mark_plan_done(
-        plan, tools_to_complete=("statute_retrieval", "case_retrieval")
-    )
+    updated_plan = _mark_plan_done(plan, tools_to_complete=("statute_retrieval", "case_retrieval"))
 
     return {
         "statutes": statutes,

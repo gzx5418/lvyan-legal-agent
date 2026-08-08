@@ -169,7 +169,7 @@ def _keyword_overlap(query: str, candidate: str) -> float:
     """
     if not query or not candidate:
         return 0.0
-    q_grams = {query[i:i + 2] for i in range(len(query) - 1) if query[i:i + 2].strip()}
+    q_grams = {query[i : i + 2] for i in range(len(query) - 1) if query[i : i + 2].strip()}
     if not q_grams:
         return 0.0
     hit = sum(1 for g in q_grams if g in candidate)

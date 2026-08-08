@@ -112,7 +112,10 @@ def compare_embeddings(
     print(f"[EmbedCompare] 评测 {len(golden)} 条 query (top_k={top_k})", file=sys.stderr)
 
     # 当前 Dense 桩（hash 向量，对应 settings.embedding_model=Qwen3-Embedding-0.6B）
-    print("[EmbedCompare] 运行 dense_search（hash 桩 / Qwen3-Embedding-0.6B 占位）...", file=sys.stderr)
+    print(
+        "[EmbedCompare] 运行 dense_search（hash 桩 / Qwen3-Embedding-0.6B 占位）...",
+        file=sys.stderr,
+    )
     recall_hash, mrr_hash, ndcg_hash = _run_dense_variant(dense_search, golden, top_k)
 
     # BGE-M3 桩（当前复用 dense_search 流程，仅切换模型名占位）
@@ -163,12 +166,11 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    result = compare_embeddings(
-        golden_path=args.golden, top_k=args.top_k, limit=args.limit
-    )
+    result = compare_embeddings(golden_path=args.golden, top_k=args.top_k, limit=args.limit)
 
     # 格式化打印
     import json
+
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

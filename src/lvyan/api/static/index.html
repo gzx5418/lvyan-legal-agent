@@ -67,11 +67,6 @@
       <button type="button" id="export-btn" class="icon-btn" title="导出对话为 Markdown" aria-label="导出对话为 Markdown" style="display:none;">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2v9M4 7l4 4 4-4M2 14h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
-      <div class="mode-selector">
-        <button class="mode-btn active" data-mode="light" title="简要模式：日常咨询快答">简要</button>
-        <button class="mode-btn" data-mode="deep" title="深度模式：案件深度分析报告">深度</button>
-        <button class="mode-btn" data-mode="document" title="文书模式：生成法律文书">文书</button>
-      </div>
     </div>
   </header>
 
@@ -104,9 +99,7 @@
         <section class="settings-panel active" data-settings-content="general" aria-labelledby="settings-general-title">
           <div class="settings-section-heading"><h2 id="settings-general-title">通用</h2><p>这些选项只保存在当前浏览器。</p></div>
           <div class="settings-card">
-            <label class="settings-row" for="settings-default-mode"><span><strong>默认分析模式</strong><small>新对话启动时使用的工作深度。</small></span>
-              <select id="settings-default-mode"><option value="light">简要</option><option value="deep">深度</option><option value="document">文书</option></select>
-            </label>
+            <div class="settings-row"><span><strong>回答方式</strong><small>回答会依据问题内容组织为简答、材料清单、办理步骤、深度分析或文书。</small></span></div>
             <label class="settings-row" for="settings-density"><span><strong>阅读密度</strong><small>调整对话和设置页面的留白。</small></span>
               <select id="settings-density"><option value="comfortable">舒适</option><option value="compact">紧凑</option></select>
             </label>
@@ -251,7 +244,7 @@
 <!-- Toast 提示 -->
 <div id="toast" class="toast" role="status" aria-live="polite" style="display:none;"></div>
 
-<script src="/static/components.js?v=2"></script>
-<script src="/static/app.js?v=14"></script>
+<script src="/static/components.js?v=3"></script>
+<script src="/static/app.js?v=15"></script>
 </body>
 </html>

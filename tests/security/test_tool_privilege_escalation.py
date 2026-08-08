@@ -197,9 +197,7 @@ def test_hitl_enabled_calls_interrupt(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(settings, "hitl_enabled", True)
     state = _make_state(_output_with_action("发送律师函催告对方。"))
 
-    with patch(
-        "lvyan.nodes.output_guardrail.interrupt", return_value="approve"
-    ) as mock_interrupt:
+    with patch("lvyan.nodes.output_guardrail.interrupt", return_value="approve") as mock_interrupt:
         result = output_guardrail(state)
 
     assert mock_interrupt.call_count == 1
@@ -219,9 +217,7 @@ def test_hitl_approve_response(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(settings, "hitl_enabled", True)
     state = _make_state(_output_with_action("向法院提起诉讼。"))
 
-    with patch(
-        "lvyan.nodes.output_guardrail.interrupt", return_value="approve"
-    ):
+    with patch("lvyan.nodes.output_guardrail.interrupt", return_value="approve"):
         result = output_guardrail(state)
 
     assert result["pending_human_approval"]["status"] == "approved"
@@ -237,9 +233,7 @@ def test_hitl_reject_response(monkeypatch: pytest.MonkeyPatch):
     state = _make_state(_output_with_action("向法院提起诉讼。"))
     original = state["final_output"]
 
-    with patch(
-        "lvyan.nodes.output_guardrail.interrupt", return_value="reject"
-    ):
+    with patch("lvyan.nodes.output_guardrail.interrupt", return_value="reject"):
         result = output_guardrail(state)
 
     assert original in result["final_output"]
@@ -254,9 +248,7 @@ def test_hitl_none_response_treated_as_reject(monkeypatch: pytest.MonkeyPatch):
     state = _make_state(_output_with_action("向法院提起诉讼。"))
     original = state["final_output"]
 
-    with patch(
-        "lvyan.nodes.output_guardrail.interrupt", return_value=None
-    ):
+    with patch("lvyan.nodes.output_guardrail.interrupt", return_value=None):
         result = output_guardrail(state)
 
     assert original in result["final_output"]

@@ -6,6 +6,7 @@
 设计权衡：使用确定性截断而非 LLM 摘要 —— 快、零成本、可测试。
 LLM 摘要可作为后续优化叠加。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -34,7 +35,7 @@ def format_conversation_summary(
     if not valid:
         return ""
 
-    tail = valid[-(max_turns * 2):]
+    tail = valid[-(max_turns * 2) :]
 
     def _truncate(text: str) -> str:
         text = (text or "").strip()

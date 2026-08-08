@@ -24,18 +24,18 @@ from lvyan.tools.base import ToolResult
 
 # 期限类型 -> 天数映射（中国大陆常见诉讼时效与法定期限）
 _DEADLINE_RULES: dict[str, int] = {
-    "labor_arbitration": 365,        # 劳动仲裁时效 1 年
-    "civil_litigation": 1095,        # 民事诉讼时效 3 年
-    "civil_litigation_short": 365,   # 特殊短期诉讼时效 1 年（身体伤害等）
-    "civil_litigation_long": 1460,   # 最长诉讼时效 4 年（部分情形）
-    "administrative_reconsideration": 60,   # 行政复议 60 日
-    "administrative_litigation": 180,       # 行政诉讼 6 个月
-    "appeal_judgment": 15,          # 不服一审判决上诉期 15 日
-    "appeal_ruling": 10,            # 不服一审裁定上诉期 10 日
-    "appeal_administrative_judgment": 15,   # 行政诉讼上诉期 15 日
-    "contract_quality_objection": 730,      # 质量异议最长 2 年
-    "consumer_complaint": 1095,     # 消费者投诉时效参照民事诉讼 3 年
-    "insurance_claim": 1460,        # 保险理赔时效参照 4 年（部分险种）
+    "labor_arbitration": 365,  # 劳动仲裁时效 1 年
+    "civil_litigation": 1095,  # 民事诉讼时效 3 年
+    "civil_litigation_short": 365,  # 特殊短期诉讼时效 1 年（身体伤害等）
+    "civil_litigation_long": 1460,  # 最长诉讼时效 4 年（部分情形）
+    "administrative_reconsideration": 60,  # 行政复议 60 日
+    "administrative_litigation": 180,  # 行政诉讼 6 个月
+    "appeal_judgment": 15,  # 不服一审判决上诉期 15 日
+    "appeal_ruling": 10,  # 不服一审裁定上诉期 10 日
+    "appeal_administrative_judgment": 15,  # 行政诉讼上诉期 15 日
+    "contract_quality_objection": 730,  # 质量异议最长 2 年
+    "consumer_complaint": 1095,  # 消费者投诉时效参照民事诉讼 3 年
+    "insurance_claim": 1460,  # 保险理赔时效参照 4 年（部分险种）
 }
 """期限类型 -> 天数映射表。"""
 
@@ -57,6 +57,22 @@ _DEADLINE_LABELS: dict[str, str] = {
 
 # 案类型 -> 证据清单（每项为 (name, purpose, status) 三元组）
 _EVIDENCE_CHECKLIST: dict[str, list[tuple[str, str, str]]] = {
+    "工伤认定": [
+        ("道路交通事故责任认定书", "证明事故责任是否为本人非主要责任", "required"),
+        ("诊断证明/病历/住院记录", "证明事故伤害及治疗情况", "required"),
+        (
+            "劳动关系证据（合同、工资流水、社保、考勤或工牌）",
+            "证明与用人单位存在劳动关系",
+            "required",
+        ),
+        (
+            "上下班合理路线和时间证据（定位、打卡、监控、通勤记录）",
+            "证明事故发生在上下班途中",
+            "recommended",
+        ),
+        ("报警记录、现场照片或视频", "固定事故发生经过", "recommended"),
+        ("工伤认定申请材料及单位通知记录", "证明已及时启动工伤认定程序", "recommended"),
+    ],
     "劳动争议": [
         ("劳动合同", "证明劳动关系存在及约定内容", "required"),
         ("工资流水/工资条", "证明工资标准与拖欠事实", "required"),
@@ -227,7 +243,7 @@ def calculate_legal_deadline(
             tool_name="calculate_legal_deadline",
             success=False,
             error=f"不支持的 deadline_type：{deadline_type}，"
-                  f"可选：{', '.join(sorted(_DEADLINE_RULES.keys()))}",
+            f"可选：{', '.join(sorted(_DEADLINE_RULES.keys()))}",
             event_date=event_date,
             deadline_type=deadline_type,
         )
@@ -241,7 +257,9 @@ def calculate_legal_deadline(
     if remaining < 0:
         warning = f"⚠️ {label} 已于 {deadline.isoformat()} 经过（已超期 {-remaining} 天），可能丧失胜诉权。"
     elif expires_soon:
-        warning = f"⚠️ {label} 将于 {deadline.isoformat()} 到期（仅剩 {remaining} 天），请尽快主张权利。"
+        warning = (
+            f"⚠️ {label} 将于 {deadline.isoformat()} 到期（仅剩 {remaining} 天），请尽快主张权利。"
+        )
     else:
         warning = f"{label} 截止日 {deadline.isoformat()}（剩余 {remaining} 天）。"
 
@@ -311,8 +329,7 @@ def calculate_claim_amount(
         return ClaimAmountResult(
             tool_name="calculate_claim_amount",
             success=False,
-            error=f"不支持的 claim_type：{claim_type}，"
-                  f"可选：{', '.join(sorted(rules.keys()))}",
+            error=f"不支持的 claim_type：{claim_type}，可选：{', '.join(sorted(rules.keys()))}",
             claim_type=claim_type,
             principal=principal_f,
         )
@@ -368,7 +385,7 @@ def generate_evidence_checklist(
             tool_name="generate_evidence_checklist",
             success=False,
             error=f"不支持的 case_type：{case_type}，"
-                  f"可选：{', '.join(sorted(_EVIDENCE_CHECKLIST.keys()))}",
+            f"可选：{', '.join(sorted(_EVIDENCE_CHECKLIST.keys()))}",
             case_type=case_type,
         )
 
@@ -619,7 +636,9 @@ def _calc_consumer_triple(
     amount = principal * 3
     breakdown = {"principal": principal, "multiplier": 3.0, "amount": amount}
     formula = f"商品价款 × 3 = {principal} × 3 = {amount}"
-    notes = "依据《消费者权益保护法》第55条，经营者欺诈赔偿 = 商品价款 × 3，不足 500 元按 500 元计。"
+    notes = (
+        "依据《消费者权益保护法》第55条，经营者欺诈赔偿 = 商品价款 × 3，不足 500 元按 500 元计。"
+    )
     return amount, breakdown, formula, notes
 
 

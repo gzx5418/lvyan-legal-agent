@@ -1,4 +1,5 @@
 """LegalAnswerV1 数据协议模型测试。"""
+
 from __future__ import annotations
 
 import pytest
@@ -62,7 +63,14 @@ def test_legal_issue_requires_rules_or_facts():
 
 def test_citation_authority_level_order():
     """LegalCitation.level 必须是固定权威层级。"""
-    for level in ("law", "regulation", "judicial_interpretation", "guiding_case", "reference_case", "normative"):
+    for level in (
+        "law",
+        "regulation",
+        "judicial_interpretation",
+        "guiding_case",
+        "reference_case",
+        "normative",
+    ):
         c = LegalCitation(
             citation_id="C1",
             full_name="法",
@@ -98,8 +106,11 @@ def test_schema_version_immutable_literal():
         LegalAnswerV1(
             schema_version="v2",
             meta=AnswerMeta(
-                title="t", jurisdiction="中国大陆", case_type="c",
-                law_as_of_date="2026-08-02", risk_level="low",
+                title="t",
+                jurisdiction="中国大陆",
+                case_type="c",
+                law_as_of_date="2026-08-02",
+                risk_level="low",
                 material_completeness="complete",
             ),
             executive_summary=ExecutiveSummary(

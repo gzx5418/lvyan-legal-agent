@@ -167,11 +167,7 @@ async def test_default_runner_emits_each_task_once_and_no_error_for_none(monkeyp
     events = []
     while not ctx.queue.empty():
         events.append(ctx.queue.get_nowait())
-    planner_events = [
-        event["event"]
-        for event in events
-        if event.get("node") == "planner"
-    ]
+    planner_events = [event["event"] for event in events if event.get("node") == "planner"]
     assert output == "完成"
     assert planner_events == ["node_start", "node_end"]
     assert not any(event["event"] == "node_error" for event in events)
@@ -220,9 +216,7 @@ async def test_checkpoint_hitl_uses_run_metadata_without_sidecar(monkeypatch):
         def update_run(self, _run_id: str, **_values: Any) -> None:
             return None
 
-        def claim_hitl_run(
-            self, run_id: str, user_id: str
-        ) -> dict[str, Any] | None:
+        def claim_hitl_run(self, run_id: str, user_id: str) -> dict[str, Any] | None:
             assert run_id == "run-db"
             assert user_id == "user-a"
             if self.claimed:
@@ -378,14 +372,16 @@ async def test_two_instances_only_one_can_claim_hitl(monkeypatch):
     monkeypatch.setattr(sse, "_get_graph", _fake_get_graph)
     monkeypatch.setattr("lvyan.api.auth.is_auth_enabled", lambda: True)
 
-    results = await asyncio.gather(*(
-        manager.resolve_hitl(
-            "run-db",
-            HITLRequest(action="approve"),
-            current_user_id="user-a",
+    results = await asyncio.gather(
+        *(
+            manager.resolve_hitl(
+                "run-db",
+                HITLRequest(action="approve"),
+                current_user_id="user-a",
+            )
+            for manager in managers
         )
-        for manager in managers
-    ))
+    )
     await asyncio.sleep(0)
 
     assert sorted(status for status, _message in results) == ["error", "resolved"]
@@ -465,10 +461,7 @@ async def test_metadata_update_failure_marks_run_non_recoverable():
         if event is not None:
             events.append(event)
     assert ctx.non_recoverable is True
-    assert any(
-        event.get("code") == "run_non_recoverable"
-        for event in events
-    )
+    assert any(event.get("code") == "run_non_recoverable" for event in events)
 
 
 def test_durable_thread_owner_cannot_be_overwritten(monkeypatch):
@@ -495,7 +488,8 @@ def test_durable_thread_owner_cannot_be_overwritten(monkeypatch):
         json={"query": "合同问题", "thread_id": "thread-owned"},
     )
 
-    assert response.status_code == 403
+    # 跨租户资源统一返回 404，避免泄露 thread 是否存在。
+    assert response.status_code == 404
 
 
 def test_cross_instance_stream_returns_completed_output():
@@ -568,11 +562,13 @@ def test_cross_instance_cancelled_stream_returns_cancel_event():
                 "error": "用户已停止生成",
             }
 
-    response = TestClient(create_app(
-        runner=lambda *_args, **_kwargs: None,
-        memory=_ApiMemory(),
-        metadata_store=Store(),
-    )).get("/api/agent/stream/run-cancelled")
+    response = TestClient(
+        create_app(
+            runner=lambda *_args, **_kwargs: None,
+            memory=_ApiMemory(),
+            metadata_store=Store(),
+        )
+    ).get("/api/agent/stream/run-cancelled")
 
     assert response.status_code == 200
     assert '"event": "cancelled"' in response.text
@@ -627,10 +623,7 @@ async def test_hitl_persistence_failure_does_not_publish_approval(monkeypatch):
     assert output == ""
     assert ctx.status == "failed"
     assert not any(event.get("event") == "hitl_required" for event in events)
-    assert any(
-        event.get("code") == "hitl_persistence_failed"
-        for event in events
-    )
+    assert any(event.get("code") == "hitl_persistence_failed" for event in events)
 
 
 @pytest.mark.asyncio
@@ -681,10 +674,7 @@ async def test_second_hitl_persistence_failure_closes_without_approval(
             events.append(event)
     assert ctx.status == "failed"
     assert not any(event.get("event") == "hitl_required" for event in events)
-    assert any(
-        event.get("code") == "hitl_persistence_failed"
-        for event in events
-    )
+    assert any(event.get("code") == "hitl_persistence_failed" for event in events)
 
 
 def test_delete_thread_uses_durable_store_and_local_cleanup():
@@ -709,11 +699,13 @@ def test_delete_thread_uses_durable_store_and_local_cleanup():
     async def runner(*_args: Any, **_kwargs: Any) -> str:
         return ""
 
-    response = TestClient(create_app(
-        runner=runner,
-        memory=memory,
-        metadata_store=Store(),
-    )).delete("/api/agent/state/thread-1")
+    response = TestClient(
+        create_app(
+            runner=runner,
+            memory=memory,
+            metadata_store=Store(),
+        )
+    ).delete("/api/agent/state/thread-1")
 
     assert response.status_code == 200
     assert calls == [("thread-1", "anonymous")]
@@ -744,11 +736,13 @@ def test_thread_list_uses_durable_store_not_sidecar():
     async def runner(*_args: Any, **_kwargs: Any) -> str:
         return ""
 
-    response = TestClient(create_app(
-        runner=runner,
-        memory=_ApiMemory(),
-        metadata_store=Store(),
-    )).get("/api/agent/threads")
+    response = TestClient(
+        create_app(
+            runner=runner,
+            memory=_ApiMemory(),
+            metadata_store=Store(),
+        )
+    ).get("/api/agent/threads")
 
     assert response.status_code == 200
     assert response.json()["threads"][0]["thread_id"] == "thread-db"
@@ -763,10 +757,12 @@ def test_hitl_metadata_unavailable_returns_503(monkeypatch):
         return ("unavailable", "审批状态暂时不可用")
 
     monkeypatch.setattr(RunManager, "resolve_hitl", unavailable)
-    response = TestClient(create_app(
-        runner=lambda *_args, **_kwargs: None,
-        memory=_ApiMemory(),
-    )).post(
+    response = TestClient(
+        create_app(
+            runner=lambda *_args, **_kwargs: None,
+            memory=_ApiMemory(),
+        )
+    ).post(
         "/api/agent/hitl/run-1",
         json={"action": "approve"},
     )
@@ -782,10 +778,12 @@ def test_readyz_returns_503_when_dependency_not_ready(monkeypatch):
     monkeypatch.setattr(server, "_check_retrieval", lambda: "ok")
     monkeypatch.setattr(server, "_check_model_gateway_ready", lambda: "ok")
 
-    response = TestClient(server.create_app(
-        runner=lambda *_args, **_kwargs: None,
-        memory=_ApiMemory(),
-    )).get("/readyz")
+    response = TestClient(
+        server.create_app(
+            runner=lambda *_args, **_kwargs: None,
+            memory=_ApiMemory(),
+        )
+    ).get("/readyz")
 
     assert response.status_code == 503
     assert response.json()["status"] == "not-ready"
@@ -813,11 +811,13 @@ def test_checkpoint_delete_failure_returns_503_without_deleting_metadata():
             metadata_deleted = True
             return True
 
-    response = TestClient(create_app(
-        runner=lambda *_args, **_kwargs: None,
-        memory=Memory(),
-        metadata_store=Store(),
-    )).delete("/api/agent/state/thread-1")
+    response = TestClient(
+        create_app(
+            runner=lambda *_args, **_kwargs: None,
+            memory=Memory(),
+            metadata_store=Store(),
+        )
+    ).delete("/api/agent/state/thread-1")
 
     assert response.status_code == 503
     assert metadata_deleted is False
@@ -838,11 +838,13 @@ def test_active_durable_run_blocks_thread_deletion():
         def has_active_runs(self, _thread_id: str) -> bool:
             return True
 
-    response = TestClient(create_app(
-        runner=lambda *_args, **_kwargs: None,
-        memory=Memory(),
-        metadata_store=Store(),
-    )).delete("/api/agent/state/thread-1")
+    response = TestClient(
+        create_app(
+            runner=lambda *_args, **_kwargs: None,
+            memory=Memory(),
+            metadata_store=Store(),
+        )
+    ).delete("/api/agent/state/thread-1")
 
     assert response.status_code == 409
 
@@ -859,11 +861,13 @@ def test_checkpoint_read_failure_returns_503():
         def get_thread(self, thread_id: str):
             return {"thread_id": thread_id, "user_id": "anonymous"}
 
-    response = TestClient(create_app(
-        runner=lambda *_args, **_kwargs: None,
-        memory=Memory(),
-        metadata_store=Store(),
-    )).get("/api/agent/state/thread-1")
+    response = TestClient(
+        create_app(
+            runner=lambda *_args, **_kwargs: None,
+            memory=Memory(),
+            metadata_store=Store(),
+        )
+    ).get("/api/agent/state/thread-1")
 
     assert response.status_code == 503
 
@@ -991,11 +995,13 @@ def test_state_returns_complete_durable_message_history():
                 },
             ]
 
-    response = TestClient(create_app(
-        runner=lambda *_args, **_kwargs: None,
-        memory=Memory(),
-        metadata_store=Store(),
-    )).get("/api/agent/state/thread-1")
+    response = TestClient(
+        create_app(
+            runner=lambda *_args, **_kwargs: None,
+            memory=Memory(),
+            metadata_store=Store(),
+        )
+    ).get("/api/agent/state/thread-1")
 
     assert response.status_code == 200
     messages = response.json()["messages"]

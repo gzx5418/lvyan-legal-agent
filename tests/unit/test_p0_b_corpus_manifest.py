@@ -15,16 +15,15 @@
 9. P0-3：``rebuild_corpus_indexes`` 原子重建三件套并重新生成 manifest；
    ``ensure_corpus_ready`` 自愈入口在索引不一致时自动重建。
 """
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from lvyan.retrieval.manifest import (
-    MANIFEST_SCHEMA_VERSION,
     compute_corpus_hash,
     invalidate_corpus_health_cache,
     load_corpus_manifest,
@@ -324,7 +323,6 @@ def test_article_index_signature_mismatch(tmp_path):
 
 def test_bm25_index_missing(tmp_path):
     """article_index 存在但 bm25_index.pkl 缺失 → bm25_index_missing。"""
-    import pickle
 
     lawtext = _make_lawtext_dir(tmp_path)
     chunks = [_make_chunk()]

@@ -88,9 +88,7 @@ def test_real_attack_samples_are_detected(text, expected_patterns):
     result = detect_prompt_injection(text)
     assert result.detected is True, f"未检测到攻击：{text!r}"
     assert expected_patterns.issubset(set(result.patterns)), (
-        f"文本：{text!r}\n"
-        f"预期至少命中：{expected_patterns}\n"
-        f"实际命中：{set(result.patterns)}"
+        f"文本：{text!r}\n预期至少命中：{expected_patterns}\n实际命中：{set(result.patterns)}"
     )
     # matches 中应能找到每个预期模式的命中记录
     matched_patterns = {m.pattern for m in result.matches}

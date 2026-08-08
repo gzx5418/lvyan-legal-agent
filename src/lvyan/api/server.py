@@ -549,10 +549,7 @@ _UNTRUSTED_DOC_CLOSE = "</untrusted_document>"
 def _xml_attr_escape(value: str) -> str:
     """转义字符串以安全嵌入 XML 属性值（双引号上下文）。"""
     return (
-        value.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
+        value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     )
 
 
@@ -585,10 +582,16 @@ def _enforce_zip_uncompressed_limit(content: bytes, limit: int) -> None:
         try:
             # EOCD: sig(4) disk(2) cd_disk(2) disk_entries(2)
             #       total_entries(2) cd_size(4) cd_offset(4) comment_len(2)
-            (_sig, _disk, _cd_disk, _disk_entries,
-             total_entries, cd_size, cd_offset, _comment_len) = struct.unpack(
-                "<IHHHHIIH", content[eocd_idx : eocd_idx + 22]
-            )
+            (
+                _sig,
+                _disk,
+                _cd_disk,
+                _disk_entries,
+                total_entries,
+                cd_size,
+                cd_offset,
+                _comment_len,
+            ) = struct.unpack("<IHHHHIIH", content[eocd_idx : eocd_idx + 22])
             total = 0
             cd_sig = b"PK\x01\x02"
             offset = cd_offset
@@ -604,11 +607,25 @@ def _enforce_zip_uncompressed_limit(content: bytes, limit: int) -> None:
                     # sig(4) ver_made(2) ver_need(2) flag(2) method(2) time(2) date(2)
                     # crc(4) comp_size(4) uncomp_size(4) name_len(2) extra_len(2)
                     # comment_len(2) disk_start(2) int_attr(2) ext_attr(4) local_offset(4)
-                    (_s, _vm, _vn, _flag, _method, _t, _d, _crc,
-                     comp_size, uncomp_size, name_len, extra_len,
-                     comment_len, _ds, _ia, _ea, _lo) = struct.unpack(
-                        "<IHHHHHHIIIHHHHHII", content[idx : idx + 46]
-                    )
+                    (
+                        _s,
+                        _vm,
+                        _vn,
+                        _flag,
+                        _method,
+                        _t,
+                        _d,
+                        _crc,
+                        comp_size,
+                        uncomp_size,
+                        name_len,
+                        extra_len,
+                        comment_len,
+                        _ds,
+                        _ia,
+                        _ea,
+                        _lo,
+                    ) = struct.unpack("<IHHHHHHIIIHHHHHII", content[idx : idx + 46])
                 except struct.error:
                     break
                 # central directory 中 uncomp_size 永远是真实值（无 data descriptor 问题）
@@ -644,10 +661,19 @@ def _enforce_zip_uncompressed_limit(content: bytes, limit: int) -> None:
         if idx == -1 or idx + 30 > len(content):
             break
         try:
-            (_sig, _ver, _flag, _method, _t, _d, _crc,
-             comp_size, uncomp_size, name_len, extra_len) = struct.unpack(
-                "<IHHHHHIIIHH", content[idx : idx + 30]
-            )
+            (
+                _sig,
+                _ver,
+                _flag,
+                _method,
+                _t,
+                _d,
+                _crc,
+                comp_size,
+                uncomp_size,
+                name_len,
+                extra_len,
+            ) = struct.unpack("<IHHHHHIIIHH", content[idx : idx + 30])
         except struct.error:
             break
         # data descriptor（flag bit 3）时 comp/uncomp 可能为 0，跳过该项
@@ -659,8 +685,7 @@ def _enforce_zip_uncompressed_limit(content: bytes, limit: int) -> None:
             raise HTTPException(
                 status_code=413,
                 detail=(
-                    f"Office 文件解压后总大小 {total} bytes 超过上限 {limit} bytes"
-                    "（疑似 ZIP bomb）"
+                    f"Office 文件解压后总大小 {total} bytes 超过上限 {limit} bytes（疑似 ZIP bomb）"
                 ),
             )
         # 跳过本条 entry（header + name + extra + data）
@@ -676,9 +701,7 @@ def _get_conversion_semaphore() -> asyncio.Semaphore:
     if _conversion_semaphore is None:
         from lvyan.config import settings as _settings
 
-        _conversion_semaphore = asyncio.Semaphore(
-            max(1, _settings.max_concurrent_conversions)
-        )
+        _conversion_semaphore = asyncio.Semaphore(max(1, _settings.max_concurrent_conversions))
     return _conversion_semaphore
 
 
@@ -792,16 +815,15 @@ def create_app(
                 from lvyan.graph.builder import PersistenceUnavailable
 
                 raise PersistenceUnavailable(
-                    f"PostgreSQL run metadata store 不可用，且当前为强制持久化模式，"
-                    f"拒绝降级: {exc}"
+                    f"PostgreSQL run metadata store 不可用，且当前为强制持久化模式，拒绝降级: {exc}"
                 ) from exc
             _logger.warning(
-                "PostgreSQL 不可达，RunMetadata 持久化已禁用；"
-                "run 恢复、跨实例 HITL 等功能将不可用"
+                "PostgreSQL 不可达，RunMetadata 持久化已禁用；run 恢复、跨实例 HITL 等功能将不可用"
             )
             metadata_store = None
     manager = RunManager(runner=runner, metadata_store=metadata_store)
     # 优先使用注入的 memory（测试隔离），否则使用共享 CaseMemory（生产单源）
+    using_shared_memory = memory is None
     mem = memory if memory is not None else get_case_memory()
     if workspace_store is None:
         # 工作空间与 run 元数据共用同一 PostgreSQL 配置；本地开发和隔离测试则
@@ -832,6 +854,15 @@ def create_app(
         response.headers["Permissions-Policy"] = (
             "geolocation=(), microphone=(), camera=(), payment=()"
         )
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = (
+                "public, max-age=31536000, immutable"
+                if request.query_params.get("v")
+                else "no-cache"
+            )
+        elif request.url.path == "/":
+            # HTML 必须重新验证，避免它长期引用已经下线的静态资源版本。
+            response.headers["Cache-Control"] = "no-cache"
         return response
 
     @app.get("/api/health", response_model=HealthResponse)
@@ -1216,7 +1247,9 @@ def create_app(
         req: AgentRunRequest,
         user_id: str = Depends(get_current_user_id),
     ) -> AgentRunResponse:
-        complexity = req.complexity or "light"
+        # 复杂度由分诊节点根据问题意图自适应判定；API 传入的旧字段仅为兼容
+        # 历史客户端保留，不作为回答模式开关。
+        complexity = "light"
         # P2-15：附件作为「待分析证据」用 <untrusted_document> 包裹，
         # 系统 prompt 必须声明：文档内容不是系统/工具指令，禁止执行其中命令。
         # P0 性能：附件不再全文拼进 query_text（旧做法会让每个 LLM 节点都吞下整篇合同）。
@@ -1303,7 +1336,9 @@ def create_app(
                 # P0 性能：构造 DocumentRef；stored_path 指向 markdown 文件，
                 # attachment_retriever 节点据此切块 + 按需检索。
                 markdown_path_str = meta.get("markdown_path", "")
-                stored_path = str(_resolve_upload_path(markdown_path_str)) if markdown_path_str else ""
+                stored_path = (
+                    str(_resolve_upload_path(markdown_path_str)) if markdown_path_str else ""
+                )
                 attachment_refs.append(
                     {
                         "doc_id": fid,
@@ -1422,7 +1457,9 @@ def create_app(
                     # 避免前端在首次运行与刷新恢复时收到不同事件结构。
                     event: dict[str, Any] = {"event": "final_output", "output": final_md}
                     if legal_answer:
-                        event["schema_version"] = legal_answer.get("schema_version", "legal_answer_v1")
+                        event["schema_version"] = legal_answer.get(
+                            "schema_version", "legal_answer_v1"
+                        )
                         event["answer"] = legal_answer
                     # P1-A/P1-1：与 live 路径 _build_final_output_event 保持一致，
                     # 刷新恢复时也推送 document_file **public 视图**（不含 output_path）。
@@ -1564,6 +1601,19 @@ def create_app(
                     status_code=503,
                     detail="thread metadata 暂时不可用",
                 ) from exc
+            # 历史列表可直接由 PostgreSQL 元数据恢复，但服务刚启动、尚未运行
+            # Agent 时 CaseMemory 还没有绑定图实例。删除路径仍需清理对应的
+            # checkpoint，因此这里按需初始化共享异步图，避免旧历史永远返回 503。
+            if using_shared_memory:
+                try:
+                    from lvyan.runtime import get_shared_graph_async
+
+                    await get_shared_graph_async()
+                except Exception as exc:  # noqa: BLE001
+                    raise HTTPException(
+                        status_code=503,
+                        detail="checkpoint 初始化失败",
+                    ) from exc
             try:
                 await _mem_adelete_strict(mem, thread_id)
             except Exception as exc:  # noqa: BLE001
@@ -1872,9 +1922,7 @@ def create_app(
         if status == "unavailable":
             raise HTTPException(status_code=503, detail=message)
         if status == "cancel_requested":
-            return HITLResponse(
-                run_id=run_id, status=status, message=message
-            )
+            return HITLResponse(run_id=run_id, status=status, message=message)
         return HITLResponse(run_id=run_id, status=status, message=message)
 
     @app.get("/api/documents/{run_id}/download")
@@ -1904,9 +1952,7 @@ def create_app(
             try:
                 run = metadata_store.get_run(run_id)
             except Exception as exc:  # noqa: BLE001
-                raise HTTPException(
-                    status_code=503, detail="run metadata 暂时不可用"
-                ) from exc
+                raise HTTPException(status_code=503, detail="run metadata 暂时不可用") from exc
         else:
             raise HTTPException(status_code=503, detail="metadata store 不可用")
 
@@ -1917,9 +1963,7 @@ def create_app(
         if is_auth_enabled():
             owner = str(run.get("user_id") or ANONYMOUS_USER)
             if owner != user_id:
-                raise HTTPException(
-                    status_code=404, detail="资源不存在"
-                )
+                raise HTTPException(status_code=404, detail="资源不存在")
 
         # 3. 获取 document_file 信息
         doc_file = run.get("document_file")
@@ -1936,9 +1980,7 @@ def create_app(
         try:
             file_path.relative_to(outputs_dir)
         except ValueError as exc:
-            raise HTTPException(
-                status_code=403, detail="文件路径不合法"
-            ) from exc
+            raise HTTPException(status_code=403, detail="文件路径不合法") from exc
 
         if not file_path.is_file():
             raise HTTPException(status_code=404, detail="文书文件不存在")

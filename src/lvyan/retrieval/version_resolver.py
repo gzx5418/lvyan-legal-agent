@@ -154,7 +154,7 @@ def _read_front_matter(filepath: Path) -> tuple[dict, str]:
         return {}, text
 
     yaml_text = "".join(lines[1:close_idx])
-    body_text = "".join(lines[close_idx + 1:])
+    body_text = "".join(lines[close_idx + 1 :])
     try:
         data = yaml.safe_load(yaml_text) or {}
     except yaml.YAMLError:
@@ -244,7 +244,7 @@ def _select_current_effective(versions: list[LawMetadata]) -> LawMetadata | None
     candidates = [v for v in effective if (v.effective_date or date.min) == max_date]
     if len(candidates) == 1:
         return candidates[0]
-    return max(candidates, key=lambda v: (v.publication_date or date.min))
+    return max(candidates, key=lambda v: v.publication_date or date.min)
 
 
 def _apply_superseded_mark(versions: list[LawMetadata], current: LawMetadata | None) -> None:

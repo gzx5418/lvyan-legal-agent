@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from typing import Any
+import re
 
 from lvyan.schemas import CaseState, MissingFact
 
@@ -25,13 +26,24 @@ __all__ = ["jurisdiction_triage"]
 # ---------------------------------------------------------------------------
 # 港澳台 / 涉外关键词
 _FOREIGN_KEYWORDS: tuple[str, ...] = (
-    "香港", "澳门", "台湾", "港澳台", "涉外", "跨境",
-    "外国法", "美国法", "欧盟", "GDPR",
+    "香港",
+    "澳门",
+    "台湾",
+    "港澳台",
+    "涉外",
+    "跨境",
+    "外国法",
+    "美国法",
+    "欧盟",
+    "GDPR",
 )
 
 # 案由 → 关键词映射（顺序即匹配优先级）
 _CASE_TYPE_KEYWORDS: dict[str, list[str]] = {
-    "劳动争议": ["辞退", "工资", "工伤", "劳动合同", "劳动仲裁", "经济补偿", "解除劳动合同"],
+    # 通勤交通事故工伤认定的法律要件和普通劳动争议不同，必须优先分流，
+    # 不能落入经济补偿/解除劳动合同模板。
+    "工伤认定": ["工伤", "上下班途中", "通勤", "上班路上", "下班路上"],
+    "劳动争议": ["辞退", "工资", "劳动合同", "劳动仲裁", "经济补偿", "解除劳动合同"],
     "合同纠纷": ["合同", "违约", "押金", "租赁", "买卖", "欠款", "拖欠"],
     "侵权纠纷": ["赔偿", "损害", "交通事故", "医疗", "受伤", "人身损害"],
     "婚姻家庭": ["离婚", "抚养", "继承", "赡养", "扶养"],
@@ -40,22 +52,37 @@ _CASE_TYPE_KEYWORDS: dict[str, list[str]] = {
 
 # 紧急期限关键词
 _URGENCY_KEYWORDS: tuple[str, ...] = (
-    "诉讼时效", "仲裁", "期限", "到期", "过期",
+    "诉讼时效",
+    "仲裁",
+    "期限",
+    "到期",
+    "过期",
 )
 
 # 人身安全风险关键词
 _SAFETY_KEYWORDS: tuple[str, ...] = (
-    "人身安全", "暴力", "威胁", "恐吓",
+    "人身安全",
+    "暴力",
+    "威胁",
+    "恐吓",
 )
 
 # 深度分析关键词（触发 deep 模式）
 _COMPLEXITY_DEEP_KEYWORDS: tuple[str, ...] = (
-    "起诉", "律师函", "胜诉", "裁判", "证据是否充分",
+    "起诉",
+    "律师函",
+    "胜诉",
+    "裁判",
+    "证据是否充分",
 )
 
 # 文书生成关键词（触发 document 模式）
 _COMPLEXITY_DOCUMENT_KEYWORDS: tuple[str, ...] = (
-    "起草", "起诉状", "合同审查", "律师函", "文书",
+    "起草",
+    "起诉状",
+    "合同审查",
+    "律师函",
+    "文书",
 )
 
 
@@ -71,14 +98,30 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
-def _detect_case_type(user_goal: str) -> str | None:
-    """根据关键词匹配案由，未匹配返回 None。"""
+def _detect_case_type(user_goal: str, conversation_summary: str = "") -> str | None:
+    """根据当前问题匹配案由；必要时继承同一会话的上下文。
+
+    当前问题始终优先。例如用户明确转问合同问题时，不会被上一轮工伤咨询
+    覆盖；仅当它是“需要什么材料”这类省略主语的追问时，才从会话摘要补足案由。
+    """
     if not user_goal:
         return None
     for case_type, keywords in _CASE_TYPE_KEYWORDS.items():
         for kw in keywords:
             if kw in user_goal:
                 return case_type
+    if conversation_summary:
+        # 只继承最近一条包含案由线索的用户消息。助手回答可能包含多个案由或
+        # 泛化法律术语，不能作为主题来源；按时间倒序可正确处理会话中的转题。
+        user_messages = re.findall(
+            r"(?:【用户】|(?:^|\n)用户[：:])(.+?)(?=(?:\n\n【(?:用户|助手)】)|(?:\n(?:用户|助手)[：:])|\Z)",
+            conversation_summary,
+            flags=re.DOTALL,
+        )
+        for message in reversed(user_messages):
+            for case_type, keywords in _CASE_TYPE_KEYWORDS.items():
+                if any(kw in message for kw in keywords):
+                    return case_type
     return None
 
 
@@ -140,7 +183,10 @@ def jurisdiction_triage(state: CaseState) -> dict[str, Any]:
         missing_facts = []
 
     # --- 案由识别 ---
-    case_type = _detect_case_type(user_goal)
+    case_type = _detect_case_type(
+        user_goal,
+        str(_get(state, "conversation_summary", "") or ""),
+    )
 
     # --- 紧急期限与人身安全检测 ---
     has_urgency = any(kw in user_goal for kw in _URGENCY_KEYWORDS)
@@ -152,13 +198,9 @@ def jurisdiction_triage(state: CaseState) -> dict[str, Any]:
         risk_level = "medium"
 
     # --- 复杂度分级 ---
-    # 尊重用户/调用方已设置的 complexity（如前端模式选择），仅当未设置或为默认 light
-    # 且 user_goal 中有明确深度/文书关键词时才覆盖。
-    existing_complexity = _get(state, "complexity", None)
-    if existing_complexity in ("deep", "document"):
-        complexity = existing_complexity
-    else:
-        complexity = _detect_complexity(user_goal)
+    # 回答形态只由当前问题意图决定；不采纳前端或调用方预先写入的模式，
+    # 避免“选了深度”就把一句追问强制渲染为完整报告。
+    complexity = _detect_complexity(user_goal)
 
     return {
         "jurisdiction": jurisdiction,

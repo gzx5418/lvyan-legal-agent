@@ -143,7 +143,7 @@ def _verify_jwt_and_extract_sub(authorization: str) -> str:
     if not cfg["jwt_issuer"] or not cfg["jwt_audience"]:
         raise HTTPException(
             status_code=500,
-            detail=("JWT_VERIFY_IN_PROCESS=true 时必须同时配置 JWT_ISSUER " "和 JWT_AUDIENCE"),
+            detail=("JWT_VERIFY_IN_PROCESS=true 时必须同时配置 JWT_ISSUER 和 JWT_AUDIENCE"),
         )
 
     try:

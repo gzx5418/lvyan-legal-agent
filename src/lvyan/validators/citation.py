@@ -37,9 +37,7 @@ class CitationIssue(BaseModel):
     """单条引用校验问题。"""
 
     citation_id: str
-    issue_type: Literal[
-        "not_found", "content_mismatch", "invalid_status", "missing_article_number"
-    ]
+    issue_type: Literal["not_found", "content_mismatch", "invalid_status", "missing_article_number"]
     expected: str  # 期望值
     actual: str  # 实际值
     severity: Literal["error", "warning"]
@@ -238,9 +236,7 @@ _CONTENT_JACCARD_THRESHOLD = 0.1
 _CONTENT_COMMON_THRESHOLD = 2
 
 
-def _find_matching_statute(
-    citation: dict[str, Any], statutes: list[Any]
-) -> Any | None:
+def _find_matching_statute(citation: dict[str, Any], statutes: list[Any]) -> Any | None:
     """在 statutes 中查找与引用匹配的 Authority。
 
     匹配规则：

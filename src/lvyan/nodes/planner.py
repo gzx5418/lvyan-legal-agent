@@ -32,6 +32,7 @@ _ALLOWED_ROUTES = {"hybrid", "bm25", "case_rule", "article_no", "dense"}
 # 案由 → 推荐法规关键词
 # ---------------------------------------------------------------------------
 _CASE_TYPE_LAW_KEYWORDS: dict[str, list[str]] = {
+    "工伤认定": ["工伤保险条例", "上下班途中", "非本人主要责任"],
     "劳动争议": ["劳动法", "劳动合同法", "劳动争议调解仲裁法"],
     "合同纠纷": ["民法典合同编", "合同法"],
     "侵权纠纷": ["民法典侵权责任编", "侵权责任法"],
@@ -41,15 +42,44 @@ _CASE_TYPE_LAW_KEYWORDS: dict[str, list[str]] = {
 
 # 行为关键词（用于法条查询拼接）
 _ACTION_KEYWORDS_FOR_QUERY: tuple[str, ...] = (
-    "辞退", "解除", "违约", "赔偿", "受伤", "签订",
-    "入职", "离职", "欠款", "拖欠", "解雇",
+    "辞退",
+    "解除",
+    "违约",
+    "赔偿",
+    "受伤",
+    "签订",
+    "入职",
+    "离职",
+    "欠款",
+    "拖欠",
+    "解雇",
+    "工伤",
+    "通勤",
+    "交通事故",
+    "责任认定",
 )
 
 # 简单停用词
-_STOP_WORDS: frozenset[str] = frozenset({
-    "的", "了", "是", "在", "我", "有", "和", "与", "怎么办",
-    "怎么", "如何", "吗", "呢", "啊", "吧", "呀",
-})
+_STOP_WORDS: frozenset[str] = frozenset(
+    {
+        "的",
+        "了",
+        "是",
+        "在",
+        "我",
+        "有",
+        "和",
+        "与",
+        "怎么办",
+        "怎么",
+        "如何",
+        "吗",
+        "呢",
+        "啊",
+        "吧",
+        "呀",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -61,10 +91,7 @@ def _extract_keywords(text: str) -> str:
         return ""
     # 按标点和空格分词
     tokens = re.split(r"[，。、,.\s!?；;：:]+", text)
-    keywords = [
-        t for t in tokens
-        if t and t not in _STOP_WORDS and len(t) >= 2
-    ]
+    keywords = [t for t in tokens if t and t not in _STOP_WORDS and len(t) >= 2]
     return " ".join(keywords[:5])
 
 
@@ -147,9 +174,9 @@ def _try_llm_plan(
     if not llm_available() or not user_goal.strip():
         return None
 
-    facts_summary = "; ".join(
-        str(_get(f, "content", "")) for f in (facts or [])[:8]
-    ) or "暂无结构化事实"
+    facts_summary = (
+        "; ".join(str(_get(f, "content", "")) for f in (facts or [])[:8]) or "暂无结构化事实"
+    )
     case_hint = f"案由：{case_type}" if case_type else "案由待定"
     context_block = (
         f"\n相关材料摘要：\n{attachment_context}\n" if attachment_context.strip() else ""
@@ -159,8 +186,7 @@ def _try_llm_plan(
     )
 
     system_prompt = (
-        "你是法律检索计划生成助手。根据用户案情生成检索查询与执行步骤。"
-        "只输出 JSON，不要解释。"
+        "你是法律检索计划生成助手。根据用户案情生成检索查询与执行步骤。只输出 JSON，不要解释。"
     )
     user_prompt = (
         f"{case_hint}\n用户目标：{user_goal}\n已知事实：{facts_summary}\n{context_block}{history_block}\n"
@@ -203,9 +229,7 @@ def _try_llm_plan(
         if route not in _ALLOWED_ROUTES:
             route = "hybrid"
         seen_texts.add(text)
-        queries.append(
-            RetrievalQuery(query_id=_short_id(), query_text=text, route=route)
-        )
+        queries.append(RetrievalQuery(query_id=_short_id(), query_text=text, route=route))
 
     # 解析执行步骤
     raw_steps = result.get("plan_steps", [])
@@ -233,9 +257,21 @@ def _try_llm_plan(
     # 确保至少有基本执行步骤
     if not plan_steps:
         plan_steps = [
-            PlanStep(step_id=_short_id(), action="检索相关法规", tool="statute_retrieval", status="pending"),
-            PlanStep(step_id=_short_id(), action="检索类案", tool="case_retrieval", status="pending"),
-            PlanStep(step_id=_short_id(), action="证据缺口分析", tool="evidence_analyzer", status="pending"),
+            PlanStep(
+                step_id=_short_id(),
+                action="检索相关法规",
+                tool="statute_retrieval",
+                status="pending",
+            ),
+            PlanStep(
+                step_id=_short_id(), action="检索类案", tool="case_retrieval", status="pending"
+            ),
+            PlanStep(
+                step_id=_short_id(),
+                action="证据缺口分析",
+                tool="evidence_analyzer",
+                status="pending",
+            ),
         ]
 
     _logger.info("LLM 计划生成成功: %d queries, %d steps", len(queries), len(plan_steps))
@@ -281,28 +317,34 @@ def planner(state: CaseState) -> dict[str, Any]:
     # --- 降级：规则+模板 ---
     queries: list[RetrievalQuery] = []
     main_query_text = _extract_keywords(user_goal) or user_goal[:20]
-    queries.append(
-        RetrievalQuery(query_id=_short_id(), query_text=main_query_text, route="hybrid")
-    )
+    queries.append(RetrievalQuery(query_id=_short_id(), query_text=main_query_text, route="hybrid"))
 
     if case_type:
         law_keywords = _CASE_TYPE_LAW_KEYWORDS.get(case_type, [])
         action_keywords = _extract_action_keywords(user_goal)
         law_parts = [case_type]
         if law_keywords:
-            law_parts.append(law_keywords[0])
+            # 保留同一案由的核心法源与法定要件，避免只检索法规标题而漏掉
+            # 例如通勤工伤中的“非本人主要责任”。
+            law_parts.extend(law_keywords[:3])
         law_parts.extend(action_keywords[:2])
         queries.append(
             RetrievalQuery(query_id=_short_id(), query_text=" ".join(law_parts), route="bm25")
         )
         queries.append(
-            RetrievalQuery(query_id=_short_id(), query_text=f"{case_type} 裁判规则", route="case_rule")
+            RetrievalQuery(
+                query_id=_short_id(), query_text=f"{case_type} 裁判规则", route="case_rule"
+            )
         )
 
     plan: list[PlanStep] = [
-        PlanStep(step_id=_short_id(), action="检索相关法规", tool="statute_retrieval", status="pending"),
+        PlanStep(
+            step_id=_short_id(), action="检索相关法规", tool="statute_retrieval", status="pending"
+        ),
         PlanStep(step_id=_short_id(), action="检索类案", tool="case_retrieval", status="pending"),
-        PlanStep(step_id=_short_id(), action="证据缺口分析", tool="evidence_analyzer", status="pending"),
+        PlanStep(
+            step_id=_short_id(), action="证据缺口分析", tool="evidence_analyzer", status="pending"
+        ),
     ]
 
     return {

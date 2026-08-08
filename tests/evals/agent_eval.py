@@ -181,9 +181,7 @@ def _lcs_length(a: list[str], b: list[str]) -> int:
     return prev[n]
 
 
-def _compute_tool_selection_accuracy(
-    actual: list[str], expected: list[str]
-) -> float:
+def _compute_tool_selection_accuracy(actual: list[str], expected: list[str]) -> float:
     """计算工具选择正确率：LCS(actual, expected) / len(expected)。
 
     ``expected`` 为空时不计入（返回 1.0，表示无约束）。

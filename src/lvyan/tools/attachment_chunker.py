@@ -1,4 +1,5 @@
 """附件 Markdown 分块器：按标题与段落切分，控制单块长度。"""
+
 from __future__ import annotations
 
 import re

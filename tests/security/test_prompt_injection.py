@@ -42,8 +42,7 @@ from lvyan.validators.prompt_injection import (
 def test_clean_contract_not_flagged():
     """正常合同条款（含「最终解释权」「解除合同」等）不应被误判为注入。"""
     text = (
-        "甲方保留最终解释权。乙方违约时甲方有权解除合同并要求赔偿。"
-        "本合同自双方签字盖章之日起生效。"
+        "甲方保留最终解释权。乙方违约时甲方有权解除合同并要求赔偿。本合同自双方签字盖章之日起生效。"
     )
     result = detect_prompt_injection(text)
 
@@ -58,10 +57,7 @@ def test_clean_contract_not_flagged():
 def test_clean_legal_analysis_not_flagged():
     """正常法律分析文本（含「忽略」「系统」等词但不构成注入）不应误报。"""
     # 「忽略」后不跟「指令/指示/规则」等，「系统」不与动作词组合
-    text = (
-        "在计算违约金时，可忽略小额误差。本系统仅提供参考意见。"
-        "请勿忽略证据保全的重要性。"
-    )
+    text = "在计算违约金时，可忽略小额误差。本系统仅提供参考意见。请勿忽略证据保全的重要性。"
     result = detect_prompt_injection(text)
     assert result.detected is False
 
@@ -302,7 +298,10 @@ def test_extract_document_result_serializable_with_injection(tmp_path: Path):
     assert parsed["success"] is True
     assert parsed["injection_detection"]["detected"] is True
     assert "patterns" in parsed["injection_detection"]
-    assert parsed["injection_detection"]["sanitized_text"] == parsed["injection_detection"]["original_text"]
+    assert (
+        parsed["injection_detection"]["sanitized_text"]
+        == parsed["injection_detection"]["original_text"]
+    )
 
 
 def test_extract_document_backward_compatible_no_injection_in_clean(tmp_path: Path):

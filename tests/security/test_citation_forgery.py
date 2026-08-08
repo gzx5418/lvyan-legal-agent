@@ -54,7 +54,8 @@ def _state(
         "missing_facts": [],
         "uploaded_documents": [],
         "plan": [],
-        "retrieval_queries": retrieval_queries or [
+        "retrieval_queries": retrieval_queries
+        or [
             RetrievalQuery(
                 query_id="rq-1",
                 query_text="合同违约责任 法条",
@@ -95,18 +96,14 @@ def test_fabricated_article_number_9999(
     assert report.passed is False
     not_found = [i for i in report.issues if i.issue_type == "not_found"]
     assert len(not_found) >= 1
-    assert any(
-        "9999" in i.citation_id or "九千九百九十九" in i.citation_id for i in not_found
-    )
+    assert any("9999" in i.citation_id or "九千九百九十九" in i.citation_id for i in not_found)
 
 
 def test_fabricated_article_number_arabic(
     make_authority, make_reasoning_result, mock_statute_status_effective
 ):
     """阿拉伯数字「第 9999 条」亦应被拦截。"""
-    rr = make_reasoning_result(
-        key_factors=["依据《中华人民共和国民法典》第9999条认定违约"]
-    )
+    rr = make_reasoning_result(key_factors=["依据《中华人民共和国民法典》第9999条认定违约"])
     statutes = [make_authority(article_number="第五百七十七条")]
 
     report = validate_citations(rr, statutes)
@@ -122,9 +119,7 @@ def test_fabricated_labor_law_article_999(
     make_authority, make_reasoning_result, mock_statute_status_effective
 ):
     """「《劳动法》第 999 条」条号超范围 → not_found。"""
-    rr = make_reasoning_result(
-        key_factors=["依据《中华人民共和国劳动法》第九百九十九条主张权利"]
-    )
+    rr = make_reasoning_result(key_factors=["依据《中华人民共和国劳动法》第九百九十九条主张权利"])
     # statutes 中只有民法典，没有劳动法第 999 条
     statutes = [make_authority(title="中华人民共和国民法典", article_number="第五百七十七条")]
 
@@ -142,9 +137,7 @@ def test_fabricated_nonexistent_law(
     make_authority, make_reasoning_result, mock_statute_status_effective
 ):
     """「《虚构法》第 1 条」法律本身不存在 → not_found。"""
-    rr = make_reasoning_result(
-        key_factors=["依据《中华人民共和国虚构法》第一条判定胜诉"]
-    )
+    rr = make_reasoning_result(key_factors=["依据《中华人民共和国虚构法》第一条判定胜诉"])
     statutes = [make_authority(title="中华人民共和国民法典", article_number="第五百七十七条")]
 
     report = validate_citations(rr, statutes)
@@ -158,9 +151,7 @@ def test_fabricated_nonexistent_law_variant(
     make_authority, make_reasoning_result, mock_statute_status_effective
 ):
     """「《宇宙基本法》第 1 条」亦应被拦截（明显虚构的法律名称）。"""
-    rr = make_reasoning_result(
-        key_factors=["根据《宇宙基本法》第一条，甲方自动胜诉"]
-    )
+    rr = make_reasoning_result(key_factors=["根据《宇宙基本法》第一条，甲方自动胜诉"])
     statutes = [make_authority(title="中华人民共和国民法典", article_number="第五百七十七条")]
 
     report = validate_citations(rr, statutes)
@@ -197,9 +188,7 @@ def test_mixed_real_and_fabricated(
 # ---------------------------------------------------------------------------
 # 5. 全部虚构
 # ---------------------------------------------------------------------------
-def test_all_fabricated(
-    make_authority, make_reasoning_result, mock_statute_status_effective
-):
+def test_all_fabricated(make_authority, make_reasoning_result, mock_statute_status_effective):
     """全部虚构引用 → passed=False，多条 not_found。"""
     rr = make_reasoning_result(
         key_factors=[
@@ -224,9 +213,7 @@ def test_citation_verifier_node_flags_fabricated_and_reretrieval(
 ):
     """citation_verifier 节点：含虚构法条 → audit.passed=False, fabricated>=1,
     iteration < max → 触发重检索（iteration+1，retrieval_queries 追加）。"""
-    rr = make_reasoning_result(
-        key_factors=["依据《中华人民共和国虚构法》第一条判定甲方胜诉"]
-    )
+    rr = make_reasoning_result(key_factors=["依据《中华人民共和国虚构法》第一条判定甲方胜诉"])
     statutes = [make_authority(article_number="第五百七十七条")]
     state = _state(rr, statutes, iteration=0)
 
@@ -246,9 +233,7 @@ def test_citation_verifier_node_normal_passes(
     make_authority, make_reasoning_result, mock_statute_status_effective
 ):
     """citation_verifier 节点：正常引用 → audit.passed=True，无重检索。"""
-    rr = make_reasoning_result(
-        key_factors=["依据《中华人民共和国民法典》第五百七十七条认定违约"]
-    )
+    rr = make_reasoning_result(key_factors=["依据《中华人民共和国民法典》第五百七十七条认定违约"])
     statutes = [make_authority(article_number="第五百七十七条")]
     state = _state(rr, statutes, iteration=0)
 
@@ -274,9 +259,7 @@ def test_citation_verifier_node_force_pass_at_max_iterations(
     注：citation_verifier 内部 max = min(settings.max_retrieval_iterations, 2)，
     构造 iteration >= 2 即触发强制通过。
     """
-    rr = make_reasoning_result(
-        key_factors=["依据《中华人民共和国虚构法》第一条判定甲方胜诉"]
-    )
+    rr = make_reasoning_result(key_factors=["依据《中华人民共和国虚构法》第一条判定甲方胜诉"])
     statutes = [make_authority(article_number="第五百七十七条")]
     state = _state(rr, statutes, iteration=2)
 
@@ -297,7 +280,9 @@ def test_citation_verifier_node_force_pass_at_max_iterations(
 # 8. reretrieval_count 不超过上限（无限制循环防护）
 # ---------------------------------------------------------------------------
 def test_reretrieval_count_capped(
-    make_authority, make_reasoning_result, mock_statute_status_effective,
+    make_authority,
+    make_reasoning_result,
+    mock_statute_status_effective,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """连续调用 citation_verifier：reretrieval_count 不超过 min(max_iter, 2)=2。
@@ -306,9 +291,7 @@ def test_reretrieval_count_capped(
     保留旧默认值 max_retrieval_iterations=3 验证内部 min(,2) 上限。
     """
     monkeypatch.setattr(settings, "max_retrieval_iterations", 3)
-    rr = make_reasoning_result(
-        key_factors=["依据《中华人民共和国虚构法》第一条"]
-    )
+    rr = make_reasoning_result(key_factors=["依据《中华人民共和国虚构法》第一条"])
     statutes = [make_authority(article_number="第五百七十七条")]
 
     # iteration=0 → 触发重检索，返回 iteration=1

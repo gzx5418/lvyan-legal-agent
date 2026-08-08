@@ -61,9 +61,7 @@ def _make_state(final_output: str = "") -> CaseState:
 @pytest.fixture
 def hitl_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     """强制开启 HITL。"""
-    monkeypatch.setattr(
-        "lvyan.nodes.output_guardrail.settings.hitl_enabled", True
-    )
+    monkeypatch.setattr("lvyan.nodes.output_guardrail.settings.hitl_enabled", True)
 
 
 @pytest.fixture
@@ -77,6 +75,7 @@ def patch_interrupt(monkeypatch: pytest.MonkeyPatch):
         )
 
     return _set
+
 
 # ---------------------------------------------------------------------------
 # 1. approve：正文不变，status=approved
@@ -225,9 +224,7 @@ def test_hitl_edit_not_treated_as_approve(hitl_enabled, patch_interrupt):
 # ---------------------------------------------------------------------------
 # 6. 不可逆操作不命中时，不触发 interrupt
 # ---------------------------------------------------------------------------
-def test_no_irreversible_op_no_interrupt(
-    hitl_enabled, monkeypatch: pytest.MonkeyPatch
-):
+def test_no_irreversible_op_no_interrupt(hitl_enabled, monkeypatch: pytest.MonkeyPatch):
     """输出中不含不可逆操作 → 不应调用 interrupt。"""
     called = {"count": 0}
 

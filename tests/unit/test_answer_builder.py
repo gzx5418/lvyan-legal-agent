@@ -1,4 +1,5 @@
 """build_legal_answer 构建器测试。"""
+
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -124,6 +125,25 @@ def test_evidence_requirements_map_to_matrix():
     assert by_id["E2"].status == "missing"
 
 
+def test_contract_action_plan_does_not_use_universal_deduction_template():
+    answer = build_legal_answer(_make_state(case_type="合同纠纷"))
+    descriptions = " ".join(item.description for item in answer.action_plan)
+    assert "具体扣款项目" not in descriptions
+    assert "合同依据" in descriptions
+
+
+def test_insufficient_judicial_tendency_is_neutral_not_high_risk():
+    state = _make_state(
+        reasoning_result=ReasoningResult(
+            judicial_tendency="insufficient",
+            evidence_confidence="low",
+        ),
+    )
+    answer = build_legal_answer(state)
+    tendency = next(item for item in answer.risks if item.dimension == "司法裁判趋势")
+    assert tendency.rating == "medium"
+
+
 def test_risk_level_maps_to_risk_matrix():
     """risk_level 映射为综合风险维度 + 多维度评估。"""
     state = _make_state(
@@ -139,11 +159,25 @@ def test_action_plan_generated_from_missing_facts():
     """缺失事实生成 immediate 行动建议。"""
     state = _make_state(
         missing_facts=[
-            MissingFact(fact_key="M1", question="补充租赁合同", reason="关键证据", is_blocking=True),
+            MissingFact(
+                fact_key="M1", question="补充租赁合同", reason="关键证据", is_blocking=True
+            ),
         ],
     )
     answer = build_legal_answer(state)
     assert any(a.phase == "immediate" for a in answer.action_plan)
+
+
+def test_work_injury_action_plan_uses_recognition_deadlines():
+    """工伤认定场景应给出事故责任证据与30日/1年申请期限。"""
+    answer = build_legal_answer(
+        _make_state(case_type="工伤认定", user_goal="上班途中发生交通事故是否工伤")
+    )
+    descriptions = " ".join(item.description for item in answer.action_plan)
+    assert "道路交通事故责任认定书" in descriptions
+    assert "30日" in descriptions
+    assert "1年" in descriptions
+    assert "扣款项目" not in descriptions
 
 
 def test_composer_writes_legal_answer_to_state():

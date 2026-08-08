@@ -141,7 +141,9 @@ def run_pipeline_evaluation(
         answer_golden = item.get("answer_golden")
 
         qr = PipelineQueryResult(
-            query_id=qid, query=query, category=category,
+            query_id=qid,
+            query=query,
+            category=category,
             has_answer_golden=bool(answer_golden),
         )
 
@@ -159,13 +161,15 @@ def run_pipeline_evaluation(
             qr.facts_count = len(final_state.get("facts") or [])
             qr.pipeline_ok = True
 
-            items_for_answer_eval.append({
-                "state": final_state,
-                "answer_golden": answer_golden,
-                "query_id": qid,
-                "query": query,
-                "category": category,
-            })
+            items_for_answer_eval.append(
+                {
+                    "state": final_state,
+                    "answer_golden": answer_golden,
+                    "query_id": qid,
+                    "query": query,
+                    "category": category,
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             qr.elapsed_seconds = time.monotonic() - t0
             qr.pipeline_ok = False
@@ -178,8 +182,8 @@ def run_pipeline_evaluation(
     report.successful_runs = len(successful)
     report.failed_runs = len(report.per_query) - len(successful)
     if report.per_query:
-        report.avg_elapsed_seconds = (
-            sum(q.elapsed_seconds for q in report.per_query) / len(report.per_query)
+        report.avg_elapsed_seconds = sum(q.elapsed_seconds for q in report.per_query) / len(
+            report.per_query
         )
         report.pipeline_success_rate = len(successful) / len(report.per_query)
 
@@ -211,9 +215,7 @@ def _format_report(report: PipelineReport) -> str:
     lines.append(f"  法条引用准确率       : {report.avg_statute_accuracy:.4f}")
     lines.append(f"  虚构法条率           : {report.avg_fabrication_rate:.4f}")
     lines.append("-" * 70)
-    lines.append(
-        f"  {'qid':<14} {'ok':<4} {'secs':<7} {'statutes':<9} {'acc':<6} {'fab':<6}"
-    )
+    lines.append(f"  {'qid':<14} {'ok':<4} {'secs':<7} {'statutes':<9} {'acc':<6} {'fab':<6}")
     lines.append("-" * 70)
     for q in report.per_query:
         lines.append(
@@ -231,8 +233,7 @@ def main() -> int:
     )
     parser.add_argument("--golden", default=str(DEFAULT_GOLDEN_PATH))
     parser.add_argument("--limit", type=int, default=3)
-    parser.add_argument("--complexity", default="light",
-                        choices=["light", "deep", "document"])
+    parser.add_argument("--complexity", default="light", choices=["light", "deep", "document"])
     parser.add_argument("--json", default=None)
     args = parser.parse_args()
 

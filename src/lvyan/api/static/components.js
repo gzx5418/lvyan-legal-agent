@@ -15,6 +15,31 @@ const RISK_RATING_META = {
   low:    { label: '低风险', cls: 'risk-low' },
 };
 
+const CONFIDENCE_RATING_META = {
+  high:   { label: '高置信度', cls: 'risk-low' },
+  medium: { label: '中等置信度', cls: 'risk-medium' },
+  low:    { label: '低置信度', cls: 'risk-high' },
+};
+
+const TENDENCY_RATING_META = {
+  high:   { label: '较不利', cls: 'risk-high' },
+  medium: { label: '待判断', cls: 'risk-medium' },
+  low:    { label: '较有利', cls: 'risk-low' },
+};
+
+function ratingMeta(dimension, rating, detail = '') {
+  if (dimension === '证据置信度') {
+    return CONFIDENCE_RATING_META[rating] || CONFIDENCE_RATING_META.medium;
+  }
+  if (dimension === '司法裁判趋势') {
+    if (String(detail).includes('信息不足') || String(detail).includes('无法判断')) {
+      return { label: '待判断', cls: 'risk-medium' };
+    }
+    return TENDENCY_RATING_META[rating] || TENDENCY_RATING_META.medium;
+  }
+  return RISK_RATING_META[rating] || RISK_RATING_META.medium;
+}
+
 // P2：枚举中文化映射
 const EVIDENCE_STATUS_CN = { provided: '已提供', missing: '未提供', partial: '部分提供' };
 const PROBATIVE_FORCE_CN = { key: '关键', strong: '较强', medium: '一般', weak: '较弱', unevaluated: '待评估' };
@@ -69,7 +94,7 @@ function renderSummaryGrid(summary, risks, meta) {
   if (!summary) return '';
   const reasons = (summary.key_reasons || []).map(r => `<li>${esc(r)}</li>`).join('');
   const riskItems = (risks || []).slice(0, 4).map(r => {
-    const m = RISK_RATING_META[r.rating] || RISK_RATING_META.medium;
+    const m = ratingMeta(r.dimension, r.rating, r.detail);
     return `<div class="la-risk-panel-item">
       <div class="la-risk-panel-label">${esc(r.dimension)}</div>
       <div class="la-risk-panel-value"><span class="risk-badge ${m.cls}">${m.label}</span></div>
@@ -161,7 +186,7 @@ function renderEvidence(evidence) {
 function renderRisks(risks) {
   if (!risks || !risks.length) return '';
   const rows = risks.map(r => {
-    const m = RISK_RATING_META[r.rating] || RISK_RATING_META.medium;
+    const m = ratingMeta(r.dimension, r.rating, r.detail);
     return `<tr><td>${esc(r.dimension)}</td><td><span class="risk-badge ${m.cls}">${m.label}</span></td><td>${esc(r.detail)}</td></tr>`;
   }).join('');
   return `<section class="la-section"><h3>完整风险评估</h3>
@@ -174,7 +199,7 @@ function renderRisks(risks) {
 function renderFullActionPlan(plan) {
   const nonImmediate = (plan || []).filter(a => a.phase !== 'immediate');
   if (!nonImmediate.length) return '';
-  const phaseLabel = { short_term: '近期（3日内）', contingency: '协商失败后' };
+  const phaseLabel = { short_term: '近期安排', contingency: '后续方案' };
   const grouped = {};
   nonImmediate.forEach(a => { const p = a.phase || 'short_term'; if (!grouped[p]) grouped[p] = []; grouped[p].push(a); });
   const blocks = Object.keys(grouped).map(p => {
@@ -190,12 +215,16 @@ function renderCitations(citations) {
     const levelLabel = CITATION_LEVEL_CN[c.level] || c.level || '';
     const statusLabel = CITATION_STATUS_CN[c.status] || c.status || '';
     const role = c.role_in_analysis ? `<p><small>本案作用：${esc(c.role_in_analysis)}</small></p>` : '';
+    const sourceText = c.official_source || '官方数据库';
+    const source = /^https?:\/\//i.test(sourceText)
+      ? `<a href="${esc(sourceText)}" target="_blank" rel="noopener noreferrer">查看官方来源</a>`
+      : esc(sourceText);
     return `<details class="la-citation">
       <summary><span class="la-citation-level level-${esc(c.level)}">${esc(levelLabel)}</span>《${esc(c.full_name)}》${esc(c.article_number)}</summary>
       <div class="la-citation-detail">
         <p>${esc(c.article_text)}</p>
         ${role}
-        <p><small>效力状态：${esc(statusLabel)}　来源：${esc(c.official_source || '官方数据库')}</small></p>
+        <p><small>效力状态：${esc(statusLabel)}　来源：${source}</small></p>
       </div>
     </details>`;
   }).join('');

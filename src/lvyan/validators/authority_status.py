@@ -185,11 +185,7 @@ def _check_authority(
         return issues  # 状态未生效，后续时间检查无意义
 
     # 规则 2：effective_date > current_date → error（尚未生效）
-    if (
-        current_date is not None
-        and effective_date is not None
-        and effective_date > current_date
-    ):
+    if current_date is not None and effective_date is not None and effective_date > current_date:
         issues.append(
             AuthorityStatusIssue(
                 source_id=source_id,
@@ -206,11 +202,7 @@ def _check_authority(
         return issues
 
     # 规则 3：expiry_date <= current_date → error（已过期）
-    if (
-        current_date is not None
-        and expiry_date is not None
-        and expiry_date <= current_date
-    ):
+    if current_date is not None and expiry_date is not None and expiry_date <= current_date:
         issues.append(
             AuthorityStatusIssue(
                 source_id=source_id,
@@ -236,8 +228,7 @@ def _check_authority(
                 expected_status="effective",
                 severity="warning",
                 detail=(
-                    f"引用了被取代的历史版本（被 {superseded_by} 取代），"
-                    f"但未明确标注「历史适用」"
+                    f"引用了被取代的历史版本（被 {superseded_by} 取代），但未明确标注「历史适用」"
                 ),
             )
         )

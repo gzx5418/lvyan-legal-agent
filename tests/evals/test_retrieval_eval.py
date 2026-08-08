@@ -67,8 +67,13 @@ def test_golden_set_covers_all_categories():
     golden = load_golden_set(DEFAULT_GOLDEN_PATH)
     categories = {item["category"] for item in golden}
     required = {
-        "劳动争议", "合同纠纷", "侵权纠纷", "婚姻家庭",
-        "租赁纠纷", "消费者权益", "个人信息保护",
+        "劳动争议",
+        "合同纠纷",
+        "侵权纠纷",
+        "婚姻家庭",
+        "租赁纠纷",
+        "消费者权益",
+        "个人信息保护",
     }
     missing = required - categories
     assert not missing, f"金标集缺少类别: {missing}"
@@ -81,9 +86,16 @@ def test_eval_report_has_all_metric_fields():
     """EvalReport 应含全部指标字段（含废止法规误召回率）。"""
     report = EvalReport()
     required_fields = {
-        "total_queries", "avg_recall_at_k", "avg_mrr", "avg_ndcg_at_k",
-        "statute_hit_rate", "version_hit_rate", "repealed_recall_rate",
-        "per_query", "top_k", "label",
+        "total_queries",
+        "avg_recall_at_k",
+        "avg_mrr",
+        "avg_ndcg_at_k",
+        "statute_hit_rate",
+        "version_hit_rate",
+        "repealed_recall_rate",
+        "per_query",
+        "top_k",
+        "label",
     }
     actual_fields = set(report.__dict__.keys())
     missing = required_fields - actual_fields
@@ -100,14 +112,26 @@ def test_eval_report_repealed_recall_rate_field_exists():
 def test_query_result_has_expected_fields():
     """QueryResult 应含 spec 要求的字段。"""
     qr = QueryResult(
-        query_id="test_001", query="测试", category="测试",
-        hit=True, hit_rank=1,
+        query_id="test_001",
+        query="测试",
+        category="测试",
+        hit=True,
+        hit_rank=1,
     )
     required_fields = {
-        "query_id", "query", "hit", "hit_rank",
-        "recalled_titles", "expected_titles", "repealed_in_results",
-        "recalled_statuses", "matched_expected", "recall_at_k",
-        "reciprocal_rank", "ndcg_at_k", "category",
+        "query_id",
+        "query",
+        "hit",
+        "hit_rank",
+        "recalled_titles",
+        "expected_titles",
+        "repealed_in_results",
+        "recalled_statuses",
+        "matched_expected",
+        "recall_at_k",
+        "reciprocal_rank",
+        "ndcg_at_k",
+        "category",
     }
     actual_fields = set(qr.__dict__.keys())
     missing = required_fields - actual_fields
@@ -165,9 +189,7 @@ def test_evaluate_retrieval_recall_gap_regression():
     命中任一即视为召回漏洞已修复。
     """
     report = evaluate_retrieval(golden_path=DEFAULT_GOLDEN_PATH, top_k=10, limit=20)
-    privacy_q = next(
-        (q for q in report.per_query if q.query_id == "privacy_001"), None
-    )
+    privacy_q = next((q for q in report.per_query if q.query_id == "privacy_001"), None)
     if privacy_q is None:
         pytest.skip("金标集中无 privacy_001")
     # 至少命中一条 expected statute（个人信息保护法 或 民法典隐私权条款）

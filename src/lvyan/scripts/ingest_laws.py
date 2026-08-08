@@ -65,8 +65,17 @@ _AUTHORITY_LEVEL_MAP: dict[str, str] = {
 
 # 中文数字字符 -> 数值
 _DIGIT_MAP: dict[str, int] = {
-    "零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4,
-    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
 }
 
 
@@ -149,7 +158,7 @@ def _strip_front_matter(text: str) -> str:
         return text
     for i in range(1, len(lines)):
         if lines[i].rstrip("\r\n").strip() == "---":
-            return "".join(lines[i + 1:])
+            return "".join(lines[i + 1 :])
     return text
 
 
@@ -437,7 +446,9 @@ def write_to_opensearch(chunks: list[ArticleChunk]) -> int:
             ssl_show_warn=False,
         )
         for chunk in chunks:
-            client.index(index="law_articles_v2", id=chunk.chunk_id, body=chunk.model_dump(mode="json"))
+            client.index(
+                index="law_articles_v2", id=chunk.chunk_id, body=chunk.model_dump(mode="json")
+            )
         return len(chunks)
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] OpenSearch 写入失败：{exc}", file=sys.stderr)

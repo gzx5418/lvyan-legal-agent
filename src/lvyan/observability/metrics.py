@@ -31,9 +31,7 @@ class MetricsRecorder:
             entry["count"] += 1
             entry["total_ms"] += float(duration_ms)
 
-    def record_tool_call(
-        self, tool_name: str, duration_ms: float, success: bool = True
-    ) -> None:
+    def record_tool_call(self, tool_name: str, duration_ms: float, success: bool = True) -> None:
         """记录一次工具调用。"""
         with self._lock:
             entry = self._tools.setdefault(

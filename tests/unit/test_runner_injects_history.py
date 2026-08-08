@@ -1,4 +1,5 @@
 """验证 RunManager 为 RunContext 注入历史读取回调。"""
+
 from __future__ import annotations
 
 from lvyan.api.sse import RunManager
@@ -71,4 +72,3 @@ def test_default_runner_writes_conversation_summary_into_initial_state(monkeypat
     asyncio.run(default_runner("本轮问题", "thread-1", "deep", ctx))
     assert captured["initial"]["conversation_summary"].count("上一轮问题") == 1
     assert captured["initial"]["conversation_summary"].count("上一轮回答") == 1
-

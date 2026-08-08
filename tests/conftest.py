@@ -21,9 +21,7 @@ os.environ.setdefault("PERSISTENCE_REQUIRED", "false")
 # 若 shell 残留了生产变量，显式覆盖回开发默认（setdefault 不会覆盖已有值，
 # 这里需要强制覆盖，故用直接赋值）。
 os.environ["RUNTIME_MODE"] = os.environ.get("LVYAN_TEST_RUNTIME_MODE", "development")
-os.environ["PERSISTENCE_REQUIRED"] = os.environ.get(
-    "LVYAN_TEST_PERSISTENCE_REQUIRED", "false"
-)
+os.environ["PERSISTENCE_REQUIRED"] = os.environ.get("LVYAN_TEST_PERSISTENCE_REQUIRED", "false")
 
 # 关键：在「开发默认环境」下立即 import lvyan.config，使 ``settings`` 单例在此刻
 # 冻结为 development / persistence_required=False。否则 ``settings`` 会在第一个

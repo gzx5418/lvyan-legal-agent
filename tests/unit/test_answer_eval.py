@@ -50,9 +50,7 @@ from run_regression import (  # noqa: E402
 def _make_statute(
     title: str = "中华人民共和国劳动合同法",
     article_number: str = "第四十七条",
-    article_text: str = (
-        "经济补偿按劳动者在本单位工作的年限，每满一年支付一个月工资。"
-    ),
+    article_text: str = ("经济补偿按劳动者在本单位工作的年限，每满一年支付一个月工资。"),
     status: str = "effective",
     source_id: str = "",
 ) -> dict[str, Any]:
@@ -76,8 +74,7 @@ def _make_reasoning_result(
 ) -> dict[str, Any]:
     if key_factors is None:
         key_factors = [
-            "依据《中华人民共和国劳动合同法》第四十七条，"
-            "经济补偿按劳动者在本单位工作的年限计算"
+            "依据《中华人民共和国劳动合同法》第四十七条，经济补偿按劳动者在本单位工作的年限计算"
         ]
     return {
         "legal_relationship": "劳动争议",
@@ -117,11 +114,9 @@ def _make_answer_golden(
     ruling_tendency: str = "较有利",
 ) -> dict[str, Any]:
     return {
-        "disputed_issues": disputed_issues
-        or ["是否构成违法解除", "经济补偿计算基数"],
+        "disputed_issues": disputed_issues or ["是否构成违法解除", "经济补偿计算基数"],
         "evidence_gaps": evidence_gaps or ["工资流水", "解除通知书"],
-        "defendant_arguments": defendant_arguments
-        or ["原告严重违反规章制度"],
+        "defendant_arguments": defendant_arguments or ["原告严重违反规章制度"],
         "ruling_tendency": ruling_tendency,
     }
 
@@ -147,7 +142,7 @@ def _make_evidence_requirements(
 # ---------------------------------------------------------------------------
 def test_answer_eval_result_has_all_metric_fields():
     """AnswerEvalResult 应含全部回答评测指标字段。"""
-    result = AnswerEvalResult(query_id="test_001")
+    AnswerEvalResult(query_id="test_001")
     required_fields = {
         "query_id",
         "total_citations",
@@ -171,7 +166,7 @@ def test_answer_eval_result_has_all_metric_fields():
 
 def test_answer_eval_report_has_all_metric_fields():
     """AnswerEvalReport 应含全部聚合指标字段。"""
-    report = AnswerEvalReport()
+    AnswerEvalReport()
     required_fields = {
         "total_queries",
         "evaluated_queries",
@@ -233,8 +228,7 @@ def test_evaluate_answer_case_number_fabrication():
     """虚构案号：引用案号不在 state.cases 中 → fabrication_rate=1.0。"""
     rr = _make_reasoning_result(
         key_factors=[
-            "依据《中华人民共和国劳动合同法》第四十七条计算经济补偿，"
-            "参照(2023)京01民初123号案判决"
+            "依据《中华人民共和国劳动合同法》第四十七条计算经济补偿，参照(2023)京01民初123号案判决"
         ]
     )
     state = _make_state(reasoning_result=rr, cases=[])  # cases 为空
@@ -248,8 +242,7 @@ def test_evaluate_answer_case_number_real():
     """真实案号：引用案号在 state.cases 中 → fabrication_rate=0.0。"""
     rr = _make_reasoning_result(
         key_factors=[
-            "依据《中华人民共和国劳动合同法》第四十七条计算经济补偿，"
-            "参照(2023)京01民初123号案判决"
+            "依据《中华人民共和国劳动合同法》第四十七条计算经济补偿，参照(2023)京01民初123号案判决"
         ]
     )
     state = _make_state(
@@ -297,9 +290,7 @@ def test_evaluate_answer_partial_coverage():
     """部分覆盖：金标 2 条争议焦点，实际只覆盖 1 条 → coverage=0.5。"""
     rr = _make_reasoning_result(disputed_focus=["是否构成违法解除"])  # 仅 1 条
     state = _make_state(reasoning_result=rr)
-    golden = _make_answer_golden(
-        disputed_issues=["是否构成违法解除", "经济补偿计算基数"]
-    )
+    golden = _make_answer_golden(disputed_issues=["是否构成违法解除", "经济补偿计算基数"])
     result = evaluate_answer(state=state, answer_golden=golden, query_id="test_pc")
     assert result.disputed_issue_coverage == 0.5
 

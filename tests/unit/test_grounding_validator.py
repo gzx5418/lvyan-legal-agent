@@ -63,8 +63,7 @@ def test_validate_grounding_supported():
     """引用上下文与条文有充分 bigram 重叠 → passed=True。"""
     rr = _make_reasoning_result(
         key_factors=[
-            "依据《中华人民共和国民法典》第五百七十七条，"
-            "当事人一方不履行合同义务应当承担违约责任"
+            "依据《中华人民共和国民法典》第五百七十七条，当事人一方不履行合同义务应当承担违约责任"
         ]
     )
     statutes = [_make_authority()]
@@ -85,10 +84,7 @@ def test_validate_grounding_no_support():
     中任何字段（合同/违约/主张等）均无 bigram 重叠。
     """
     rr = _make_reasoning_result(
-        key_factors=[
-            "依据《中华人民共和国民法典》第五百七十七条"
-            "关于宇宙飞船星际旅行的规定"
-        ]
+        key_factors=["依据《中华人民共和国民法典》第五百七十七条关于宇宙飞船星际旅行的规定"]
     )
     statutes = [
         _make_authority(
@@ -109,10 +105,7 @@ def test_validate_grounding_completely_unrelated():
     中任何字段均无 bigram 重叠。
     """
     rr = _make_reasoning_result(
-        key_factors=[
-            "依据《中华人民共和国民法典》第五百七十七条"
-            "量子力学测不准原理"
-        ]
+        key_factors=["依据《中华人民共和国民法典》第五百七十七条量子力学测不准原理"]
     )
     statutes = [
         _make_authority(
@@ -122,9 +115,7 @@ def test_validate_grounding_completely_unrelated():
     report = validate_grounding(rr, statutes)
     no_support = [i for i in report.issues if i.issue_type == "no_support"]
     # 完全不相干时应有 no_support error（或至少 weak_support warning）
-    assert len(no_support) >= 1 or any(
-        i.issue_type == "weak_support" for i in report.issues
-    )
+    assert len(no_support) >= 1 or any(i.issue_type == "weak_support" for i in report.issues)
 
 
 # ---------------------------------------------------------------------------
@@ -132,11 +123,7 @@ def test_validate_grounding_completely_unrelated():
 # ---------------------------------------------------------------------------
 def test_validate_grounding_weak_support():
     """引用上下文与条文有少量重叠但未达阈值 → weak_support warning。"""
-    rr = _make_reasoning_result(
-        key_factors=[
-            "依据《中华人民共和国民法典》第五百七十七条xyzabc"
-        ]
-    )
+    rr = _make_reasoning_result(key_factors=["依据《中华人民共和国民法典》第五百七十七条xyzabc"])
     statutes = [
         _make_authority(
             article_text="当事人一方不履行合同义务应承担违约责任",
@@ -154,9 +141,7 @@ def test_validate_grounding_weak_support():
 # ---------------------------------------------------------------------------
 def test_validate_grounding_unmatched():
     """引用不在 statutes 中 → unmatched warning。"""
-    rr = _make_reasoning_result(
-        key_factors=["依据《中华人民共和国合同法》第四条虚构条款"]
-    )
+    rr = _make_reasoning_result(key_factors=["依据《中华人民共和国合同法》第四条虚构条款"])
     statutes = [
         _make_authority(article_number="第五百七十七条")  # 不同的条文号
     ]
@@ -185,8 +170,7 @@ def test_validate_grounding_mixed():
     """多条引用：一条有支持，一条无支持 → passed=False。"""
     rr = _make_reasoning_result(
         key_factors=[
-            "依据《中华人民共和国民法典》第五百七十七条，"
-            "当事人一方不履行合同义务应当承担违约责任",
+            "依据《中华人民共和国民法典》第五百七十七条，当事人一方不履行合同义务应当承担违约责任",
             "依据《中华人民共和国民法典》第一千二百三十四条量子力学",
         ]
     )

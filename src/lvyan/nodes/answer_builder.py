@@ -4,6 +4,7 @@
 evidence_requirements / missing_facts）映射为 LegalAnswerV1，使最终输出具备
 固定字段与关联关系，便于前端组件化渲染与 DOCX/PDF 导出。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -26,8 +27,7 @@ from lvyan.schemas.legal_answer import (
 from lvyan.schemas.output import ReasoningResult
 
 _DISCLAIMER = (
-    "本内容为基于用户陈述和已上传材料生成的法律信息分析，"
-    "不是法院裁判、律师正式法律意见或结果保证。"
+    "本内容为基于用户陈述和已上传材料生成的法律信息分析，不是法院裁判、律师正式法律意见或结果保证。"
 )
 
 _AUTHORITY_LEVEL_MAP: dict[str, str] = {
@@ -167,7 +167,7 @@ def _build_risks(state: CaseState) -> list[RiskItem]:
             "somewhat_favorable": ("low", "整体趋势较有利"),
             "even": ("medium", "双方势均力敌"),
             "somewhat_unfavorable": ("high", "存在不利趋势"),
-            "insufficient": ("high", "信息不足以判断趋势"),
+            "insufficient": ("medium", "信息不足，暂无法判断趋势"),
         }
         rating, detail = tend_map.get(tend, ("medium", "趋势未知"))
         risks.append(RiskItem(dimension="司法裁判趋势", rating=rating, detail=detail))  # type: ignore[arg-type]
@@ -175,6 +175,30 @@ def _build_risks(state: CaseState) -> list[RiskItem]:
 
 
 def _build_action_plan(state: CaseState) -> list[ActionItem]:
+    if state.case_type == "工伤认定":
+        return [
+            ActionItem(
+                phase="immediate",
+                description="尽快取得道路交通事故责任认定书，并保存现场照片、视频、报警记录、诊断证明和病历原件",
+                target="固定事故责任、伤害事实和医疗证据",
+                required_materials=["道路交通事故责任认定书", "诊断证明/病历", "现场或报警记录"],
+                risk="事故责任认定是判断“非本人主要责任”的关键证据。",
+            ),
+            ActionItem(
+                phase="short_term",
+                description="书面告知用人单位并要求其在事故伤害发生之日起30日内申请工伤认定；同时整理个人申请材料",
+                target="及时启动工伤认定程序",
+                required_materials=["劳动关系证据", "医疗诊断证明", "事故责任认定书"],
+                deadline="事故伤害发生之日起30日内（用人单位申请）",
+            ),
+            ActionItem(
+                phase="contingency",
+                description="用人单位未申请的，劳动者、近亲属或工会组织可在事故伤害发生之日起1年内向统筹地区社会保险行政部门申请；对不予认定决定依法寻求救济",
+                target="保全工伤认定申请期限与救济权利",
+                deadline="事故伤害发生之日起1年内（个人、近亲属或工会组织申请）",
+            ),
+        ]
+
     plan: list[ActionItem] = []
     for mf in state.missing_facts:
         if mf.is_blocking:
@@ -195,17 +219,53 @@ def _build_action_plan(state: CaseState) -> list[ActionItem]:
                 target="固定证据",
             )
         )
+    guidance = {
+        "劳动争议": (
+            "向用人单位发送书面请求，明确工资、解除理由或补偿事项，并保留送达记录",
+            "在仲裁时效内向有管辖权的劳动人事争议仲裁委员会申请仲裁",
+            "劳动争议申请仲裁的时效通常为1年，具体起算时间需结合请求类型判断",
+        ),
+        "合同纠纷": (
+            "向合同相对方发送书面催告，列明具体请求、合同依据、金额和合理履行期限",
+            "逾期未履行的，按争议解决条款选择调解、仲裁或向有管辖权的法院起诉",
+            "普通合同请求权的诉讼时效通常为3年，需结合履行期限和知悉损害时间核算",
+        ),
+        "侵权纠纷": (
+            "向责任方提出书面赔偿请求，列明损害项目并附证据和费用凭证",
+            "协商不成时，根据证据情况申请鉴定、调解或向有管辖权的法院起诉",
+            "侵权损害赔偿请求通常适用3年诉讼时效，身体伤害等证据应尽早固定",
+        ),
+        "婚姻家庭": (
+            "在确保人身安全的前提下，提出子女、财产和债务处理的书面方案",
+            "无法达成协议的，整理身份、婚姻、子女和财产材料后依法申请调解或起诉",
+            "财产和损害赔偿等具体请求可能有期限，不宜因持续协商延误",
+        ),
+        "知识产权": (
+            "完成权属和侵权证据保全后，向对方或平台发送明确的停止侵害通知",
+            "根据侵权规模选择平台投诉、行政处理或民事诉讼，并主张合理维权费用",
+            "民事请求通常适用3年诉讼时效，网络证据可能灭失，应优先保全",
+        ),
+    }
+    short_term, contingency, deadline = guidance.get(
+        state.case_type,
+        (
+            "向对方发送可留痕的书面通知，明确事实、请求和合理处理期限",
+            "对方逾期未处理的，根据法律关系选择调解、仲裁、行政程序或诉讼",
+            "具体期限需依据请求权性质和事实发生时间单独核算",
+        ),
+    )
     plan.append(
         ActionItem(
             phase="short_term",
-            description="发送书面催告，要求对方说明具体扣款项目与依据",
+            description=short_term,
             target="尝试协商解决",
+            deadline=deadline,
         )
     )
     plan.append(
         ActionItem(
             phase="contingency",
-            description="协商不成时，整理证据目录与起诉材料，选择适当程序",
+            description=contingency,
             target="依法维权",
         )
     )
@@ -220,9 +280,7 @@ def _build_summary(state: CaseState) -> ExecutiveSummary:
     else:
         conclusion = f"关于「{state.user_goal}」的初步分析"
         key_reasons = []
-    uncertainty = (
-        state.missing_facts[0].question if state.missing_facts else "暂无显著不确定点"
-    )
+    uncertainty = state.missing_facts[0].question if state.missing_facts else "暂无显著不确定点"
     return ExecutiveSummary(
         conclusion=conclusion,
         key_reasons=key_reasons,

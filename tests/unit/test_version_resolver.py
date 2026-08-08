@@ -112,16 +112,13 @@ def test_status_mapping(tmp_path: Path, raw_status: str, expected: str):
     """构造含指定 status 的 front matter，验证映射结果。"""
     md = tmp_path / f"law_{expected}_{abs(hash(raw_status))}.md"
     md.write_text(
-        f"---\n"
-        f"id: test-{expected}\n"
-        f"title: 测试法规\n"
-        f"status: {raw_status}\n"
-        f"---\n\n"
-        f"正文内容\n",
+        f"---\nid: test-{expected}\ntitle: 测试法规\nstatus: {raw_status}\n---\n\n正文内容\n",
         encoding="utf-8",
     )
     meta = parse_law_metadata(md)
-    assert meta.status == expected, f"status '{raw_status}' 应映射为 '{expected}'，实际 '{meta.status}'"
+    assert meta.status == expected, (
+        f"status '{raw_status}' 应映射为 '{expected}'，实际 '{meta.status}'"
+    )
 
 
 def test_status_mapping_empty_and_missing(tmp_path: Path):

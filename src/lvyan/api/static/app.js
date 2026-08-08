@@ -7,7 +7,7 @@
 const state = {
   threadId: null,
   runId: null,
-  mode: 'light',
+  mode: 'auto',
   isRunning: false,
   history: [],        // [{threadId, query, mode, ts, messages}]
   runStartTime: 0,
@@ -30,7 +30,6 @@ let currentSSEController = null;
 
 const UI_PREFERENCES_KEY = 'lvyan_ui_preferences';
 const DEFAULT_UI_PREFERENCES = {
-  defaultMode: 'light',
   density: 'comfortable',
   reduceMotion: false,
 };
@@ -125,7 +124,6 @@ const els = {
   settingsBtn: $('settings-btn'),
   settingsView: $('settings-view'),
   settingsClose: $('settings-close'),
-  settingsDefaultMode: $('settings-default-mode'),
   settingsDensity: $('settings-density'),
   settingsReduceMotion: $('settings-reduce-motion'),
   settingsHealthDot: $('settings-health-dot'),
@@ -172,14 +170,6 @@ function init() {
   }
   loadUiPreferences();
 
-  // 模式选择
-  document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (state.isRunning) return;
-      setActiveMode(btn.dataset.mode);
-    });
-  });
-
   // 快捷问题
   document.querySelectorAll('.quick-q').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -223,11 +213,6 @@ function init() {
   els.settingsClose.addEventListener('click', closeSettings);
   document.querySelectorAll('.settings-nav-item').forEach(btn => {
     btn.addEventListener('click', () => showSettingsPanel(btn.dataset.settingsPanel));
-  });
-  els.settingsDefaultMode.addEventListener('change', () => {
-    uiPreferences.defaultMode = els.settingsDefaultMode.value;
-    persistUiPreferences();
-    if (!state.threadId && !state.isRunning) setActiveMode(uiPreferences.defaultMode);
   });
   els.settingsDensity.addEventListener('change', () => {
     uiPreferences.density = els.settingsDensity.value;
@@ -332,10 +317,9 @@ function handleGlobalShortcut(e) {
 // 设置页（浏览器本地偏好，不传递或展示服务端敏感配置）
 // =========================================================================
 function setActiveMode(mode) {
-  const validMode = ['light', 'deep', 'document'].includes(mode) ? mode : 'light';
-  state.mode = validMode;
+  state.mode = 'auto';
   document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.mode === validMode);
+    btn.classList.add('active');
   });
 }
 
@@ -343,15 +327,15 @@ function loadUiPreferences() {
   try {
     const raw = JSON.parse(localStorage.getItem(UI_PREFERENCES_KEY) || '{}');
     if (raw && typeof raw === 'object') {
-      if (['light', 'deep', 'document'].includes(raw.defaultMode)) uiPreferences.defaultMode = raw.defaultMode;
       if (['comfortable', 'compact'].includes(raw.density)) uiPreferences.density = raw.density;
       if (typeof raw.reduceMotion === 'boolean') uiPreferences.reduceMotion = raw.reduceMotion;
     }
   } catch { /* 浏览器隐私模式或损坏缓存时使用默认值 */ }
-  els.settingsDefaultMode.value = uiPreferences.defaultMode;
-  els.settingsDensity.value = uiPreferences.density;
-  els.settingsReduceMotion.checked = uiPreferences.reduceMotion;
-  setActiveMode(uiPreferences.defaultMode);
+  // 设置页字段可能在滚动发布或浏览器旧缓存中暂时不一致；可选控件缺失
+  // 不应阻断整个应用初始化和事件绑定。
+  if (els.settingsDensity) els.settingsDensity.value = uiPreferences.density;
+  if (els.settingsReduceMotion) els.settingsReduceMotion.checked = uiPreferences.reduceMotion;
+  setActiveMode();
   applyUiPreferences();
 }
 
@@ -722,7 +706,6 @@ async function sendQuery() {
     const body = {
       query,
       thread_id: state.threadId,
-      complexity: state.mode,
     };
     // 附加 file_id 列表
     if (state.attachments.length > 0) {
@@ -907,7 +890,9 @@ function handleSSEEvent(event) {
 
     case 'final_output':
       closeSSE();
-      if (event.answer && event.schema_version === 'legal_answer_v1' && window.renderLegalAnswer) {
+      if (event.answer && event.schema_version === 'legal_answer_v1'
+          && event.answer.meta && event.answer.meta.analysis_mode !== 'light'
+          && window.renderLegalAnswer) {
         updateLastAgentMessageStructured(event.answer, event.markdown_fallback || event.output || '');
       } else {
         updateLastAgentMessage(event.output || '(无输出)');
@@ -1618,10 +1603,7 @@ async function loadThreadState(threadId, item) {
     return;
   }
   state.threadId = threadId;
-  state.mode = item.mode || 'light';
-  document.querySelectorAll('.mode-btn').forEach(b => {
-    b.classList.toggle('active', b.dataset.mode === state.mode);
-  });
+  setActiveMode();
   els.threadLabel.textContent = (item.fullQuery || item.query || '').slice(0, 20);
   renderHistory();
   els.welcome.style.display = 'none';
@@ -1695,7 +1677,10 @@ function renderConversation(messages) {
       Array.isArray(message.attachments) ? message.attachments : [],
     );
     // 恢复结构化法律分析视图
-    if (message.structured_answer && role === 'agent' && window.renderLegalAnswer) {
+    if (message.structured_answer && role === 'agent'
+        && message.structured_answer.meta
+        && message.structured_answer.meta.analysis_mode !== 'light'
+        && window.renderLegalAnswer) {
       const lastMsg = els.messages.querySelector('.msg-agent:last-child');
       const lastContent = lastMsg ? lastMsg.querySelector('.msg-content') : null;
       if (lastMsg && lastContent) {
@@ -1806,7 +1791,7 @@ function startNewChat() {
   state.threadId = null;
   state.runId = null;
   state.isRunning = false;
-  setActiveMode(uiPreferences.defaultMode);
+  setActiveMode();
   state.lastQuery = '';
   clearAttachments();
   els.welcome.style.display = 'flex';
@@ -1835,7 +1820,7 @@ function exportConversation() {
 
   let md = `# 律言法律智能体 · 对话记录\n\n`;
   md += `> 导出时间：${new Date().toLocaleString()}\n`;
-  md += `> 模式：${state.mode}\n\n---\n\n`;
+  md += `\n---\n\n`;
 
   msgs.forEach(msg => {
     const role = msg.classList.contains('msg-user') ? '👤 **用户**' : '⚖️ **律言 Agent**';

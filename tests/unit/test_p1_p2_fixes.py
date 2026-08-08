@@ -61,7 +61,10 @@ def test_citation_verifier_missing_citation_when_statutes_present(monkeypatch):
     # 模拟 validate_citations 返回 0 引用（异常状态）
     def _empty_citations(*a, **kw):
         return CitationValidationReport(
-            total_citations=0, valid_citations=0, issues=[], passed=True,
+            total_citations=0,
+            valid_citations=0,
+            issues=[],
+            passed=True,
         )
 
     monkeypatch.setattr(cv_module, "validate_citations", _empty_citations)
@@ -268,12 +271,24 @@ def test_reranker_jaccard_fallback_returns_scores():
     from lvyan.retrieval.reranker import rerank
 
     candidates = [
-        ScoredChunk(chunk_id="1", score=0.5, chunk={
-            "title": "民法典", "article_number": "第1条", "article_text": "合同违约",
-        }),
-        ScoredChunk(chunk_id="2", score=0.4, chunk={
-            "title": "劳动法", "article_number": "第2条", "article_text": "解除合同",
-        }),
+        ScoredChunk(
+            chunk_id="1",
+            score=0.5,
+            chunk={
+                "title": "民法典",
+                "article_number": "第1条",
+                "article_text": "合同违约",
+            },
+        ),
+        ScoredChunk(
+            chunk_id="2",
+            score=0.4,
+            chunk={
+                "title": "劳动法",
+                "article_number": "第2条",
+                "article_text": "解除合同",
+            },
+        ),
     ]
     out = rerank("合同违约怎么处理", candidates, top_k=2)
     assert len(out) <= 2

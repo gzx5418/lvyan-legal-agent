@@ -45,9 +45,7 @@ def _make_state(user_goal: str = "公司辞退我，工作 3 年，月薪 8000 �
 # ---------------------------------------------------------------------------
 def test_llm_fact_extraction_does_not_raise(monkeypatch: pytest.MonkeyPatch):
     """mock chat_json 返回 fact → 节点应产出 source="llm" 的 Fact，不报错。"""
-    monkeypatch.setattr(
-        "lvyan.llm.llm_available", lambda: True
-    )
+    monkeypatch.setattr("lvyan.llm.llm_available", lambda: True)
     monkeypatch.setattr(
         "lvyan.llm.chat_json",
         lambda messages, **kw: {
@@ -140,9 +138,7 @@ def test_fallback_when_chat_json_returns_none(monkeypatch: pytest.MonkeyPatch):
 def test_fallback_when_chat_json_invalid_structure(monkeypatch: pytest.MonkeyPatch):
     """chat_json 返回非 dict 结构 → 降级。"""
     monkeypatch.setattr("lvyan.llm.llm_available", lambda: True)
-    monkeypatch.setattr(
-        "lvyan.llm.chat_json", lambda messages, **kw: "not a dict"
-    )
+    monkeypatch.setattr("lvyan.llm.chat_json", lambda messages, **kw: "not a dict")
 
     result = fact_extractor.fact_extractor(_make_state("欠薪 1 万元"))
     facts = result["facts"]

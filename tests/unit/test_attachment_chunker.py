@@ -1,4 +1,5 @@
 """附件 Markdown 分块器测试。"""
+
 from __future__ import annotations
 
 from lvyan.tools.attachment_chunker import chunk_attachment_markdown
@@ -12,7 +13,7 @@ def test_splits_by_markdown_headings():
     assert all(c.document_id == "f1" for c in chunks)
     assert chunks[0].content == "甲方：张三"
     # char_offset 是原始 md 中的绝对偏移：md[offset:].startswith(content)
-    assert md[chunks[0].char_offset:].startswith(chunks[0].content)
+    assert md[chunks[0].char_offset :].startswith(chunks[0].content)
 
 
 def test_long_section_split_by_paragraph():

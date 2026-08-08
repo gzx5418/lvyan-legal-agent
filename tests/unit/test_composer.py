@@ -109,24 +109,64 @@ def _make_base_state(
 # ---------------------------------------------------------------------------
 # 1. Light 模式
 # ---------------------------------------------------------------------------
-def test_composer_light_mode_sections():
-    """Light 模式输出包含必要章节。"""
+def test_composer_light_mode_answers_directly_without_report_scaffold():
+    """Light 模式应是直接答复，而非固定报告壳。"""
     state = _make_base_state(complexity="light")
     result = composer(state)
     assert "final_output" in result
     output = result["final_output"]
-    assert "用户目标" in output
-    assert "核心法律结论" in output
-    assert "关键法条引用" in output
-    assert "行动建议" in output
-    assert "风险声明" in output
+    assert "简要答复" in output
+    assert "直接回答" in output
+    assert "下一步" in output
+    assert "法律依据" in output
+    assert "风险提示" in output
+    assert "法律分析报告" not in output
 
 
-def test_composer_light_mode_contains_user_goal():
-    """Light 模式输出包含 user_goal 文本。"""
+def test_composer_light_materials_question_uses_checklist_shape():
+    """材料类追问应生成清单，不重复完整法律分析报告。"""
+    state = _make_base_state(
+        complexity="light",
+        user_goal="那我需要准备哪些文件",
+    )
+    state["case_type"] = "工伤认定"
+    state["evidence_requirements"] = [
+        {"fact_to_prove": "证明事故责任", "evidence_types": ["道路交通事故责任认定书"]},
+        {"fact_to_prove": "证明劳动关系", "evidence_types": ["劳动合同或工资流水"]},
+    ]
+    output = composer(state)["final_output"]
+    assert "需要准备的材料" in output
+    assert "道路交通事故责任认定书" in output
+    assert "劳动合同或工资流水" in output
+    assert "简要答复" not in output
+
+
+def test_composer_light_mode_uses_question_to_select_a_relevant_answer():
+    """Light 模式无需复述问题，仍应给出与案由匹配的直接答复。"""
     state = _make_base_state(complexity="light", user_goal="我想了解租房合同违约问题")
     result = composer(state)
-    assert "我想了解租房合同违约问题" in result["final_output"]
+    assert "合同纠纷" in result["final_output"]
+    assert "直接回答" in result["final_output"]
+
+
+def test_composer_answers_deposit_question_with_substantive_rule():
+    state = _make_base_state(complexity="light", user_goal="房东不退押金怎么办？")
+    state["case_type"] = "合同纠纷"
+    output = composer(state)["final_output"]
+    assert "不能无合同依据、无实际损失地扣留押金" in output
+    assert "押金支付凭证" in output
+
+
+def test_composer_handles_materials_and_deadline_as_compound_intents():
+    state = _make_base_state(complexity="light", user_goal="需要哪些材料，多久能办？")
+    state["case_type"] = "工伤认定"
+    state["evidence_requirements"] = [
+        {"fact_to_prove": "证明事故责任", "evidence_types": ["道路交通事故责任认定书"]},
+    ]
+    output = composer(state)["final_output"]
+    assert "需要准备的材料" in output
+    assert "关键期限" in output
+    assert "30日内" in output
 
 
 def test_composer_light_mode_contains_statute():
@@ -263,8 +303,7 @@ def test_composer_default_complexity():
     state.pop("complexity")
     result = composer(state)
     output = result["final_output"]
-    # light 模式特征：包含「日常咨询快答」标题
-    assert "日常咨询快答" in output or "用户目标" in output
+    assert "简要答复" in output
 
 
 # ---------------------------------------------------------------------------
@@ -294,16 +333,14 @@ def test_composer_return_structure():
 # ---------------------------------------------------------------------------
 # 9. 知识来源章节（含法规版本与生效日期）
 # ---------------------------------------------------------------------------
-def test_composer_light_knowledge_source():
-    """Light 模式输出包含知识来源章节。"""
+def test_composer_light_includes_relevant_legal_basis_without_version_dump():
+    """Light 模式列出相关法条，但不展开固定的法规版本报告。"""
     state = _make_base_state(complexity="light")
     result = composer(state)
     output = result["final_output"]
-    assert "知识来源" in output
-    # 知识来源应包含法规版本与生效日期信息
+    assert "法律依据" in output
     assert "中华人民共和国民法典" in output
-    assert "有效" in output
-    assert "2021-01-01" in output
+    assert "第五百七十七条" in output
 
 
 def test_composer_deep_knowledge_source():
@@ -386,7 +423,7 @@ def test_composer_light_advice_max_three():
     state = _make_base_state(complexity="light")
     result = composer(state)
     output = result["final_output"]
-    # 提取「## 行动建议」与「## 风险声明」之间的编号项
-    advice_section = output.split("## 行动建议")[1].split("## 风险声明")[0]
+    # 提取「## 下一步」与「## 法律依据」之间的编号项
+    advice_section = output.split("## 下一步")[1].split("## 法律依据")[0]
     numbered = re.findall(r"^\d+\.", advice_section, re.MULTILINE)
     assert len(numbered) <= 3

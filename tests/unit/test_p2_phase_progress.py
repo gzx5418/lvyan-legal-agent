@@ -1,4 +1,5 @@
 """SSE 语义阶段进度的回归测试。"""
+
 from __future__ import annotations
 
 import asyncio

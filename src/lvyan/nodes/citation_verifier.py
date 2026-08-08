@@ -20,8 +20,6 @@ import logging
 from datetime import date
 from typing import Any
 
-_logger = logging.getLogger(__name__)
-
 from lvyan.config import settings
 from lvyan.retrieval.query_rewriter import rewrite_for_reretrieval
 from lvyan.schemas import CaseState, RetrievalQuery
@@ -34,6 +32,8 @@ from lvyan.validators.citation import (
     validate_citations,
 )
 from lvyan.validators.grounding import validate_grounding
+
+_logger = logging.getLogger(__name__)
 
 __all__ = ["citation_verifier"]
 
@@ -164,9 +164,7 @@ def _build_citation_details(
 
         # 2. authority_status 验证器的问题（按 source_id 匹配）
         if matched_source_id:
-            for current_status, severity, detail in authority_issues.get(
-                matched_source_id, []
-            ):
+            for current_status, severity, detail in authority_issues.get(matched_source_id, []):
                 if current_status == "repealed":
                     status = _priority_status(status, "repealed")
                 elif current_status in ("not_yet_effective",):
@@ -323,9 +321,7 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
 
     # P1-9b：先对 reasoning_result 做基础校验
     try:
-        citation_report = validate_citations(
-            audit_subject, statutes, validation_date
-        )
+        citation_report = validate_citations(audit_subject, statutes, validation_date)
     except Exception as exc:  # noqa: BLE001 验证器异常 → fail-closed
         _logger.exception("citation 验证器异常: %s", exc)
         verification_error = True
@@ -350,15 +346,24 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
 
         if citation_report is None:
             citation_report = CitationValidationReport(
-                total_citations=0, valid_citations=0, issues=[], passed=False,
+                total_citations=0,
+                valid_citations=0,
+                issues=[],
+                passed=False,
             )
         if authority_report is None:
             authority_report = AuthorityStatusReport(
-                total_authorities=0, effective_count=0, issues=[], passed=False,
+                total_authorities=0,
+                effective_count=0,
+                issues=[],
+                passed=False,
             )
         if grounding_report is None:
             grounding_report = GroundingReport(
-                total_citations=0, grounded_citations=0, issues=[], passed=False,
+                total_citations=0,
+                grounded_citations=0,
+                issues=[],
+                passed=False,
             )
 
     # P1-1：有 statutes 但 0 引用 → fail-closed（推理结果没有绑定任何法规引用）
@@ -368,6 +373,7 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
             CitationValidationReport,
             CitationIssue,
         )
+
         existing_issues: list[Any] = list(_get(citation_report, "issues", []) or [])
         existing_issues.append(
             CitationIssue(

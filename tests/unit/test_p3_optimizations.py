@@ -86,7 +86,8 @@ def test_chat_structured_both_failures_returns_none(monkeypatch):
         score: float
 
     monkeypatch.setattr(
-        llm_client, "chat_json",
+        llm_client,
+        "chat_json",
         lambda messages, **kw: {"wrong_field": "x"},
     )
 
@@ -135,13 +136,21 @@ def test_sse_publish_node_events_have_timestamp_and_duration():
 
     async def _run():
         ctx = RunContext("run-x", "thread-x")
-        await ctx.publish({
-            "event": "node_start", "node": "triage", "timestamp": time.time(),
-        })
-        await ctx.publish({
-            "event": "node_end", "node": "triage",
-            "timestamp": time.time(), "duration_ms": 12.5,
-        })
+        await ctx.publish(
+            {
+                "event": "node_start",
+                "node": "triage",
+                "timestamp": time.time(),
+            }
+        )
+        await ctx.publish(
+            {
+                "event": "node_end",
+                "node": "triage",
+                "timestamp": time.time(),
+                "duration_ms": 12.5,
+            }
+        )
         # 取出事件
         events = []
         while not ctx.queue.empty():

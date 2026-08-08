@@ -147,8 +147,7 @@ def test_validate_authority_status_not_yet_effective_by_status(
     report = validate_authority_status(statutes, current_date=date(2026, 7, 23))
     assert report.passed is False
     assert any(
-        i.current_status == "not_yet_effective" and i.severity == "error"
-        for i in report.issues
+        i.current_status == "not_yet_effective" and i.severity == "error" for i in report.issues
     )
 
 
@@ -274,10 +273,7 @@ def test_validate_authority_status_unknown_warning(
     report = validate_authority_status(statutes, current_date=date(2026, 7, 23))
     # warning 不影响 passed
     assert report.passed is True
-    assert any(
-        i.current_status == "unknown" and i.severity == "warning"
-        for i in report.issues
-    )
+    assert any(i.current_status == "unknown" and i.severity == "warning" for i in report.issues)
     assert any("人工复核" in i.detail for i in report.issues)
 
 
@@ -306,8 +302,5 @@ def test_validate_authority_status_repealed_with_historical_marker(
     report = validate_authority_status(statutes, current_date=date(2026, 7, 23))
     # 已标注历史适用 → warning，不强制失败
     assert report.passed is True
-    assert any(
-        i.current_status == "repealed" and i.severity == "warning"
-        for i in report.issues
-    )
+    assert any(i.current_status == "repealed" and i.severity == "warning" for i in report.issues)
     assert any("历史适用" in i.detail for i in report.issues)

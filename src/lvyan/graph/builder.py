@@ -94,7 +94,13 @@ from .routing import (
 )
 from .state import GraphState
 
-__all__ = ["build_graph", "build_graph_with_postgres", "build_graph_with_postgres_async", "NODE_NAMES", "PersistenceUnavailable"]
+__all__ = [
+    "build_graph",
+    "build_graph_with_postgres",
+    "build_graph_with_postgres_async",
+    "NODE_NAMES",
+    "PersistenceUnavailable",
+]
 
 # 14 个节点名（注册顺序 = 主链顺序，不含 START/END）
 NODE_NAMES: tuple[str, ...] = (
@@ -221,7 +227,7 @@ def _to_dsn(url: str) -> str:
     """
     prefix = "postgresql+psycopg://"
     if url.startswith(prefix):
-        return "postgresql://" + url[len(prefix):]
+        return "postgresql://" + url[len(prefix) :]
     return url
 
 

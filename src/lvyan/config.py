@@ -163,7 +163,9 @@ class Settings(BaseModel):
     lawtext_dir: Path = Field(default_factory=lambda: LAWTEXT_DIR)
 
     # --- 运行时策略守卫 ---
-    max_retrieval_iterations: int = Field(default=1, description="Citation Verifier 最大重检索次数（降低以减少 LLM 调用放大）")
+    max_retrieval_iterations: int = Field(
+        default=1, description="Citation Verifier 最大重检索次数（降低以减少 LLM 调用放大）"
+    )
     max_cost_budget_usd: float = Field(default=2.0, description="单次 run 最大成本预算（美元）")
     hitl_enabled: bool = Field(
         default=True, description="是否启用 Human-in-the-loop 不可逆操作审批"
@@ -201,9 +203,7 @@ class Settings(BaseModel):
         default=400_000, description="单次 run 所有附件拼接后的总字符上限"
     )
     max_attachment_count: int = Field(default=10, description="单次 run 附件数量上限")
-    max_concurrent_conversions: int = Field(
-        default=2, description="文档转换并发数上限（信号量）"
-    )
+    max_concurrent_conversions: int = Field(default=2, description="文档转换并发数上限（信号量）")
     document_conversion_timeout_seconds: float = Field(
         default=60.0, description="单次文档转换超时秒数"
     )
@@ -284,9 +284,7 @@ def _build_settings() -> Settings:
         max_total_attachment_chars=_get_int("MAX_TOTAL_ATTACHMENT_CHARS", 400_000),
         max_attachment_count=_get_int("MAX_ATTACHMENT_COUNT", 10),
         max_concurrent_conversions=_get_int("MAX_CONCURRENT_CONVERSIONS", 2),
-        document_conversion_timeout_seconds=_get_float(
-            "DOCUMENT_CONVERSION_TIMEOUT_SECONDS", 60.0
-        ),
+        document_conversion_timeout_seconds=_get_float("DOCUMENT_CONVERSION_TIMEOUT_SECONDS", 60.0),
         zip_uncompressed_bytes_limit=_get_int("ZIP_UNCOMPRESSED_BYTES_LIMIT", 100 * 1024 * 1024),
         max_legal_reasoner_iterations=_get_int("MAX_LEGAL_REASONER_ITERATIONS", 1),
     )
@@ -372,20 +370,16 @@ def validate_runtime_config() -> None:
     backend = os.getenv("CHECKPOINTER_BACKEND", settings.checkpointer_backend).strip().lower()
     if backend not in {"memory", "postgres", "auto"}:
         raise RuntimeError(
-            f"CHECKPOINTER_BACKEND='{backend}' 非法；"
-            f"允许值: memory / postgres / auto"
+            f"CHECKPOINTER_BACKEND='{backend}' 非法；允许值: memory / postgres / auto"
         )
     if backend == "memory" and persistence_required():
-        raise RuntimeError(
-            "PERSISTENCE_REQUIRED=true 时禁止 CHECKPOINTER_BACKEND=memory"
-        )
+        raise RuntimeError("PERSISTENCE_REQUIRED=true 时禁止 CHECKPOINTER_BACKEND=memory")
     # P1-4：生产认证配置校验
     if is_production() and is_auth_enabled_env():
         auth_mode = os.getenv("AUTH_MODE", "auto").strip().lower()
         if auth_mode == "auto":
             raise RuntimeError(
-                "AUTH_MODE=auto 在生产模式下被禁止；"
-                "请设置 AUTH_MODE=jwt 或 AUTH_MODE=trusted_proxy"
+                "AUTH_MODE=auto 在生产模式下被禁止；请设置 AUTH_MODE=jwt 或 AUTH_MODE=trusted_proxy"
             )
     # W13：JWT 进程内验签的配置组合校验（启动期暴露配置错误，避免首请求才发现）
     if os.getenv("JWT_VERIFY_IN_PROCESS", "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -400,7 +394,9 @@ def validate_runtime_config() -> None:
             raise RuntimeError(
                 "JWT_VERIFY_IN_PROCESS=true 时必须同时配置 JWT_ISSUER 和 JWT_AUDIENCE"
             )
-        algorithms = [a.strip().lower() for a in os.getenv("JWT_ALGORITHMS", "RS256").split(",") if a.strip()]
+        algorithms = [
+            a.strip().lower() for a in os.getenv("JWT_ALGORITHMS", "RS256").split(",") if a.strip()
+        ]
         if not algorithms or any(a == "none" for a in algorithms):
             raise RuntimeError(
                 "JWT_ALGORITHMS 配置非法：禁止使用 none，必须使用 RS256/ES256 等非对称算法"

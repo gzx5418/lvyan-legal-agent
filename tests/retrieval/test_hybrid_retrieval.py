@@ -28,6 +28,7 @@ from lvyan.retrieval import (
 from lvyan.retrieval.version_resolver import find_law_files_by_title, parse_law_metadata
 from lvyan.scripts.ingest_laws import ArticleChunk, chunk_law_articles
 
+
 # ---------------------------------------------------------------------------
 # 辅助：从全库加载 chunks 的子集用于加速测试
 # ---------------------------------------------------------------------------
@@ -91,7 +92,11 @@ def test_bm25_recall_without_title_filter():
     # 至少有一条结果的 article_text 含「公开」或「信息」
     has_text_match = False
     for sc in results:
-        text = sc.chunk.article_text if hasattr(sc.chunk, "article_text") else sc.chunk.get("article_text", "")
+        text = (
+            sc.chunk.article_text
+            if hasattr(sc.chunk, "article_text")
+            else sc.chunk.get("article_text", "")
+        )
         if "公开" in text or "信息" in text:
             has_text_match = True
             break
@@ -119,7 +124,11 @@ def test_bm25_recall_via_body_text_only():
     # 至少一条正文命中
     body_hits = 0
     for sc in results:
-        text = sc.chunk.article_text if hasattr(sc.chunk, "article_text") else sc.chunk.get("article_text", "")
+        text = (
+            sc.chunk.article_text
+            if hasattr(sc.chunk, "article_text")
+            else sc.chunk.get("article_text", "")
+        )
         if "信息" in text:
             body_hits += 1
     assert body_hits > 0, "至少应有一条正文含「信息」"
@@ -164,8 +173,9 @@ def test_case_rule_search_labor():
         sc.chunk.title if hasattr(sc.chunk, "title") else sc.chunk.get("title", "")
         for sc in results
     ]
-    assert any("劳动合同" in t or "劳动法" in t for t in titles), \
+    assert any("劳动合同" in t or "劳动法" in t for t in titles), (
         f"应召回劳动合同法 / 劳动法，实际 titles={titles[:5]}"
+    )
 
     # score 应为 0.8
     assert all(sc.score == 0.8 for sc in results)
@@ -220,14 +230,19 @@ def test_hybrid_search_as_of_filter():
     # 2020-01-01 之前生效的民法典不存在（民法典 2021-01-01 生效），
     # 因此应过滤掉所有有 effective_date 的民法典 chunks
     for sc in results_before:
-        eff = sc.chunk.effective_date if hasattr(sc.chunk, "effective_date") else sc.chunk.get("effective_date")
+        eff = (
+            sc.chunk.effective_date
+            if hasattr(sc.chunk, "effective_date")
+            else sc.chunk.get("effective_date")
+        )
         if eff is not None:
             if isinstance(eff, str):
                 eff_date = date.fromisoformat(eff[:10])
             else:
                 eff_date = eff
-            assert eff_date <= date(2020, 1, 1), \
+            assert eff_date <= date(2020, 1, 1), (
                 f"as_of 过滤失效：返回了 effective_date={eff} > 2020-01-01 的 chunk"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +296,9 @@ def test_rewrite_query_for_reretrieval_iteration_2():
     rewritten = rewrite_for_reretrieval("民法典 隐私权", iteration=2)
     assert rewritten, "改写后查询不应为空"
     # 应包含「《」或「民法典」相关结构
-    assert "民法典" in rewritten or "中华人民共和国" in rewritten or "法律条文" in rewritten, \
+    assert "民法典" in rewritten or "中华人民共和国" in rewritten or "法律条文" in rewritten, (
         f"第2次重检索应聚焦法条号，实际：{rewritten}"
+    )
 
 
 def test_rewrite_query_for_reretrieval_iteration_3_fallback():

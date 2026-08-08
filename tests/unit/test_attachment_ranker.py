@@ -1,4 +1,5 @@
 """附件分块排序器测试。"""
+
 from __future__ import annotations
 
 from lvyan.retrieval.attachment_ranker import rank_chunks
@@ -7,8 +8,12 @@ from lvyan.schemas.attachment import AttachmentChunk
 
 def _chunk(cid: str, content: str) -> AttachmentChunk:
     return AttachmentChunk(
-        chunk_id=cid, document_id="f1", document_name="x.md",
-        section="正文", content=content, char_offset=0,
+        chunk_id=cid,
+        document_id="f1",
+        document_name="x.md",
+        section="正文",
+        content=content,
+        char_offset=0,
     )
 
 

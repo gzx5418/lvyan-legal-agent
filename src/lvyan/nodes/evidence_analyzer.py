@@ -265,15 +265,11 @@ def _detect_version_conflicts(
 
     conflicts: list[AuthorityConflict] = []
     for title, items in groups.items():
-        effective_items = [
-            a for a in items if _get(a, "status", "unknown") == "effective"
-        ]
+        effective_items = [a for a in items if _get(a, "status", "unknown") == "effective"]
         if len(effective_items) < 2:
             continue
         # 检查 effective_date 是否有差异
-        dates = {
-            _get(a, "effective_date", None) for a in effective_items
-        }
+        dates = {_get(a, "effective_date", None) for a in effective_items}
         # 至少有两种不同的有效日期（None 与具体日期也视为差异）
         if len(dates) < 2 and None not in dates:
             continue
@@ -295,8 +291,7 @@ def _detect_version_conflicts(
                 authority_ids=authority_ids,
                 conflict_type="version",  # type: ignore[arg-type]
                 description=(
-                    f"「{title}」存在 {len(effective_items)} 个 effective 版本，"
-                    f"需确认适用哪一版本"
+                    f"「{title}」存在 {len(effective_items)} 个 effective 版本，需确认适用哪一版本"
                 ),
                 resolution="优先适用 effective_date 最新版本，其余视为被取代",
             )

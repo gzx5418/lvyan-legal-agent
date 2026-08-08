@@ -64,10 +64,30 @@ def _labor_state() -> CaseState:
         case_type="劳动争议",
         complexity="deep",
         facts=[
-            Fact(fact_id="f1", category="当事人", content="劳动者与用人单位存在劳动关系", source="user", confidence=0.9),
-            Fact(fact_id="f2", category="行为", content="用人单位单方解除劳动合同", source="user", confidence=0.85),
-            Fact(fact_id="f3", category="时间", content="工作年限3年", source="user", confidence=0.8),
-            Fact(fact_id="f4", category="金额", content="月工资8000元", source="user", confidence=0.85),
+            Fact(
+                fact_id="f1",
+                category="当事人",
+                content="劳动者与用人单位存在劳动关系",
+                source="user",
+                confidence=0.9,
+            ),
+            Fact(
+                fact_id="f2",
+                category="行为",
+                content="用人单位单方解除劳动合同",
+                source="user",
+                confidence=0.85,
+            ),
+            Fact(
+                fact_id="f3", category="时间", content="工作年限3年", source="user", confidence=0.8
+            ),
+            Fact(
+                fact_id="f4",
+                category="金额",
+                content="月工资8000元",
+                source="user",
+                confidence=0.85,
+            ),
             Fact(fact_id="f5", category="证据", content="劳动合同", source="user", confidence=0.9),
             Fact(fact_id="f6", category="证据", content="工资条", source="user", confidence=0.8),
         ],
@@ -141,9 +161,38 @@ def test_legal_reasoner_labor_dispute_fields_non_empty():
     assert len(rr.evidence_mapping) > 0, "证据对应不应为空"
     assert len(rr.key_factors) > 0, "关键影响因素不应为空"
 
-    # 构成要件应包含"已满足"或"未满足"标注
+    # 构成要件应包含"已满足"或"待查明"标注
     for e in rr.elements:
-        assert "已满足" in e or "未满足" in e, f"构成要件缺少满足状态标注：{e}"
+        assert "已满足" in e or "待查明" in e, f"构成要件缺少满足状态标注：{e}"
+
+
+def test_statute_text_cannot_satisfy_unstated_work_injury_fact():
+    """法规中的“非本人主要责任”不能反向证明用户承担何种事故责任。"""
+    state = CaseState(
+        run_id="run-grounding",
+        thread_id="thread-grounding",
+        current_date=date(2026, 8, 8),
+        user_goal="我上班途中骑车发生车祸并受伤",
+        case_type="工伤认定",
+        facts=[],
+        statutes=[
+            Authority(
+                source_id="work-injury-14",
+                title="工伤保险条例",
+                article_number="第十四条",
+                article_text="在上下班途中，受到非本人主要责任的交通事故伤害的，应当认定为工伤。",
+                authority_level="行政法规",
+                status="effective",
+                retrieved_at=datetime(2026, 8, 8),
+            )
+        ],
+    )
+    elements = legal_reasoner(state)["reasoning_result"].elements
+    responsibility = next(item for item in elements if "本人非主要责任" in item)
+    accident = next(item for item in elements if "交通事故造成伤害" in item)
+    assert "已满足" in accident
+    assert "待查明" in responsibility
+    assert "已满足" not in responsibility
 
 
 def test_legal_reasoner_labor_dispute_tendency_in_legal_enum():
@@ -197,6 +246,42 @@ def test_legal_reasoner_labor_dispute_confidence_aligned():
     )
 
 
+def test_legal_reasoner_work_injury_uses_commute_elements_not_severance_template():
+    """通勤交通事故工伤认定应输出工伤要件及正确法律关系。"""
+    state = CaseState(
+        run_id="run-work-injury-001",
+        thread_id="thread-work-injury-001",
+        current_date=date(2026, 8, 8),
+        user_goal="我上班骑车发生车祸，属于工伤吗",
+        jurisdiction="中国大陆",
+        case_type="工伤认定",
+        facts=[
+            Fact(
+                fact_id="f1",
+                category="行为",
+                content="上班途中骑车发生车祸并受伤",
+                source="user",
+                confidence=0.9,
+            ),
+        ],
+        statutes=[
+            _make_authority(
+                title="工伤保险条例",
+                article_number="第十四条第（六）项",
+                article_text="在上下班途中，受到非本人主要责任的交通事故伤害的，应当认定为工伤。",
+                authority_level="行政法规",
+            ),
+        ],
+    )
+    rr = legal_reasoner(state)["reasoning_result"]
+
+    assert "工伤认定" in rr.legal_relationship
+    assert any("上下班的合理时间、合理路线" in item for item in rr.elements)
+    assert any("本人非主要责任" in item for item in rr.elements)
+    assert not any("经济补偿计算基数" in item for item in rr.elements)
+    assert any("事故责任" in item for item in rr.disputed_focus)
+
+
 # ---------------------------------------------------------------------------
 # 2. 侵权场景
 # ---------------------------------------------------------------------------
@@ -211,10 +296,26 @@ def _tort_state() -> CaseState:
         case_type="侵权纠纷",
         complexity="deep",
         facts=[
-            Fact(fact_id="f1", category="当事人", content="原告被撞伤", source="user", confidence=0.9),
-            Fact(fact_id="f2", category="行为", content="被告驾车碰撞原告", source="user", confidence=0.85),
-            Fact(fact_id="f3", category="金额", content="医疗费5万元", source="user", confidence=0.8),
-            Fact(fact_id="f4", category="证据", content="医院诊断证明", source="user", confidence=0.85),
+            Fact(
+                fact_id="f1", category="当事人", content="原告被撞伤", source="user", confidence=0.9
+            ),
+            Fact(
+                fact_id="f2",
+                category="行为",
+                content="被告驾车碰撞原告",
+                source="user",
+                confidence=0.85,
+            ),
+            Fact(
+                fact_id="f3", category="金额", content="医疗费5万元", source="user", confidence=0.8
+            ),
+            Fact(
+                fact_id="f4",
+                category="证据",
+                content="医院诊断证明",
+                source="user",
+                confidence=0.85,
+            ),
         ],
         statutes=[
             _make_authority(

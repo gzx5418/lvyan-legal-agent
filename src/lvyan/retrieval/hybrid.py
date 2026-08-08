@@ -145,7 +145,9 @@ def hybrid_search(
     dense_results = dense_search(query=query, top_k=fetch_k, chunks=chunks)
     if only_effective or as_of is not None:
         bm25_results = [sc for sc in bm25_results if _filter_chunk(sc.chunk, only_effective, as_of)]
-        dense_results = [sc for sc in dense_results if _filter_chunk(sc.chunk, only_effective, as_of)]
+        dense_results = [
+            sc for sc in dense_results if _filter_chunk(sc.chunk, only_effective, as_of)
+        ]
 
     # article_no / case_rule：线性扫描，传 filtered_chunks 减少遍历量
     article_no_results = article_no_search(query=query, chunks=filtered_chunks)

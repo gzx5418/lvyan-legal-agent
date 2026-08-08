@@ -3,6 +3,7 @@
 取代「把附件全文塞进 user_goal」的旧做法 —— 下游 LLM 节点只看到与问题相关的
 若干分块，且总字符数受 ``max_context_chars`` 控制。
 """
+
 from __future__ import annotations
 
 import logging

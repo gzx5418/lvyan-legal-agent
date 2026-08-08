@@ -6,6 +6,7 @@
 3. 法条引用必须包含完整名称 + 条款序号 + 效力状态，便于审计防幻觉。
 4. 事实必须标注四态来源（已确认/用户陈述/系统推断/缺失），防止把推断写成事实。
 """
+
 from __future__ import annotations
 
 from typing import Literal

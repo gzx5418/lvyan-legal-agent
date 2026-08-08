@@ -258,9 +258,7 @@ def trace_node(node_name: str) -> Callable[[F], F]:
     """节点函数追踪装饰器：记录节点名、输入摘要、输出摘要、耗时、异常。"""
 
     def decorator(func: F) -> F:
-        return _build_traced(
-            func, "node", node_name, "lvyan.node", ("node.name", node_name)
-        )
+        return _build_traced(func, "node", node_name, "lvyan.node", ("node.name", node_name))
 
     return decorator
 
@@ -269,9 +267,7 @@ def trace_tool(tool_name: str) -> Callable[[F], F]:
     """工具函数追踪装饰器：记录工具名、输入摘要、输出摘要、耗时、异常。"""
 
     def decorator(func: F) -> F:
-        return _build_traced(
-            func, "tool", tool_name, "lvyan.tool", ("tool.name", tool_name)
-        )
+        return _build_traced(func, "tool", tool_name, "lvyan.tool", ("tool.name", tool_name))
 
     return decorator
 
@@ -281,8 +277,12 @@ def trace_retrieval(strategy: str) -> Callable[[F], F]:
 
     def decorator(func: F) -> F:
         return _build_traced(
-            func, "retrieval", strategy, "lvyan.retrieval",
-            ("retrieval.strategy", strategy), extra_output_attrs=_retrieval_extra,
+            func,
+            "retrieval",
+            strategy,
+            "lvyan.retrieval",
+            ("retrieval.strategy", strategy),
+            extra_output_attrs=_retrieval_extra,
         )
 
     return decorator

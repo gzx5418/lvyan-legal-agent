@@ -11,10 +11,10 @@
 本测试直接驱动 ``_stream_graph_events``，用 fake graph 依次产出 composer
 update 与 finalizer update，验证最终返回的 legal_answer 为 None。
 """
+
 from __future__ import annotations
 
 import asyncio
-from datetime import date
 from typing import Any
 
 from lvyan.api.sse import RunContext, _stream_graph_events

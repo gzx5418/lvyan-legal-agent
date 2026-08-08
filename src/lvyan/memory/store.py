@@ -113,9 +113,7 @@ class CaseMemory:
                 return graph
         if self._graph is not None:
             return self._graph
-        raise RuntimeError(
-            "CaseMemory 未绑定图实例：graph_resolver 返回 None 且未传入 graph"
-        )
+        raise RuntimeError("CaseMemory 未绑定图实例：graph_resolver 返回 None 且未传入 graph")
 
     # ------------------------------------------------------------------
     # 索引持久化

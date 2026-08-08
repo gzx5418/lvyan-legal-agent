@@ -321,9 +321,7 @@ def chat_structured(
         return response_model.model_validate(result)
     except ValidationError as exc:
         validation_error = str(exc)
-        _logger.warning(
-            "Pydantic 校验失败（一次修复重试）：%s", validation_error[:300]
-        )
+        _logger.warning("Pydantic 校验失败（一次修复重试）：%s", validation_error[:300])
 
     # 修复重试：把错误反馈给模型
     repair_msg = {

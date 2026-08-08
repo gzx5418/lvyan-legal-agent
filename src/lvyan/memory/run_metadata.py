@@ -151,9 +151,7 @@ class PostgresRunMetadataStore:
             return
         migrations_dir = AGENT_DIR / "migrations"
         # 按文件名排序依次执行所有 migration（001_…, 002_…, …）。
-        migration_files = sorted(
-            p for p in migrations_dir.glob("*.sql") if p.is_file()
-        )
+        migration_files = sorted(p for p in migrations_dir.glob("*.sql") if p.is_file())
         if not migration_files:
             raise RuntimeError(f"未找到任何 migration 文件于 {migrations_dir}")
         # transaction() 在 autocommit=True 连接上显式开启事务；异常自动回滚
@@ -183,8 +181,7 @@ class PostgresRunMetadataStore:
                     sql = migration.read_text(encoding="utf-8")
                     cur.execute(sql)
                     cur.execute(
-                        "INSERT INTO schema_migrations(version) VALUES (%s) "
-                        "ON CONFLICT DO NOTHING",
+                        "INSERT INTO schema_migrations(version) VALUES (%s) ON CONFLICT DO NOTHING",
                         (version,),
                     )
         # 事务已提交 → 锁已释放，schema 已就绪

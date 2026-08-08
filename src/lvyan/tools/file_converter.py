@@ -22,7 +22,21 @@ from lvyan.config import settings
 _logger = logging.getLogger("lvyan.tools.file_converter")
 
 # 支持的文件类型分类
-_TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm", ".log", ".yaml", ".yml", ".toml", ".ini", ".rst"}
+_TEXT_EXTS = {
+    ".txt",
+    ".md",
+    ".csv",
+    ".json",
+    ".xml",
+    ".html",
+    ".htm",
+    ".log",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".rst",
+}
 _DOC_EXTS = {".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls", ".odt", ".rtf"}
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
 
@@ -37,6 +51,7 @@ def _get_markitdown() -> Any:
         return _markitdown
     try:
         from markitdown import MarkItDown
+
         _markitdown = MarkItDown()
         _logger.info("markitdown 初始化成功")
     except ImportError:

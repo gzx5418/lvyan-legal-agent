@@ -289,8 +289,9 @@ def dense_search(
     results: list[ScoredChunk] = []
     for idx, sim in top:
         chunk = candidate_chunks[idx]
-        chunk_id = (chunk.get("chunk_id", "") if isinstance(chunk, dict)
-                    else getattr(chunk, "chunk_id", ""))
+        chunk_id = (
+            chunk.get("chunk_id", "") if isinstance(chunk, dict) else getattr(chunk, "chunk_id", "")
+        )
         results.append(ScoredChunk(chunk_id=chunk_id, score=round(sim, 4), chunk=chunk))
     return results
 

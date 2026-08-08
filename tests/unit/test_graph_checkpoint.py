@@ -106,12 +106,16 @@ def _state(**kwargs) -> CaseState:
 
 
 def test_route_after_missing_fact_blocking_returns_ask_user():
-    state = _state(missing_facts=[MissingFact(fact_key="k", question="q?", reason="r", is_blocking=True)])
+    state = _state(
+        missing_facts=[MissingFact(fact_key="k", question="q?", reason="r", is_blocking=True)]
+    )
     assert route_after_missing_fact(state) == "ask_user"
 
 
 def test_route_after_missing_fact_nonblocking_returns_continue():
-    state = _state(missing_facts=[MissingFact(fact_key="k", question="q?", reason="r", is_blocking=False)])
+    state = _state(
+        missing_facts=[MissingFact(fact_key="k", question="q?", reason="r", is_blocking=False)]
+    )
     assert route_after_missing_fact(state) == "continue"
 
 
@@ -264,13 +268,13 @@ def test_checkpoint_restore_preserves_facts(monkeypatch):
     # 恢复后 facts 仍包含测试事实
     final_facts = result["facts"]
     assert any(
-        (f.get("fact_id") if isinstance(f, dict) else f.fact_id) == "test-f1"
-        for f in final_facts
+        (f.get("fact_id") if isinstance(f, dict) else f.fact_id) == "test-f1" for f in final_facts
     ), "恢复后 facts 应仍包含测试事实"
 
     # 追加语义 + checkpoint：fact_extractor 不重新执行，facts 不应重复
     test_fact_count = sum(
-        1 for f in final_facts
+        1
+        for f in final_facts
         if (f.get("fact_id") if isinstance(f, dict) else f.fact_id) == "test-f1"
     )
     assert test_fact_count == 1, "恢复后 fact_extractor 不应重新执行，测试事实不应重复"
@@ -301,7 +305,11 @@ def test_checkpoint_writes_use_memory_saver_by_default():
     from lvyan.nodes.citation_verifier import citation_verifier
     from lvyan.nodes.composer import composer
     from lvyan.nodes.output_guardrail import output_guardrail
-    from lvyan.graph.routing import route_after_missing_fact, route_after_citation, route_after_critic
+    from lvyan.graph.routing import (
+        route_after_missing_fact,
+        route_after_citation,
+        route_after_critic,
+    )
 
     g = StateGraph(GraphState)
     g.add_node("preflight", preflight)
@@ -322,7 +330,8 @@ def test_checkpoint_writes_use_memory_saver_by_default():
     g.add_edge("jurisdiction_triage", "fact_extractor")
     g.add_edge("fact_extractor", "missing_fact_assessor")
     g.add_conditional_edges(
-        "missing_fact_assessor", route_after_missing_fact,
+        "missing_fact_assessor",
+        route_after_missing_fact,
         {"ask_user": END, "continue": "planner"},
     )
     g.add_edge("planner", "parallel_retrieval")
@@ -331,12 +340,14 @@ def test_checkpoint_writes_use_memory_saver_by_default():
     g.add_edge("legal_reasoner", "critic")
     # P1-9b：critic → composer → citation_verifier → output_guardrail
     g.add_conditional_edges(
-        "critic", route_after_critic,
+        "critic",
+        route_after_critic,
         {"legal_reasoner": "legal_reasoner", "composer": "composer"},
     )
     g.add_edge("composer", "citation_verifier")
     g.add_conditional_edges(
-        "citation_verifier", route_after_citation,
+        "citation_verifier",
+        route_after_citation,
         {"reretrieve": "parallel_retrieval", "output_guardrail": "output_guardrail"},
     )
     g.add_edge("output_guardrail", END)

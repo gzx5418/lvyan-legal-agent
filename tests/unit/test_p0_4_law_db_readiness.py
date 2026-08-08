@@ -5,10 +5,10 @@
 2. server._check_retrieval() 在「要求完整库 + 库缺失」时返回 degraded；
 3. server._legal_corpus_status() 返回 mode/documents/chunks 等字段。
 """
+
 from __future__ import annotations
 
 import importlib
-import os
 
 import pytest
 

@@ -158,9 +158,7 @@ def merge_conflicts(
     return [merged[k] for k in order]
 
 
-def merge_missing_facts(
-    old: list[MissingFact], new: list[MissingFact]
-) -> list[MissingFact]:
+def merge_missing_facts(old: list[MissingFact], new: list[MissingFact]) -> list[MissingFact]:
     """MissingFact 按 fact_key 去重，新值覆盖旧值。"""
     merged: dict[object, MissingFact] = {}
     order: list[object] = []

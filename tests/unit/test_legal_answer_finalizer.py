@@ -1,4 +1,5 @@
 """legal_answer_finalizer 节点测试。"""
+
 from __future__ import annotations
 
 from datetime import date

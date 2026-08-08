@@ -53,9 +53,7 @@ def _make_reasoning_result(
     judicial_tendency: str = "somewhat_favorable",
 ) -> ReasoningResult:
     if key_factors is None:
-        key_factors = [
-            "依据《中华人民共和国民法典》第五百七十七条，违约方应承担违约责任"
-        ]
+        key_factors = ["依据《中华人民共和国民法典》第五百七十七条，违约方应承担违约责任"]
     return ReasoningResult(
         legal_relationship="合同纠纷",
         elements=["合同关系成立（已满足）", "违约行为（已满足）"],

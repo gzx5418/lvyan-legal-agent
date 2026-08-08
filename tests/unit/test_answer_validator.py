@@ -1,4 +1,5 @@
 """LegalAnswerV1 校验器测试。"""
+
 from __future__ import annotations
 
 import pytest
@@ -25,9 +26,7 @@ def _make_answer(**overrides) -> LegalAnswerV1:
             risk_level="low",
             material_completeness="complete",
         ),
-        executive_summary=ExecutiveSummary(
-            conclusion="c", key_reasons=["r"], main_uncertainty="u"
-        ),
+        executive_summary=ExecutiveSummary(conclusion="c", key_reasons=["r"], main_uncertainty="u"),
         disclaimer="本内容为法律信息分析，不是法院裁判。",
     )
     base.update(overrides)

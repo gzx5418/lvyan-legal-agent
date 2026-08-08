@@ -33,7 +33,13 @@ __all__ = ["legal_reasoner"]
 _logger = logging.getLogger("lvyan.nodes.legal_reasoner")
 
 # LLM 推理允许的枚举值
-_ALLOWED_TENDENCIES = {"favorable", "somewhat_favorable", "even", "somewhat_unfavorable", "insufficient"}
+_ALLOWED_TENDENCIES = {
+    "favorable",
+    "somewhat_favorable",
+    "even",
+    "somewhat_unfavorable",
+    "insufficient",
+}
 _ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 
 
@@ -41,6 +47,7 @@ _ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 # 案由 → 法律关系定性
 # ---------------------------------------------------------------------------
 _CASE_TYPE_RELATIONSHIP: dict[str, str] = {
+    "工伤认定": "工伤认定（通勤途中非本人主要责任交通事故）",
     "劳动争议": "劳动争议（劳动关系项下经济补偿/赔偿争议）",
     "合同纠纷": "合同纠纷（违约责任）",
     "侵权纠纷": "侵权责任纠纷",
@@ -53,6 +60,27 @@ _CASE_TYPE_RELATIONSHIP: dict[str, str] = {
 # 案由 → 构成要件模板（顺序即逻辑链）
 # ---------------------------------------------------------------------------
 _CASE_TYPE_ELEMENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
+    # 工伤认定（通勤事故）：劳动关系 + 上下班途中 + 交通事故伤害 + 非本人主要责任。
+    "工伤认定": [
+        ("劳动关系存在", ("劳动合同", "劳动关系", "入职", "工作", "工资", "社保", "工牌", "考勤")),
+        (
+            "上下班的合理时间、合理路线",
+            ("上班", "下班", "上下班", "通勤", "途中", "路线", "住址", "单位"),
+        ),
+        ("交通事故造成伤害", ("交通事故", "车祸", "碰撞", "事故", "受伤", "受害")),
+        (
+            "本人非主要责任",
+            (
+                "非本人主要责任",
+                "无责任",
+                "无责",
+                "次要责任",
+                "次责",
+                "同等责任",
+                "同责",
+            ),
+        ),
+    ],
     # 劳动争议-经济补偿：劳动关系 + 合法解除情形 + 工作年限 + 补偿计算
     "劳动争议": [
         ("劳动关系存在", ("劳动合同", "劳动关系", "入职", "工作", "工资", "考勤")),
@@ -95,6 +123,11 @@ _CASE_TYPE_ELEMENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
 # 案由 → 被告抗辩模板（基于常见抗辩条款）
 # ---------------------------------------------------------------------------
 _CASE_TYPE_DEFENSES: dict[str, list[str]] = {
+    "工伤认定": [
+        "事故并非发生在上下班的合理时间、合理路线，或存在与通勤无关的中断、绕行",
+        "道路交通事故责任认定显示劳动者负主要责任或全部责任",
+        "双方不存在劳动关系，或存在《工伤保险条例》第十六条规定的排除情形",
+    ],
     "劳动争议": [
         "劳动者主动辞职，依《劳动合同法》第三十七条无需支付经济补偿",
         "劳动者严重违反规章制度，依第三十九条过失性辞退无需补偿",
@@ -127,6 +160,11 @@ _CASE_TYPE_DEFENSES: dict[str, list[str]] = {
 # 案由 → 原告主张模板（关键词触发）
 # ---------------------------------------------------------------------------
 _CASE_TYPE_PLAINTIFF: dict[str, list[str]] = {
+    "工伤认定": [
+        "符合《工伤保险条例》第十四条第（六）项的，应当认定为工伤",
+        "应以道路交通事故责任认定书等材料证明本人对事故不负主要责任",
+        "用人单位未申请的，劳动者或其近亲属、工会组织可在法定期限内申请工伤认定",
+    ],
     "劳动争议": [
         "用人单位违法解除劳动合同，应支付经济补偿金",
         "未签订书面劳动合同的，应支付双倍工资",
@@ -187,9 +225,7 @@ def _statutes_text(statutes: list[Any]) -> str:
     return " ".join(parts)
 
 
-def _identify_legal_relationship(
-    case_type: str | None, user_goal: str, statutes_text: str
-) -> str:
+def _identify_legal_relationship(case_type: str | None, user_goal: str, statutes_text: str) -> str:
     """基于 case_type 识别法律关系定性。
 
     优先使用 case_type 映射；若未匹配，尝试从 user_goal / statutes 文本中
@@ -200,6 +236,10 @@ def _identify_legal_relationship(
 
     # 关键词回退检测
     fallback_map: list[tuple[str, tuple[str, ...]]] = [
+        (
+            "工伤认定（通勤途中非本人主要责任交通事故）",
+            ("工伤", "上下班途中", "通勤", "上班路上", "下班路上"),
+        ),
         ("劳动争议（劳动关系项下争议）", ("劳动", "工资", "辞退", "经济补偿", "社保")),
         ("合同纠纷（违约责任）", ("合同", "违约", "欠款", "押金")),
         ("侵权责任纠纷", ("侵权", "赔偿", "损害", "受伤")),
@@ -232,8 +272,6 @@ def _extract_elements(
         return []
 
     elements_template = _CASE_TYPE_ELEMENTS[case_type]
-    combined_text = f"{facts_text} {statutes_text}"
-
     # 收集已满足的待证事实（evidence_requirements 中 status=met）
     met_facts_text = " ".join(
         str(_get(er, "fact_to_prove", "") or "")
@@ -243,11 +281,22 @@ def _extract_elements(
 
     result: list[str] = []
     for element_name, keywords in elements_template:
-        # 判定满足：facts 文本命中关键词，或 evidence_requirements 已 met
-        is_satisfied = any(kw in combined_text for kw in keywords) or any(
+        # 只能由案件事实或已经核验的证据满足要件。法规文本负责定义规则，
+        # 不能反向“证明”用户没有陈述的事实。
+        is_satisfied = any(kw in facts_text for kw in keywords) or any(
             kw in met_facts_text for kw in keywords
         )
-        status = "已满足" if is_satisfied else "未满足"
+        if case_type == "工伤认定" and element_name == "上下班的合理时间、合理路线":
+            commute_context = any(
+                kw in facts_text for kw in ("上班途中", "下班途中", "上下班途中", "通勤途中")
+            )
+            route_context = any(
+                kw in facts_text
+                for kw in ("合理路线", "日常路线", "通常路线", "从家到单位", "从单位回家")
+            )
+            evidence_met = any(kw in met_facts_text for kw in keywords)
+            is_satisfied = (commute_context and route_context) or evidence_met
+        status = "已满足" if is_satisfied else "待查明"
         result.append(f"{element_name}（{status}）")
     return result
 
@@ -261,9 +310,7 @@ def _count_satisfied_elements(elements: list[str]) -> tuple[int, int]:
     return satisfied, total
 
 
-def _generate_disputed_focus(
-    disputed_facts: list[Any], case_type: str | None
-) -> list[str]:
+def _generate_disputed_focus(disputed_facts: list[Any], case_type: str | None) -> list[str]:
     """基于 disputed_facts 生成争议焦点。
 
     若 disputed_facts 为空，则基于案由生成常见争议焦点。
@@ -279,6 +326,11 @@ def _generate_disputed_focus(
 
     # 回退：基于案由生成常见争议焦点
     fallback_focus: dict[str, list[str]] = {
+        "工伤认定": [
+            "是否属于上下班的合理时间、合理路线",
+            "事故责任是否为本人非主要责任",
+            "是否存在劳动关系及法定排除情形",
+        ],
         "劳动争议": ["解除劳动合同是否合法", "经济补偿金数额计算"],
         "合同纠纷": ["是否构成违约", "违约金/损失数额"],
         "侵权纠纷": ["侵权责任是否成立", "损害赔偿数额"],
@@ -290,9 +342,7 @@ def _generate_disputed_focus(
     return ["案件事实与法律适用存在争议"]
 
 
-def _build_plaintiff_arguments(
-    case_type: str | None, facts_text: str, user_goal: str
-) -> list[str]:
+def _build_plaintiff_arguments(case_type: str | None, facts_text: str, user_goal: str) -> list[str]:
     """基于事实与案由模板构建原告主张。"""
     args: list[str] = []
     # 从案由模板中选取与事实相关的原告主张
@@ -354,9 +404,7 @@ def _build_evidence_mapping(
             status = _get(er, "current_status", "missing")
             evidence_types = _get(er, "evidence_types", []) or []
             # 简单关键词匹配
-            if fact_to_prove and any(
-                kw in focus for kw in fact_to_prove.split() if len(kw) >= 2
-            ):
+            if fact_to_prove and any(kw in focus for kw in fact_to_prove.split() if len(kw) >= 2):
                 types_str = "/".join(evidence_types) if evidence_types else "未列明"
                 matched.append(f"「{fact_to_prove}」({status}，证据：{types_str})")
 
@@ -369,9 +417,7 @@ def _build_evidence_mapping(
     return mappings
 
 
-def _compute_evidence_confidence(
-    evidence_requirements: list[Any], missing_facts: list[Any]
-) -> str:
+def _compute_evidence_confidence(evidence_requirements: list[Any], missing_facts: list[Any]) -> str:
     """证据置信度：基于已满足/未满足比例 + missing_facts 数量综合判断。
 
     - 高：≥80% 已满足且 missing ≤ 1
@@ -419,8 +465,7 @@ def _compute_judicial_tendency(
 
     # missing_facts 过多（blocking 缺失 ≥ 2 或总缺失 ≥ 4）→ 信息不足
     blocking_missing = sum(
-        1 for mf in (missing_facts or [])
-        if bool(_get(mf, "is_blocking", False))
+        1 for mf in (missing_facts or []) if bool(_get(mf, "is_blocking", False))
     )
     if blocking_missing >= 2 or len(missing_facts or []) >= 4:
         return "insufficient"
@@ -467,9 +512,7 @@ def _compute_judicial_tendency(
     return "insufficient"
 
 
-def _adjust_for_critic_feedback(
-    tendency: str, critic_feedback: list[str]
-) -> str:
+def _adjust_for_critic_feedback(tendency: str, critic_feedback: list[str]) -> str:
     """根据 critic 反馈调整裁判倾向（防止过度推断）。
 
     若 critic 反馈提示"过度推断"，将倾向下调一档。
@@ -605,25 +648,22 @@ def _try_llm_reasoning(state: CaseState) -> ReasoningResult | None:
     critic_feedback = _get(state, "critic_feedback", []) or []
 
     # 构造上下文摘要（控制 token 量）
-    facts_summary = "; ".join(
-        str(_get(f, "content", "")) for f in facts[:10]
-    ) or "暂无"
-    statutes_summary = "; ".join(
-        f"{_get(s, 'title', '')}{_get(s, 'article_number', '')}: {str(_get(s, 'article_text', ''))[:80]}"
-        for s in statutes[:5]
-    ) or "暂无"
-    cases_summary = "; ".join(
-        str(_get(c, "title", _get(c, "case_title", ""))) for c in cases[:3]
-    ) or "暂无"
+    facts_summary = "; ".join(str(_get(f, "content", "")) for f in facts[:10]) or "暂无"
+    statutes_summary = (
+        "; ".join(
+            f"{_get(s, 'title', '')}{_get(s, 'article_number', '')}: {str(_get(s, 'article_text', ''))[:80]}"
+            for s in statutes[:5]
+        )
+        or "暂无"
+    )
+    cases_summary = (
+        "; ".join(str(_get(c, "title", _get(c, "case_title", ""))) for c in cases[:3]) or "暂无"
+    )
     er_summary = f"共{len(evidence_requirements)}项，已满足{sum(1 for er in evidence_requirements if _get(er, 'current_status', '') == 'met')}项"
-    missing_summary = "; ".join(
-        str(_get(mf, "question", "")) for mf in missing_facts[:3]
-    ) or "无"
+    missing_summary = "; ".join(str(_get(mf, "question", "")) for mf in missing_facts[:3]) or "无"
     critic_summary = "; ".join(critic_feedback[:2]) or "无"
     attachment_ctx = _get(state, "relevant_attachment_context", "") or ""
-    attachment_block = (
-        f"\n相关材料摘要：\n{attachment_ctx}\n" if attachment_ctx.strip() else ""
-    )
+    attachment_block = f"\n相关材料摘要：\n{attachment_ctx}\n" if attachment_ctx.strip() else ""
     conversation_summary = _get(state, "conversation_summary", "") or ""
     history_block = (
         f"\n此前对话摘要：\n{conversation_summary}\n" if conversation_summary.strip() else ""
@@ -753,15 +793,21 @@ def legal_reasoner(state: CaseState) -> dict[str, Any]:
     statutes_text = _statutes_text(statutes)
 
     legal_relationship = _identify_legal_relationship(case_type, user_goal, statutes_text)
-    elements = _extract_elements(case_type, facts_text, statutes_text, evidence_requirements)
+    # 用户当前陈述本身也是事实来源；法规文本仍严格隔离，仅用于定义规则。
+    factual_text = f"{user_goal} {facts_text}".strip()
+    elements = _extract_elements(case_type, factual_text, statutes_text, evidence_requirements)
     disputed_focus = _generate_disputed_focus(disputed_facts, case_type)
     plaintiff_arguments = _build_plaintiff_arguments(case_type, facts_text, user_goal)
     defendant_arguments = _build_defendant_arguments(case_type, statutes_text, critic_feedback)
     evidence_mapping = _build_evidence_mapping(disputed_focus, evidence_requirements)
     evidence_confidence = _compute_evidence_confidence(evidence_requirements, missing_facts)
-    judicial_tendency = _compute_judicial_tendency(elements, evidence_confidence, statutes, cases, missing_facts)
+    judicial_tendency = _compute_judicial_tendency(
+        elements, evidence_confidence, statutes, cases, missing_facts
+    )
     judicial_tendency = _adjust_for_critic_feedback(judicial_tendency, critic_feedback)
-    key_factors = _identify_key_factors(elements, evidence_confidence, conflicts, missing_facts, statutes, cases)
+    key_factors = _identify_key_factors(
+        elements, evidence_confidence, conflicts, missing_facts, statutes, cases
+    )
 
     result = ReasoningResult(
         legal_relationship=legal_relationship,

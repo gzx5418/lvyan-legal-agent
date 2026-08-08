@@ -76,9 +76,7 @@ class OutputValidationResult(BaseModel):
     @property
     def structural_issues(self) -> list[str]:
         """结构缺失问题（missing_section）文本列表。"""
-        return [
-            e.detail for e in self.errors if e.error_type == "missing_section"
-        ]
+        return [e.detail for e in self.errors if e.error_type == "missing_section"]
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -94,17 +92,13 @@ class OutputValidationResult(BaseModel):
     @property
     def risk_statement_missing(self) -> bool:
         """是否缺少风险声明。"""
-        return any(
-            e.error_type == "missing_risk_disclaimer" for e in self.errors
-        )
+        return any(e.error_type == "missing_risk_disclaimer" for e in self.errors)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def numeric_probability_detected(self) -> bool:
         """是否检测到数字概率表达。"""
-        return any(
-            e.error_type == "numeric_probability" for e in self.errors
-        )
+        return any(e.error_type == "numeric_probability" for e in self.errors)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -116,12 +110,18 @@ class OutputValidationResult(BaseModel):
 # ---------------------------------------------------------------------------
 # 各模式必需章节（任一关键词命中即视为该章节存在）
 # ---------------------------------------------------------------------------
-# Light 模式：用户目标 / 结论 / 法条 / 建议 / 风险声明（风险声明单独校验）
+# Light 模式按提问意图组织内容（直接答复、材料清单、办理步骤或期限提示），
+# 不强制要求“用户目标/核心结论/行动建议”这一套固定报告标题。风险声明单独校验。
 _LIGHT_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
-    ("用户目标", ("用户目标", "咨询目标", "您想了解")),
-    ("核心法律结论", ("核心法律结论", "法律结论", "结论", "核心结论")),
-    ("关键法条引用", ("关键法条引用", "法条引用", "法律依据", "法条")),
-    ("行动建议", ("行动建议", "建议", "你现在可以怎么做", "您可以怎么做")),
+    (
+        "答复主旨",
+        ("核心法律结论", "法律结论", "核心结论", "直接回答", "适用条件", "为什么需要这些材料"),
+    ),
+    ("法律依据", ("关键法条引用", "法条引用", "法律依据", "法条")),
+    (
+        "后续动作",
+        ("行动建议", "下一步", "你现在可以怎么做", "您可以怎么做", "你可以这样做", "现在应做的事"),
+    ),
 ]
 
 # Deep 模式：全部章节（类案参考 / 法规冲突为「如有」，作为 warning 而非 error）
@@ -159,8 +159,7 @@ _RISK_DISCLAIMER_MARKERS: tuple[str, ...] = (
 
 # 标准风险声明（guardrail 自动追加时使用）
 STANDARD_RISK_DISCLAIMER: str = (
-    "## 风险声明\n"
-    "以上内容仅供参考，不构成正式法律意见。重大事项请咨询持证律师。"
+    "## 风险声明\n以上内容仅供参考，不构成正式法律意见。重大事项请咨询持证律师。"
 )
 
 # 数字概率模式：百分比 / 概率 / 胜诉率
@@ -227,10 +226,7 @@ def _check_numeric_probability(text: str) -> list[ValidationError]:
         for m in pattern.finditer(text):
             span = (m.start(), m.end())
             # 去重：同一区间可能被多模式命中
-            if any(
-                span[0] < existing[1] and span[1] > existing[0]
-                for existing in seen_spans
-            ):
+            if any(span[0] < existing[1] and span[1] > existing[0] for existing in seen_spans):
                 continue
             seen_spans.add(span)
             errors.append(
@@ -242,9 +238,7 @@ def _check_numeric_probability(text: str) -> list[ValidationError]:
     return errors
 
 
-def _check_citations(
-    text: str, statutes: list[Any]
-) -> list[ValidationError]:
+def _check_citations(text: str, statutes: list[Any]) -> list[ValidationError]:
     """校验输出中提到的法条编号是否在 statutes 中存在。
 
     - 若输出提到法条引用但 statutes 为空 → missing_citation（composer 漏写法条库）。
@@ -260,10 +254,7 @@ def _check_citations(
             errors.append(
                 ValidationError(
                     error_type="missing_citation",
-                    detail=(
-                        f"输出引用了 {c['citation_id']}，但 statutes 为空，"
-                        f"无法核对来源"
-                    ),
+                    detail=(f"输出引用了 {c['citation_id']}，但 statutes 为空，无法核对来源"),
                 )
             )
         return errors
@@ -275,8 +266,7 @@ def _check_citations(
                 ValidationError(
                     error_type="invalid_citation",
                     detail=(
-                        f"输出引用的 {c['citation_id']} 不在 state.statutes 中，"
-                        f"可能为误写或虚构"
+                        f"输出引用的 {c['citation_id']} 不在 state.statutes 中，可能为误写或虚构"
                     ),
                 )
             )

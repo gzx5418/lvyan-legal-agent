@@ -232,7 +232,9 @@ def test_cross_user_active_thread_is_indistinguishable_from_missing(monkeypatch)
             client.get(f"/api/agent/state/{thread_id}", headers=bob_headers),
             client.delete(f"/api/agent/state/{thread_id}", headers=bob_headers),
             client.get(f"/api/agent/stream/{run_id}", headers=bob_headers),
-            client.post(f"/api/agent/hitl/{run_id}", json={"action": "approve"}, headers=bob_headers),
+            client.post(
+                f"/api/agent/hitl/{run_id}", json={"action": "approve"}, headers=bob_headers
+            ),
             client.post(f"/api/agent/cancel/{run_id}", headers=bob_headers),
         ]
         for response in responses:

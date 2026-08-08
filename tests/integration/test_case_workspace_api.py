@@ -113,7 +113,12 @@ def test_document_review_and_approval_lifecycle(client: TestClient):
     response = client.get(f"/api/cases/{case['case_id']}/audit-events", headers=headers)
     assert response.status_code == 200
     actions = {event["action"] for event in response.json()}
-    assert {"case.created", "document.created", "review.finding_created", "document.approved"} <= actions
+    assert {
+        "case.created",
+        "document.created",
+        "review.finding_created",
+        "document.approved",
+    } <= actions
 
 
 def test_new_version_returns_document_to_draft(client: TestClient):
@@ -144,4 +149,3 @@ def test_new_version_returns_document_to_draft(client: TestClient):
 
     response = client.get(f"/api/legal-documents/{document['document_id']}", headers=headers)
     assert response.json()["status"] == "draft"
-

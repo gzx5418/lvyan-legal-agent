@@ -639,10 +639,13 @@ class RunManager:
             claimed = True
             # 恢复执行并继续流式推送
             ctx.status = "running"
-            self._start_task(
-                ctx,
-                self._resume_drive(ctx, Command(resume=resume_payload), config),
-            )
+            resume_awaitable = self._resume_drive(ctx, Command(resume=resume_payload), config)
+            try:
+                self._start_task(ctx, resume_awaitable)
+            except BaseException:
+                # 创建协程后若任务调度失败，必须显式关闭，避免资源泄漏警告。
+                resume_awaitable.close()
+                raise
             return ("resolved", f"已收到 {request.action} 决策，Agent 正在恢复执行")
         except Exception as exc:  # noqa: BLE001
             _logger.exception("HITL 恢复失败 run %s", ctx.run_id)
@@ -752,10 +755,12 @@ class RunManager:
                 # P0-2：claim 成功，后续启动失败必须回滚 DB
                 claimed = True
                 ctx.status = "running"
-                self._start_task(
-                    ctx,
-                    self._resume_drive(ctx, Command(resume=resume_payload), config),
-                )
+                resume_awaitable = self._resume_drive(ctx, Command(resume=resume_payload), config)
+                try:
+                    self._start_task(ctx, resume_awaitable)
+                except BaseException:
+                    resume_awaitable.close()
+                    raise
                 return ("resolved", f"已从 checkpoint 恢复 run {run_id}，正在继续执行")
 
             return ("not_found", f"run {run_id} 不存在（进程内和 checkpoint 均未找到）")
@@ -897,9 +902,7 @@ class RunManager:
         if ctx is None:
             if self._metadata_store is not None:
                 try:
-                    result = self._metadata_store.request_cancel(
-                        run_id, current_user_id
-                    )
+                    result = self._metadata_store.request_cancel(run_id, current_user_id)
                 except Exception as exc:  # noqa: BLE001
                     _logger.warning("request_cancel 持久化失败 run %s: %s", run_id, exc)
                     return ("unavailable", f"无法记录取消请求：{exc}")
@@ -1239,9 +1242,7 @@ def _parse_interrupt_snapshot(snapshot: Any) -> InterruptCheckResult:
                 interrupts = getattr(task, "interrupts", [])
                 if interrupts:
                     payload = (
-                        interrupts[0].value
-                        if hasattr(interrupts[0], "value")
-                        else interrupts[0]
+                        interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
                     )
                     return InterruptCheckResult("pending", payload)
         return InterruptCheckResult(
@@ -1355,9 +1356,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
 
         # 多轮记忆：读取本 thread 历史，格式化为紧凑摘要注入初始 state。
         history_msgs = ctx.load_history() if ctx.load_history else []
-        conversation_summary = (
-            format_conversation_summary(history_msgs) if history_msgs else ""
-        )
+        conversation_summary = format_conversation_summary(history_msgs) if history_msgs else ""
 
         initial = CaseState(
             run_id=ctx.run_id,

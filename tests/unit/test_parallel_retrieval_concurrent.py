@@ -1,4 +1,5 @@
 """验证 statutes 与 cases 检索并发执行（总耗时 ≈ max 而非 sum）。"""
+
 from __future__ import annotations
 
 import time
@@ -18,6 +19,7 @@ def _state(queries=None):
 
 def test_statute_and_case_search_run_concurrently():
     """两个检索各睡 0.3s；并发总耗时 < 0.55s（串行会 ≥ 0.6s）。"""
+
     def slow_statutes(query, **kw):
         time.sleep(0.3)
         return []
@@ -26,8 +28,10 @@ def test_statute_and_case_search_run_concurrently():
         time.sleep(0.3)
         return None
 
-    with patch("lvyan.nodes.retrieve_statutes.search_statutes", side_effect=slow_statutes), \
-         patch("lvyan.nodes.retrieve_statutes.search_cases", side_effect=slow_cases):
+    with (
+        patch("lvyan.nodes.retrieve_statutes.search_statutes", side_effect=slow_statutes),
+        patch("lvyan.nodes.retrieve_statutes.search_cases", side_effect=slow_cases),
+    ):
         t0 = time.monotonic()
         parallel_retrieval(_state())
         elapsed = time.monotonic() - t0

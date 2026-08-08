@@ -6,15 +6,14 @@
 3. 当 final_output 在 guardrail 阶段被修改（脱敏 / 删除虚假法条 / HITL 编辑）后，
    渲染到 DOCX 的是修改后的内容，而非 composer 初稿。
 """
+
 from __future__ import annotations
 
 from datetime import date
 
-import pytest
 
 from lvyan.nodes.composer import composer
 from lvyan.nodes.legal_answer_finalizer import legal_answer_finalizer
-from lvyan.schemas import CaseState
 
 
 def _make_base_state(**overrides) -> dict:
@@ -89,8 +88,6 @@ def test_composer_does_not_render_docx(monkeypatch, tmp_path):
 def test_finalizer_renders_docx_from_final_output(monkeypatch):
     """finalizer 应基于 state.final_output 调用 render_docx。"""
     captured = {}
-
-    import lvyan.nodes.legal_answer_finalizer as fin_mod
 
     def _fake_render(markdown_text, output_path, template=None):
         captured["markdown"] = markdown_text

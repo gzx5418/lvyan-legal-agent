@@ -1,4 +1,5 @@
 """对话历史格式化器测试：把 messages 列表压成紧凑摘要字符串。"""
+
 from __future__ import annotations
 
 from lvyan.tools.conversation_history import format_conversation_summary

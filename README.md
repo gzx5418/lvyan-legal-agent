@@ -209,8 +209,9 @@ docker compose --profile full up -d --build
 应用容器特性：
 
 - 多阶段构建，非 root 用户运行，`/livez` 健康检查
-- 生产模式默认开启（`RUNTIME_MODE=production` + `CHECKPOINTER_BACKEND=postgres`），
-  禁止任何静默降级
+- 示例默认以开发模式启动，便于本机首次运行；生产部署必须显式设置
+  `RUNTIME_MODE=production`、`AUTH_ENABLED=true`，并将 `AUTH_MODE` 配置为
+  `jwt` 或 `trusted_proxy`
 - `migrations/*.sql` 挂载到 postgres 的 `/docker-entrypoint-initdb.d/`，
   首次启动自动建表；应用层 `_ensure_schema` 兜底
 - 持久化卷：`lvyan-app-data`（上传与线程索引）、`lvyan-app-outputs`（文书导出）、
@@ -218,7 +219,8 @@ docker compose --profile full up -d --build
 - 端口映射可通过 `.env` 的 `APP_PORT` / `POSTGRES_PORT` 等覆盖
 
 > ⚠️ `.env.example` 中的默认密码仅方便本地试用，生产部署前必须替换为强随机值，
-> 并按需关闭对外的 5432/9200/9000/9001 端口映射。
+> OpenSearch 默认只绑定 `127.0.0.1`；生产环境还应启用其安全插件与 TLS，
+> 并按需关闭对外的 5432/9000/9001 端口映射。
 
 #### 方式 B：本地开发
 

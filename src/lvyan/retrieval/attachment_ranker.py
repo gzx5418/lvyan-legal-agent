@@ -3,6 +3,7 @@
 与 ``retrieval.lexical`` 的全库索引解耦 —— 附件分块每次只有几十块，
 现场计算 IDF 即可，避免加载全局索引。
 """
+
 from __future__ import annotations
 
 import math

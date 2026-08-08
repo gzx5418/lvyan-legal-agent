@@ -18,6 +18,7 @@ template），本节点在 output_guardrail（以及 HITL 编辑恢复）之后�
 3. 风险等级与 guardrail 结果一致；
 4. 校验失败时不发送旧结构化数据（fail-safe 降级为 Markdown）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -118,9 +119,7 @@ def _render_document_file(state: Any) -> dict[str, Any]:
         }
         # P1-2：页脚不再显示服务器物理路径，避免 /app/outputs/... 泄露给浏览器
         if result.success:
-            footer = (
-                f"\n\n---\n文书已生成，可通过下方按钮下载（格式：{result.format}）。"
-            )
+            footer = f"\n\n---\n文书已生成，可通过下方按钮下载（格式：{result.format}）。"
             if result.error:
                 footer += f"\n⚠ {result.error}"
             final_output = final_output + footer

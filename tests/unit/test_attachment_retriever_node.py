@@ -1,4 +1,5 @@
 """attachment_retriever 节点测试。"""
+
 from __future__ import annotations
 
 from lvyan.nodes.attachment_retriever import attachment_retriever
@@ -35,8 +36,11 @@ def test_context_respects_char_cap(tmp_path):
     md_file = tmp_path / "big.md"
     md_file.write_text("# 押金\n" + "押金。 " * 500, encoding="utf-8")
     doc = {
-        "doc_id": "f1", "filename": "big.md", "doc_type": "contract",
-        "content_hash": "h", "stored_path": str(md_file),
+        "doc_id": "f1",
+        "filename": "big.md",
+        "doc_type": "contract",
+        "content_hash": "h",
+        "stored_path": str(md_file),
         "uploaded_at": "2026-01-01T00:00:00",
     }
     result = attachment_retriever(
@@ -49,8 +53,11 @@ def test_stored_path_is_read_directly(tmp_path):
     md_file = tmp_path / "doc.md"
     md_file.write_text("# 押金\n押金 3000 元。", encoding="utf-8")
     doc = {
-        "doc_id": "f1", "filename": "doc.md", "doc_type": "contract",
-        "content_hash": "h", "stored_path": str(md_file),
+        "doc_id": "f1",
+        "filename": "doc.md",
+        "doc_type": "contract",
+        "content_hash": "h",
+        "stored_path": str(md_file),
         "uploaded_at": "2026-01-01T00:00:00",
     }
     result = attachment_retriever({"user_goal": "押金", "uploaded_documents": [doc]})
