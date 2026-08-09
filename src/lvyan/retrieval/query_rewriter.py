@@ -65,7 +65,7 @@ def _try_llm_rewrite(query: str, hint: str = "") -> str | None:
         data = resp.json()
         content = data["choices"][0]["message"]["content"].strip()
         return content if content else None
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional LLM rewrite boundary
         return None
 
 

@@ -168,14 +168,14 @@ def _try_real_embedding(text: str) -> list[float] | None:
             resp.raise_for_status()
             data = resp.json()
             return list(map(float, data["data"][0]["embedding"]))
-        except Exception:
+        except Exception:  # noqa: BLE001 - optional embedding provider boundary
             return None
 
     if _ST_MODEL_CACHE is not None:
         try:
             emb = _ST_MODEL_CACHE.encode(text, normalize_embeddings=True)
             return list(map(float, emb))
-        except Exception:
+        except Exception:  # noqa: BLE001 - optional local model boundary
             return None
     return None
 

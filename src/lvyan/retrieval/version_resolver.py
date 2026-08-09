@@ -312,7 +312,7 @@ def find_law_files_by_title(title: str, lawtext_dir: Path | None = None) -> list
     for md_file in root.rglob("*.md"):
         try:
             data, _ = _read_front_matter(md_file)
-        except Exception:
+        except Exception:  # noqa: BLE001 - malformed source file is skipped
             continue
         file_title = data.get("title")
         if isinstance(file_title, str) and file_title == title:
@@ -332,7 +332,7 @@ def scan_all_laws(lawtext_dir: Path | None = None) -> list[LawMetadata]:
     for md_file in root.rglob("*.md"):
         try:
             result.append(parse_law_metadata(md_file))
-        except Exception:
+        except Exception:  # noqa: BLE001 - malformed source file is skipped
             continue
     return result
 

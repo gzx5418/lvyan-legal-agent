@@ -2,7 +2,7 @@
 
 问题背景
 --------
-Docker 构建期预热生成的 ``article_index_v2.pkl`` 与 ``bm25_index.pkl`` 仅校验
+Docker 构建期预热生成的 ``article_index_v3.lvix`` 与 ``bm25_index_v3.lvix`` 仅校验
 ``schema_version``（和 BM25 的 ``signature``）。``signature`` 由 chunks 内容计算，
 而 chunks 本身来自旧缓存 —— 两层缓存链式自洽，无法发现 ``LAWTEXT_DIR`` 已更新
 （submodule 升级 / 法条正文修改 / 挂载卷覆盖）。
@@ -28,7 +28,7 @@ P0 增强（2026-08 审查）
    ``/readyz`` 不再每次请求都全库扫描；后台 / 低频路径可显式 ``force=True``。
 
 2. **真实磁盘文件校验**（P0-2）：除 manifest 内部字段自洽外，现在直接读取磁盘上的
-   ``article_index_v2.pkl`` 与 ``bm25_index.pkl``，验证：
+   ``article_index_v3.lvix`` 与 ``bm25_index_v3.lvix``（回退 JSON），验证：
        - article_index 的 chunk 数量 == manifest.chunks_count
        - article_index 的 chunks 签名 == manifest.chunks_signature
        - bm25 的 signature == manifest.bm25_signature
@@ -281,65 +281,109 @@ def _verify_disk_indexes(
     manifest: dict[str, Any],
     manifests_dir: Path,
 ) -> str | None:
-    """读取磁盘上实际的 article_index_v2.pkl / bm25_index.pkl，验证三方一致。
+    """读取磁盘上实际的 article_index_v3.lvix / bm25_index_v3.lvix，验证三方一致。
 
     返回不一致原因（``consistent=True`` 时为 None）。校验维度：
 
-    1. ``article_index_v2.pkl`` 存在且 ``schema_version`` 匹配；
+    1. ``article_index_v3.lvix`` 存在且 ``schema_version`` 匹配；
     2. article_index 的 chunk 数量 == manifest.chunks_count；
     3. article_index 的 chunks 签名 == manifest.chunks_signature；
-    4. ``bm25_index.pkl`` 存在且 ``schema_version`` 匹配；
+    4. ``bm25_index_v3.lvix`` 存在且 ``schema_version`` 匹配（回退 bm25_index.json）；
     5. bm25 的 signature == manifest.bm25_signature；
     6. bm25 的 n_docs == manifest.bm25_n_docs。
     """
-    import pickle
-
     from lvyan.retrieval.lexical import _compute_chunk_signature
+    from lvyan.retrieval.safe_index import (
+        SafeIndexStore,
+        IndexCorruptedError,
+        IndexVersionMismatchError,
+    )
 
     manifests_dir = Path(manifests_dir)
-    article_pkl = manifests_dir / "article_index_v2.pkl"
-    bm25_pkl = manifests_dir / "bm25_index.pkl"
+    article_lvix = manifests_dir / "article_index_v3.lvix"
+    bm25_lvix = manifests_dir / "bm25_index_v3.lvix"
 
-    # --- article_index_v2.pkl ---
-    if not article_pkl.is_file():
+    # 兼容: 同时检查 JSON 缓存作为回退
+    article_json = manifests_dir / "article_index_v2.json"
+
+    expected_schema = manifest.get("article_index_schema_version")
+
+    # --- article_index (LVIX 优先, JSON 回退) ---
+    article_data = None
+    if article_lvix.is_file():
+        try:
+            result = SafeIndexStore.load(article_lvix, expected_schema_version=expected_schema)
+            if result is not None:
+                article_data = result["data"]
+        except IndexVersionMismatchError:
+            return "article_index_schema_mismatch"
+        except IndexCorruptedError:
+            return "article_index_unreadable"
+        except OSError:
+            return "article_index_unreadable"
+    elif article_json.is_file():
+        try:
+            import json as _json
+
+            with open(article_json, "r", encoding="utf-8") as f:
+                article_data = _json.load(f)
+            if not isinstance(article_data, dict):
+                return "article_index_invalid"
+            if article_data.get("schema_version") != expected_schema:
+                return "article_index_schema_mismatch"
+        except (OSError, ValueError):
+            return "article_index_unreadable"
+    else:
         return "article_index_missing"
-    try:
-        with open(article_pkl, "rb") as f:
-            cached = pickle.load(f)
-    except Exception:  # noqa: BLE001
-        return "article_index_unreadable"
-    if not isinstance(cached, dict) or cached.get("schema_version") != manifest.get(
-        "article_index_schema_version"
-    ):
-        return "article_index_schema_mismatch"
-    disk_chunks = cached.get("chunks")
+
+    if article_data is None:
+        return "article_index_missing"
+    disk_chunks = article_data.get("chunks") if isinstance(article_data, dict) else None
     if not isinstance(disk_chunks, list):
         return "article_index_invalid"
     if len(disk_chunks) != int(manifest.get("chunks_count", 0)):
         return "article_index_count_mismatch"
-    # 计算磁盘 chunks 的实际签名，与 manifest 对比
     try:
         disk_sig = _compute_chunk_signature(disk_chunks)
-    except Exception:  # noqa: BLE001
+    except (TypeError, AttributeError):
         return "article_index_signature_unreadable"
     if disk_sig != manifest.get("chunks_signature"):
         return "article_index_signature_mismatch"
 
-    # --- bm25_index.pkl ---
-    if not bm25_pkl.is_file():
+    # --- bm25_index (LVIX 优先, JSON 回退) ---
+    bm25_data = None
+    bm25_json = manifests_dir / "bm25_index.json"
+    if bm25_lvix.is_file():
+        try:
+            result = SafeIndexStore.load(bm25_lvix, expected_schema_version=expected_schema)
+            if result is not None:
+                bm25_data = result["data"]
+        except IndexVersionMismatchError:
+            return "bm25_schema_mismatch"
+        except IndexCorruptedError:
+            return "bm25_index_unreadable"
+        except OSError:
+            return "bm25_index_unreadable"
+    elif bm25_json.is_file():
+        try:
+            import json as _json
+
+            with open(bm25_json, "r", encoding="utf-8") as f:
+                bm25_data = _json.load(f)
+        except (OSError, ValueError):
+            return "bm25_index_unreadable"
+    else:
         return "bm25_index_missing"
-    try:
-        with open(bm25_pkl, "rb") as f:
-            bm25 = pickle.load(f)
-    except Exception:  # noqa: BLE001
-        return "bm25_index_unreadable"
-    if not isinstance(bm25, dict):
+
+    if bm25_data is None:
+        return "bm25_index_missing"
+    if not isinstance(bm25_data, dict):
         return "bm25_index_invalid"
-    if bm25.get("schema_version") != manifest.get("article_index_schema_version"):
+    if bm25_data.get("schema_version") != expected_schema:
         return "bm25_schema_mismatch"
-    if str(bm25.get("signature") or "") != str(manifest.get("bm25_signature") or ""):
+    if str(bm25_data.get("signature") or "") != str(manifest.get("bm25_signature") or ""):
         return "bm25_signature_mismatch"
-    if int(bm25.get("n_docs", 0)) != int(manifest.get("bm25_n_docs", 0)):
+    if int(bm25_data.get("n_docs", 0)) != int(manifest.get("bm25_n_docs", 0)):
         return "bm25_doc_count_mismatch"
 
     return None
@@ -471,20 +515,20 @@ def rebuild_corpus_indexes(
 
     1. 全量扫描法库并切分 chunks（``build_article_index``）；
     2. 写 ``article_index_v2.json`` / ``.pkl``（原子）；
-    3. 构建 BM25 索引，写 ``bm25_index.pkl`` / ``.json``（原子）；
+    3. 构建 BM25 索引，写 ``bm25_index_v3.lvix`` / ``.json``（原子）；
     4. 生成新的 ``corpus_manifest.json``（原子）；
     5. 清理 TTL 缓存，强制重新校验并返回结果。
 
     Returns:
         ``verify_corpus_consistency(force=True)`` 的结果 dict。
     """
-    import pickle
-
     from lvyan.retrieval.lexical import (
         ARTICLE_INDEX_SCHEMA_VERSION,
         _build_bm25_index,
+        _compute_chunk_signature,
         _serialize_bm25_index,
     )
+    from lvyan.retrieval.safe_index import SafeIndexStore
     from lvyan.scripts.ingest_laws import build_article_index
 
     lawtext_dir = Path(lawtext_dir or LAWTEXT_DIR)
@@ -511,33 +555,40 @@ def rebuild_corpus_indexes(
         chunks = build_article_index(lawtext_dir)
         _logger.info("[manifest] 扫描完成，chunks=%d", len(chunks))
 
-        # 2) ArticleIndex（json + pickle，P1-4 全部原子写）
+        chunks_data = [c.model_dump(mode="json") if not isinstance(c, dict) else c for c in chunks]
+        corpus_hash = _compute_chunk_signature(chunks_data)
+
+        # 2) ArticleIndex（JSON + LVIX 安全索引，原子写）
         article_json = manifests_dir / "article_index_v2.json"
-        article_pkl = manifests_dir / "article_index_v2.pkl"
+        article_lvix = manifests_dir / "article_index_v3.lvix"
         _atomic_write_text(
             article_json,
             json.dumps(
-                {
-                    "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
-                    "chunks": [
-                        c.model_dump(mode="json") if not isinstance(c, dict) else c for c in chunks
-                    ],
-                },
+                {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": chunks_data},
                 ensure_ascii=False,
                 indent=2,
             ),
         )
-        _atomic_write_bytes(
-            article_pkl,
-            pickle.dumps({"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": chunks}),
+        SafeIndexStore.save(
+            article_lvix,
+            {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": chunks_data},
+            corpus_hash=corpus_hash,
+            schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+            item_count=len(chunks_data),
         )
 
-        # 3) BM25（pkl + json，原子写）
-        bm25_pkl = manifests_dir / "bm25_index.pkl"
+        # 3) BM25（LVIX + JSON，原子写）
+        bm25_lvix = manifests_dir / "bm25_index_v3.lvix"
         bm25_json = manifests_dir / "bm25_index.json"
         index = _build_bm25_index(chunks)
         serialized = _serialize_bm25_index(index)
-        _atomic_write_bytes(bm25_pkl, pickle.dumps(serialized))
+        SafeIndexStore.save(
+            bm25_lvix,
+            serialized,
+            corpus_hash=corpus_hash,
+            schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+            item_count=index["n_docs"],
+        )
         _atomic_write_text(bm25_json, json.dumps(serialized, ensure_ascii=False))
 
         # 4) 新 manifest（原子写，最后生成 —— 作为「全部就绪」的信号）

@@ -10,7 +10,7 @@
 5. manifest 内部 BM25 signature 与 chunks signature 不一致 → ``consistent=False``；
 6. manifest 缺失 → ``consistent=False, reason="manifest_missing"``；
 7. P0-1：``verify_corpus_consistency`` 默认带 TTL 快照缓存，TTL 内不重复全库扫描；
-8. P0-2：真实磁盘文件校验 —— article_index.pkl / bm25_index.pkl 与 manifest 不一致
+8. P0-2：真实磁盘文件校验 —— article_index_v3.lvix / bm25_index_v3.lvix 与 manifest 不一致
    时返回 ``article_index_*`` / ``bm25_*`` 系列原因；
 9. P0-3：``rebuild_corpus_indexes`` 原子重建三件套并重新生成 manifest；
    ``ensure_corpus_ready`` 自愈入口在索引不一致时自动重建。
@@ -72,13 +72,13 @@ def _write_full_index_set(
     与 ``rebuild_corpus_indexes`` 内部产物一致，供测试验证真实磁盘文件校验。
     先写 manifest 再补 index 文件（模拟预热的产物布局）。
     """
-    import pickle
-
     from lvyan.retrieval.lexical import (
         ARTICLE_INDEX_SCHEMA_VERSION,
         _build_bm25_index,
+        _compute_chunk_signature,
         _serialize_bm25_index,
     )
+    from lvyan.retrieval.safe_index import SafeIndexStore
 
     manifests_dir = Path(manifests_dir)
     manifests_dir.mkdir(parents=True, exist_ok=True)
@@ -86,18 +86,28 @@ def _write_full_index_set(
     # manifest
     write_corpus_manifest(chunks, lawtext_dir, manifests_dir)
 
-    # article_index_v2.pkl
-    with open(manifests_dir / "article_index_v2.pkl", "wb") as f:
-        pickle.dump(
-            {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": chunks},
-            f,
-        )
+    chunks_data = [chunk.model_dump(mode="json") for chunk in chunks]
+    corpus_hash = _compute_chunk_signature(chunks_data)
 
-    # bm25_index.pkl
+    # article_index_v3.lvix
+    SafeIndexStore.save(
+        manifests_dir / "article_index_v3.lvix",
+        {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": chunks_data},
+        corpus_hash=corpus_hash,
+        schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+        item_count=len(chunks_data),
+    )
+
+    # bm25_index_v3.lvix
     index = _build_bm25_index(chunks)
     serialized = _serialize_bm25_index(index)
-    with open(manifests_dir / "bm25_index.pkl", "wb") as f:
-        pickle.dump(serialized, f)
+    SafeIndexStore.save(
+        manifests_dir / "bm25_index_v3.lvix",
+        serialized,
+        corpus_hash=corpus_hash,
+        schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+        item_count=index["n_docs"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +295,7 @@ def test_bm25_doc_count_mismatch(tmp_path):
 # 7. P0-2：真实磁盘文件校验
 # ---------------------------------------------------------------------------
 def test_article_index_missing(tmp_path):
-    """manifest 存在但 article_index_v2.pkl 缺失 → article_index_missing。"""
+    """manifest 存在但 article_index_v3.lvix 缺失 → article_index_missing。"""
     lawtext = _make_lawtext_dir(tmp_path)
     chunks = [_make_chunk()]
     manifests_dir = tmp_path / "manifests"
@@ -298,23 +308,26 @@ def test_article_index_missing(tmp_path):
 
 
 def test_article_index_signature_mismatch(tmp_path):
-    """磁盘 article_index.pkl 的 chunks 与 manifest 不匹配 → signature 不一致。"""
-    import pickle
+    """磁盘 article_index LVIX 的 chunks 与 manifest 不匹配 → signature 不一致。"""
 
     lawtext = _make_lawtext_dir(tmp_path)
     chunks = [_make_chunk(text="第一条 内容")]
     manifests_dir = tmp_path / "manifests"
     _write_full_index_set(chunks, lawtext, manifests_dir)
 
-    # 用不同内容的 chunks 覆盖 article_index_v2.pkl（法库变了但索引没重建）
+    # 用不同内容的 chunks 覆盖 article_index_v3.lvix（法库变了但索引没重建）
     stale_chunks = [_make_chunk(chunk_id="stale#art1", text="旧内容")]
-    from lvyan.retrieval.lexical import ARTICLE_INDEX_SCHEMA_VERSION
+    from lvyan.retrieval.lexical import ARTICLE_INDEX_SCHEMA_VERSION, _compute_chunk_signature
+    from lvyan.retrieval.safe_index import SafeIndexStore
 
-    with open(manifests_dir / "article_index_v2.pkl", "wb") as f:
-        pickle.dump(
-            {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": stale_chunks},
-            f,
-        )
+    stale_data = [chunk.model_dump(mode="json") for chunk in stale_chunks]
+    SafeIndexStore.save(
+        manifests_dir / "article_index_v3.lvix",
+        {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": stale_data},
+        corpus_hash=_compute_chunk_signature(stale_data),
+        schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+        item_count=len(stale_data),
+    )
 
     result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
     assert result["consistent"] is False
@@ -322,14 +335,14 @@ def test_article_index_signature_mismatch(tmp_path):
 
 
 def test_bm25_index_missing(tmp_path):
-    """article_index 存在但 bm25_index.pkl 缺失 → bm25_index_missing。"""
+    """article_index 存在但 bm25_index_v3.lvix 缺失 → bm25_index_missing。"""
 
     lawtext = _make_lawtext_dir(tmp_path)
     chunks = [_make_chunk()]
     manifests_dir = tmp_path / "manifests"
     _write_full_index_set(chunks, lawtext, manifests_dir)
 
-    (manifests_dir / "bm25_index.pkl").unlink()
+    (manifests_dir / "bm25_index_v3.lvix").unlink()
 
     result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
     assert result["consistent"] is False
@@ -337,10 +350,15 @@ def test_bm25_index_missing(tmp_path):
 
 
 def test_bm25_signature_mismatch(tmp_path):
-    """磁盘 bm25_index.pkl 的 signature 与 manifest 不匹配 → bm25_signature_mismatch。"""
-    import pickle
+    """磁盘 bm25_index LVIX 的 signature 与 manifest 不匹配 → bm25_signature_mismatch。"""
 
-    from lvyan.retrieval.lexical import _build_bm25_index, _serialize_bm25_index
+    from lvyan.retrieval.lexical import (
+        ARTICLE_INDEX_SCHEMA_VERSION,
+        _build_bm25_index,
+        _compute_chunk_signature,
+        _serialize_bm25_index,
+    )
+    from lvyan.retrieval.safe_index import SafeIndexStore
 
     lawtext = _make_lawtext_dir(tmp_path)
     chunks = [_make_chunk(text="第一条 内容")]
@@ -350,8 +368,14 @@ def test_bm25_signature_mismatch(tmp_path):
     # 用不同 chunks 构建 BM25（模拟索引与 manifest 错位）
     stale_chunks = [_make_chunk(chunk_id="stale#art1", text="旧内容")]
     stale_index = _serialize_bm25_index(_build_bm25_index(stale_chunks))
-    with open(manifests_dir / "bm25_index.pkl", "wb") as f:
-        pickle.dump(stale_index, f)
+    stale_data = [chunk.model_dump(mode="json") for chunk in stale_chunks]
+    SafeIndexStore.save(
+        manifests_dir / "bm25_index_v3.lvix",
+        stale_index,
+        corpus_hash=_compute_chunk_signature(stale_data),
+        schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+        item_count=stale_index["n_docs"],
+    )
 
     result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
     assert result["consistent"] is False
@@ -414,8 +438,8 @@ def test_rebuild_corpus_indexes_heals_mismatch(tmp_path):
 
     # 三件套都应存在
     assert (manifests_dir / "corpus_manifest.json").is_file()
-    assert (manifests_dir / "article_index_v2.pkl").is_file()
-    assert (manifests_dir / "bm25_index.pkl").is_file()
+    assert (manifests_dir / "article_index_v3.lvix").is_file()
+    assert (manifests_dir / "bm25_index_v3.lvix").is_file()
 
     # 新 manifest 与磁盘文件一致
     verify_result = verify_corpus_consistency(lawtext, manifests_dir, force=True)
@@ -462,9 +486,9 @@ def test_load_article_chunks_heals_via_ensure_corpus_ready(tmp_path, monkeypatch
     # rebuild 内部依赖 lexical._ARTICLE_INDEX_* 常量（在 import 时基于 AGENT_DIR 固化），
     # 需同步 patch 到隔离路径
     monkeypatch.setattr(lexical, "_ARTICLE_INDEX_FILE", manifests_dir / "article_index_v2.json")
-    monkeypatch.setattr(lexical, "_ARTICLE_INDEX_PKL", manifests_dir / "article_index_v2.pkl")
+    monkeypatch.setattr(lexical, "_ARTICLE_INDEX_LVIX", manifests_dir / "article_index_v3.lvix")
     monkeypatch.setattr(lexical, "_BM25_INDEX_FILE", manifests_dir / "bm25_index.json")
-    monkeypatch.setattr(lexical, "_BM25_INDEX_PKL", manifests_dir / "bm25_index.pkl")
+    monkeypatch.setattr(lexical, "_BM25_INDEX_LVIX", manifests_dir / "bm25_index_v3.lvix")
     monkeypatch.setattr(lexical, "_GLOBAL_CHUNKS_CACHE", None)
     # 确保 manifest 模块的路径常量也指向隔离目录
     import lvyan.retrieval.manifest as manifest_mod
@@ -479,8 +503,8 @@ def test_load_article_chunks_heals_via_ensure_corpus_ready(tmp_path, monkeypatch
         assert len(result) >= 1
         # 隔离目录应已生成三件套
         assert (manifests_dir / "corpus_manifest.json").is_file()
-        assert (manifests_dir / "article_index_v2.pkl").is_file()
-        assert (manifests_dir / "bm25_index.pkl").is_file()
+        assert (manifests_dir / "article_index_v3.lvix").is_file()
+        assert (manifests_dir / "bm25_index_v3.lvix").is_file()
     finally:
         invalidate_corpus_health_cache()
         # 恢复 lexical 的路径常量（避免影响后续测试）

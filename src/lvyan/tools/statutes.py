@@ -173,7 +173,7 @@ def _build_hit_from_lexical_match(file_entry: dict[str, Any]) -> StatuteHit | No
                     official_source=meta.official_urls[0] if meta.official_urls else None,
                     score=max_score,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - metadata enrichment is best-effort
                 pass
 
     # 知识库 / 元数据解析失败：回退到文件名兜底
@@ -398,7 +398,7 @@ def verify_statute_status(source_id: str, as_of: str | None = None) -> StatuteSt
                     and meta.status == "effective"
                 ):
                     superseded_by = current.source_id
-    except Exception:
+    except Exception:  # noqa: BLE001 - version enrichment is best-effort
         pass
 
     official_source = meta.official_urls[0] if meta.official_urls else None

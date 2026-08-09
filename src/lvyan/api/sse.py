@@ -21,7 +21,7 @@ import logging
 import time
 import uuid
 from datetime import date, datetime, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable
 
 from lvyan.memory.run_metadata import (
     RunMetadataStore,

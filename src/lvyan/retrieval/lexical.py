@@ -246,9 +246,9 @@ class ScoredChunk:
 # ArticleChunk 懒加载与缓存（避免 ingest_laws 循环导入）
 # ---------------------------------------------------------------------------
 _ARTICLE_INDEX_FILE: Path = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.json"
-_ARTICLE_INDEX_PKL: Path = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.pkl"
+_ARTICLE_INDEX_LVIX: Path = AGENT_DIR / "knowledge" / "manifests" / "article_index_v3.lvix"
 _BM25_INDEX_FILE: Path = AGENT_DIR / "knowledge" / "manifests" / "bm25_index.json"
-_BM25_INDEX_PKL: Path = AGENT_DIR / "knowledge" / "manifests" / "bm25_index.pkl"
+_BM25_INDEX_LVIX: Path = AGENT_DIR / "knowledge" / "manifests" / "bm25_index_v3.lvix"
 ARTICLE_INDEX_SCHEMA_VERSION = 3
 
 # 模块级缓存（仅全局 chunks 路径使用，显式传 chunks 时不污染缓存）
@@ -259,8 +259,8 @@ _GLOBAL_BM25_INDEX: dict[str, Any] | None = None
 def _load_article_chunks() -> list[Any]:
     """加载全库 ArticleChunk 列表。
 
-    优先读取 ``AGENT/knowledge/manifests/article_index_v2.pkl``（pickle 加速，
-    比 JSON 快 3-5x）；其次读取 ``article_index_v2.json``（由
+    优先读取 ``AGENT/knowledge/manifests/article_index_v3.lvix``（MsgPack 安全
+    索引格式，比 JSON 快 3-5x）；其次读取 ``article_index_v2.json``（由
     ``ingest_laws.py`` CLI 预生成）；不存在时调用 ``build_article_index``
     现场构建并落盘，便于后续运行复用。
 
@@ -299,24 +299,26 @@ def _load_article_chunks() -> list[Any]:
     except Exception as exc:  # noqa: BLE001 校验失败不阻断加载，降级到原逻辑
         log(f"[BM25] manifest 校验异常（忽略，按原逻辑加载）：{exc}")
 
-    # 1) 优先尝试 pickle 缓存（最快）—— 仅在 manifest 一致时信任
-    if cache_trusted and _ARTICLE_INDEX_PKL.is_file():
+    # 1) 优先尝试 MsgPack 安全索引（LVIX 格式）—— 仅在 manifest 一致时信任
+    if cache_trusted and _ARTICLE_INDEX_LVIX.is_file():
         try:
-            import pickle
+            from lvyan.retrieval.safe_index import SafeIndexStore, IndexVersionMismatchError
 
-            with open(_ARTICLE_INDEX_PKL, "rb") as f:
-                cached = pickle.load(f)
-            if (
-                isinstance(cached, dict)
-                and cached.get("schema_version") == ARTICLE_INDEX_SCHEMA_VERSION
-                and isinstance(cached.get("chunks"), list)
-            ):
-                chunks = cached["chunks"]
-                _GLOBAL_CHUNKS_CACHE = chunks
-                log(f"[BM25] 命中 pickle chunks：{_ARTICLE_INDEX_PKL} (n={len(chunks)})")
-                return chunks
-        except (OSError, pickle.PickleError, Exception):
-            pass
+            result = SafeIndexStore.load(
+                _ARTICLE_INDEX_LVIX,
+                expected_schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+            )
+            if result is not None:
+                cached_data = result["data"]
+                if isinstance(cached_data, dict) and isinstance(cached_data.get("chunks"), list):
+                    chunks = [ArticleChunk.model_validate(item) for item in cached_data["chunks"]]
+                    _GLOBAL_CHUNKS_CACHE = chunks
+                    log(f"[BM25] 命中 LVIX chunks：{_ARTICLE_INDEX_LVIX} (n={len(chunks)})")
+                    return chunks
+        except IndexVersionMismatchError:
+            log("[BM25] LVIX article index schema 版本不匹配，重建 ...")
+        except (OSError, Exception) as exc:  # noqa: BLE001 boundary-exception: 索引加载降级
+            log(f"[BM25] LVIX article index 读取失败 ({exc})，尝试 JSON ...")
 
     # 2) 回退到 JSON 缓存 —— 同样仅在 manifest 一致时信任
     if cache_trusted and _ARTICLE_INDEX_FILE.is_file():
@@ -332,46 +334,47 @@ def _load_article_chunks() -> list[Any]:
             chunks = [ArticleChunk.model_validate(item) for item in raw["chunks"]]
             if chunks:
                 _GLOBAL_CHUNKS_CACHE = chunks
-                # 顺手写一份 pickle 加速后续
+                # 写入 LVIX 安全索引加速后续
                 try:
-                    import pickle
+                    from lvyan.retrieval.safe_index import SafeIndexStore
 
-                    with open(_ARTICLE_INDEX_PKL, "wb") as f:
-                        pickle.dump(
-                            {
-                                "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
-                                "chunks": chunks,
-                            },
-                            f,
-                        )
-                    log(f"[BM25] 已写入 pickle chunks -> {_ARTICLE_INDEX_PKL}")
-                except Exception:
+                    SafeIndexStore.save(
+                        _ARTICLE_INDEX_LVIX,
+                        {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": raw["chunks"]},
+                        corpus_hash=_compute_chunk_signature(chunks),
+                        schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+                        item_count=len(chunks),
+                    )
+                    log(f"[BM25] 已写入 LVIX chunks -> {_ARTICLE_INDEX_LVIX}")
+                except Exception:  # noqa: BLE001 boundary-exception: 缓存写入可选
                     pass
                 return chunks
-        except (OSError, json.JSONDecodeError, Exception):
-            # 校验失败则现场重建
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            log(f"[BM25] JSON article index 读取失败 ({exc})，现场重建 ...")
             _GLOBAL_CHUNKS_CACHE = None
 
     # 3) 现场构建（较慢，仅首次运行）
-    log("[BM25] article_index_v2 缓存不存在或损坏，现场构建全库 chunks ...")
+    log("[BM25] article_index 缓存不存在或损坏，现场构建全库 chunks ...")
     chunks = build_article_index()
     try:
         save_index_json(chunks, _ARTICLE_INDEX_FILE)
         log(f"[BM25] 已写入 {len(chunks)} chunks -> {_ARTICLE_INDEX_FILE}")
-        # 同时写 pickle
+        # 写入 LVIX 安全索引
         try:
-            import pickle
+            from lvyan.retrieval.safe_index import SafeIndexStore
 
-            with open(_ARTICLE_INDEX_PKL, "wb") as f:
-                pickle.dump(
-                    {
-                        "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
-                        "chunks": chunks,
-                    },
-                    f,
-                )
-            log(f"[BM25] 已写入 pickle chunks -> {_ARTICLE_INDEX_PKL}")
-        except Exception:
+            SafeIndexStore.save(
+                _ARTICLE_INDEX_LVIX,
+                {
+                    "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
+                    "chunks": [c.model_dump() for c in chunks],
+                },
+                corpus_hash=_compute_chunk_signature(chunks),
+                schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+                item_count=len(chunks),
+            )
+            log(f"[BM25] 已写入 LVIX chunks -> {_ARTICLE_INDEX_LVIX}")
+        except Exception:  # noqa: BLE001 boundary-exception: 缓存写入可选
             pass
     except OSError as exc:
         log(f"[BM25] 落盘失败（忽略，仅内存）：{exc}")
@@ -578,8 +581,8 @@ def _deserialize_bm25_index(raw: dict[str, Any]) -> dict[str, Any]:
 def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
     """加载或构建全局 BM25 索引（带磁盘缓存）。
 
-    签名不匹配或缓存缺失时现场重建并落盘到 ``bm25_index.pkl``（pickle 优先，
-    比 JSON 快 3-5x）与 ``bm25_index.json``（兼容旧缓存）。
+    签名不匹配或缓存缺失时现场重建并落盘到 ``bm25_index_v3.lvix``（MsgPack 安全
+    索引格式，比 JSON 快 3-5x）与 ``bm25_index.json``（兼容旧缓存）。
     """
     global _GLOBAL_BM25_INDEX
     if _GLOBAL_BM25_INDEX is not None:
@@ -587,27 +590,34 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
 
     expected_sig = _compute_chunk_signature(chunks)
 
-    # 1) 优先尝试 pickle 缓存（更快）
-    if _BM25_INDEX_PKL.is_file():
+    # 1) 优先尝试 LVIX 安全索引
+    if _BM25_INDEX_LVIX.is_file():
         try:
-            import pickle
+            from lvyan.retrieval.safe_index import SafeIndexStore, IndexVersionMismatchError
 
-            with open(_BM25_INDEX_PKL, "rb") as f:
-                raw = pickle.load(f)
-            if (
-                raw.get("schema_version") == ARTICLE_INDEX_SCHEMA_VERSION
-                and raw.get("signature") == expected_sig
-                and int(raw.get("n_docs", 0)) == len(chunks)
-            ):
-                _GLOBAL_BM25_INDEX = _deserialize_bm25_index(raw)
-                log(
-                    f"[BM25] 命中 pickle 缓存：{_BM25_INDEX_PKL} (n_docs={_GLOBAL_BM25_INDEX['n_docs']})"
-                )
-                return _GLOBAL_BM25_INDEX
-            else:
-                log("[BM25] pickle 缓存签名不匹配，重建索引 ...")
-        except (OSError, pickle.PickleError, Exception) as exc:
-            log(f"[BM25] pickle 缓存读取失败 ({exc})，尝试 JSON ...")
+            result = SafeIndexStore.load(
+                _BM25_INDEX_LVIX,
+                expected_schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+            )
+            if result is not None:
+                raw = result["data"]
+                if (
+                    isinstance(raw, dict)
+                    and raw.get("signature") == expected_sig
+                    and int(raw.get("n_docs", 0)) == len(chunks)
+                ):
+                    _GLOBAL_BM25_INDEX = _deserialize_bm25_index(raw)
+                    log(
+                        f"[BM25] 命中 LVIX 缓存：{_BM25_INDEX_LVIX} "
+                        f"(n_docs={_GLOBAL_BM25_INDEX['n_docs']})"
+                    )
+                    return _GLOBAL_BM25_INDEX
+                else:
+                    log("[BM25] LVIX 缓存签名不匹配，重建索引 ...")
+        except IndexVersionMismatchError:
+            log("[BM25] LVIX bm25 index schema 版本不匹配，重建 ...")
+        except (OSError, Exception) as exc:  # noqa: BLE001 boundary-exception: 索引加载降级
+            log(f"[BM25] LVIX bm25 index 读取失败 ({exc})，尝试 JSON ...")
 
     # 2) 回退到 JSON 缓存（兼容旧版本）
     if _BM25_INDEX_FILE.is_file():
@@ -621,37 +631,48 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
             ):
                 _GLOBAL_BM25_INDEX = _deserialize_bm25_index(raw)
                 log(
-                    f"[BM25] 命中 JSON 缓存：{_BM25_INDEX_FILE} (n_docs={_GLOBAL_BM25_INDEX['n_docs']})"
+                    f"[BM25] 命中 JSON 缓存：{_BM25_INDEX_FILE} "
+                    f"(n_docs={_GLOBAL_BM25_INDEX['n_docs']})"
                 )
-                # 顺手写一份 pickle 加速后续
+                # 写入 LVIX 加速后续
                 try:
-                    import pickle
+                    from lvyan.retrieval.safe_index import SafeIndexStore
 
-                    with open(_BM25_INDEX_PKL, "wb") as f:
-                        pickle.dump(_serialize_bm25_index(_GLOBAL_BM25_INDEX), f)
-                except Exception:
+                    SafeIndexStore.save(
+                        _BM25_INDEX_LVIX,
+                        _serialize_bm25_index(_GLOBAL_BM25_INDEX),
+                        corpus_hash=expected_sig,
+                        schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+                        item_count=_GLOBAL_BM25_INDEX["n_docs"],
+                    )
+                except Exception:  # noqa: BLE001 boundary-exception: 缓存写入可选
                     pass
                 return _GLOBAL_BM25_INDEX
             else:
                 log("[BM25] JSON 缓存签名不匹配，重建索引 ...")
-        except (OSError, json.JSONDecodeError, Exception) as exc:
+        except (OSError, json.JSONDecodeError) as exc:
             log(f"[BM25] JSON 缓存读取失败 ({exc})，重建索引 ...")
 
-    # 3) 现场构建并落盘（同时写 pickle + JSON）
+    # 3) 现场构建并落盘（LVIX + JSON）
     log(f"[BM25] 构建 BM25 倒排索引（{len(chunks)} chunks）...")
     index = _build_bm25_index(chunks)
     try:
         _BM25_INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
         serialized = _serialize_bm25_index(index)
-        # pickle（首选）
+        # LVIX 安全索引（首选）
         try:
-            import pickle
+            from lvyan.retrieval.safe_index import SafeIndexStore
 
-            with open(_BM25_INDEX_PKL, "wb") as f:
-                pickle.dump(serialized, f)
-            log(f"[BM25] 已写入 pickle 索引 -> {_BM25_INDEX_PKL}")
-        except Exception as exc:
-            log(f"[BM25] pickle 落盘失败（忽略）：{exc}")
+            SafeIndexStore.save(
+                _BM25_INDEX_LVIX,
+                serialized,
+                corpus_hash=expected_sig,
+                schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+                item_count=index["n_docs"],
+            )
+            log(f"[BM25] 已写入 LVIX 索引 -> {_BM25_INDEX_LVIX}")
+        except Exception as exc:  # noqa: BLE001 boundary-exception: 缓存写入可选
+            log(f"[BM25] LVIX 落盘失败（忽略）：{exc}")
         # JSON（兼容备份）
         with open(_BM25_INDEX_FILE, "w", encoding="utf-8") as f:
             json.dump(serialized, f, ensure_ascii=False)

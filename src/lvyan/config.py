@@ -235,6 +235,12 @@ class Settings(BaseModel):
         description="Critic 不通过时回退 legal_reasoner 的最大重试次数（降低以减少 LLM 调用放大）",
     )
 
+    # --- P1: 案件加密空间安全配置 ---
+    case_vault_allow_insecure: bool = Field(
+        default=False,
+        description="开发环境是否允许 base64 降级（CASE_VAULT_KEY 未配置时）",
+    )
+
 
 def _build_settings() -> Settings:
     """从环境变量构造 Settings 单例。
@@ -304,6 +310,7 @@ def _build_settings() -> Settings:
         document_conversion_timeout_seconds=_get_float("DOCUMENT_CONVERSION_TIMEOUT_SECONDS", 60.0),
         zip_uncompressed_bytes_limit=_get_int("ZIP_UNCOMPRESSED_BYTES_LIMIT", 100 * 1024 * 1024),
         max_legal_reasoner_iterations=_get_int("MAX_LEGAL_REASONER_ITERATIONS", 1),
+        case_vault_allow_insecure=_get_bool("CASE_VAULT_ALLOW_INSECURE", False),
     )
 
 
@@ -398,6 +405,11 @@ def validate_runtime_config() -> None:
             raise RuntimeError(
                 "AUTH_MODE=auto 在生产模式下被禁止；请设置 AUTH_MODE=jwt 或 AUTH_MODE=trusted_proxy"
             )
+    # P1: 加密配置校验（生产环境必须有合法密钥）
+    from lvyan.memory.case_vault import CaseVault
+
+    CaseVault.validate_encryption_config()
+
     # W13：JWT 进程内验签的配置组合校验（启动期暴露配置错误，避免首请求才发现）
     if os.getenv("JWT_VERIFY_IN_PROCESS", "").strip().lower() in {"1", "true", "yes", "on"}:
         jwks_url = os.getenv("JWT_JWKS_URL", "").strip()

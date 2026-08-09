@@ -216,7 +216,7 @@ def _setup_styles(document) -> None:
         rfonts.set(qn("w:ascii"), "Arial")
         rfonts.set(qn("w:hAnsi"), "Arial")
         rfonts.set(qn("w:eastAsia"), "宋体")
-    except Exception:
+    except Exception:  # noqa: BLE001 - DOCX style customization is optional
         # 样式设置失败不阻断渲染
         pass
 

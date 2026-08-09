@@ -363,18 +363,17 @@ def _legal_corpus_status() -> dict[str, Any]:
                     info["mode"] = "index_mismatch"
             else:
                 # manifest 缺失：回退到直接读 article_index 文件（兼容旧部署）
-                pkl = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.pkl"
+                lvix = AGENT_DIR / "knowledge" / "manifests" / "article_index_v3.lvix"
                 js = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.json"
-                if pkl.is_file():
-                    import pickle
+                if lvix.is_file():
+                    from lvyan.retrieval.safe_index import SafeIndexStore
 
-                    with open(pkl, "rb") as f:
-                        cached = pickle.load(f)
-                    if isinstance(cached, dict) and isinstance(cached.get("chunks"), list):
-                        info["chunks"] = len(cached["chunks"])
+                    result = SafeIndexStore.load(lvix)
+                    if result is not None:
+                        data = result["data"]
+                        if isinstance(data, dict) and isinstance(data.get("chunks"), list):
+                            info["chunks"] = len(data["chunks"])
                 elif js.is_file():
-                    import json
-
                     with open(js, "r", encoding="utf-8") as f:
                         raw = json.load(f)
                     if isinstance(raw, dict) and isinstance(raw.get("chunks"), list):

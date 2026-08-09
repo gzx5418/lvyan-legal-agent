@@ -20,6 +20,8 @@ dependencies = [
     "opensearch-py",                   # OpenSearch 检索
     "httpx",                           # HTTP 客户端，用于模型网关调用
     "PyJWT[crypto]>=2.8",              # AUTH_ENABLED + 进程内 JWT 签名验证
+    "cryptography>=42.0",              # AES-256-GCM 加密（直接依赖，不依赖 PyJWT 传递）
+    "msgpack>=1.0",                    # 安全索引序列化（替代 Pickle）
     "python-docx",                     # DOCX 导出，复用现有能力
     "pyyaml",                          # 解析法规 front matter
     "langfuse",                        # 可观测性
@@ -47,6 +49,16 @@ packages = ["src/lvyan"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "BLE001"]
+# 项目中包含需要保持单行的 SQL、提示词与法律文本；由格式化工具统一处理布局，
+# 不将 E501 作为 CI 阻断项。
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试文件允许宽捕获用于测试逻辑
+"tests/**/*.py" = ["BLE001"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

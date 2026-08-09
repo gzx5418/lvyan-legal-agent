@@ -56,9 +56,17 @@ _PATH_LIMITS: tuple[tuple[str, str, int], ...] = (
 )
 
 # 不限制的路径（健康检查、静态资源、GET 读取）
-_EXEMPT_PATHS: frozenset[str] = frozenset({
-    "/livez", "/readyz", "/api/health", "/", "/docs", "/redoc", "/openapi.json",
-})
+_EXEMPT_PATHS: frozenset[str] = frozenset(
+    {
+        "/livez",
+        "/readyz",
+        "/api/health",
+        "/",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+    }
+)
 
 
 class _SlidingWindowCounter:
@@ -158,7 +166,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not counter.is_allowed(limit):
             _logger.warning(
                 "速率限制触发: %s %s (client=%s, limit=%d/min)",
-                request.method, path, client_ip, limit,
+                request.method,
+                path,
+                client_ip,
+                limit,
             )
             return JSONResponse(
                 status_code=429,

@@ -22,6 +22,12 @@ os.environ.setdefault("PERSISTENCE_REQUIRED", "false")
 # 这里需要强制覆盖，故用直接赋值）。
 os.environ["RUNTIME_MODE"] = os.environ.get("LVYAN_TEST_RUNTIME_MODE", "development")
 os.environ["PERSISTENCE_REQUIRED"] = os.environ.get("LVYAN_TEST_PERSISTENCE_REQUIRED", "false")
+# 测试环境不保存真实案件材料；显式允许开发期 base64 降级，避免模块级
+# ``create_app()`` 在 collection 阶段因缺少 CASE_VAULT_KEY 而失败。生产模式
+# 始终忽略该开关，相关安全用例也会在各自测试中清理或覆盖该变量。
+os.environ["CASE_VAULT_ALLOW_INSECURE"] = os.environ.get(
+    "LVYAN_TEST_CASE_VAULT_ALLOW_INSECURE", "true"
+)
 
 # 关键：在「开发默认环境」下立即 import lvyan.config，使 ``settings`` 单例在此刻
 # 冻结为 development / persistence_required=False。否则 ``settings`` 会在第一个

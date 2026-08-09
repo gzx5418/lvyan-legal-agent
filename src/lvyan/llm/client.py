@@ -80,7 +80,7 @@ def _retry_delay(attempt: int) -> float:
     """指数退避延迟（含抖动），attempt 从 0 起。"""
     import random
 
-    delay = min(_RETRY_BASE_DELAY * (2 ** attempt), _RETRY_MAX_DELAY)
+    delay = min(_RETRY_BASE_DELAY * (2**attempt), _RETRY_MAX_DELAY)
     return delay * (0.5 + random.random() * 0.5)
 
 
@@ -194,13 +194,18 @@ def chat(
                 delay = _retry_delay(attempt)
                 _logger.debug(
                     "LLM chat 可重试异常 (attempt=%d, model=%s, delay=%.1fs): %s",
-                    attempt + 1, used_model, delay, exc,
+                    attempt + 1,
+                    used_model,
+                    delay,
+                    exc,
                 )
                 time.sleep(delay)
                 continue
             break
 
-    _logger.debug("LLM chat 调用失败 (model=%s, attempts=%d): %s", used_model, _MAX_RETRIES, last_exc)
+    _logger.debug(
+        "LLM chat 调用失败 (model=%s, attempts=%d): %s", used_model, _MAX_RETRIES, last_exc
+    )
     return None
 
 
@@ -321,7 +326,10 @@ def chat_json(
                 delay = _retry_delay(attempt)
                 _logger.debug(
                     "LLM chat_json 可重试异常 (attempt=%d, model=%s, delay=%.1fs): %s",
-                    attempt + 1, used_model, delay, exc,
+                    attempt + 1,
+                    used_model,
+                    delay,
+                    exc,
                 )
                 time.sleep(delay)
                 continue

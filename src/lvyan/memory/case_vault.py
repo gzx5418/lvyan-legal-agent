@@ -15,6 +15,7 @@ hex 编码的 32 字节密钥）。未配置密钥时降级为 base64 编码（�
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import logging
 import os
@@ -231,41 +232,87 @@ class CaseVault:
 
     @classmethod
     def _get_aes_key(cls) -> bytes | None:
-        """从 CASE_VAULT_KEY 环境变量获取 32 字节密钥（hex 编码）。"""
+        """从 CASE_VAULT_KEY 环境变量获取 32 字节密钥（hex 编码）。
+
+        返回 None 表示密钥不可用；调用方需根据运行模式决定是否允许降级。
+        """
         raw = os.getenv("CASE_VAULT_KEY", "").strip()
         if not raw:
             return None
         try:
             key = bytes.fromhex(raw)
         except ValueError:
-            _logger.warning("CASE_VAULT_KEY 不是合法的 hex 编码，降级为 base64")
+            _logger.warning("CASE_VAULT_KEY 不是合法的 hex 编码")
             return None
         if len(key) != 32:
             _logger.warning(
-                "CASE_VAULT_KEY 长度不正确（期望 32 字节 / 64 hex 字符，实际 %d 字节），降级为 base64",
+                "CASE_VAULT_KEY 长度不正确（期望 32 字节 / 64 hex 字符，实际 %d 字节）",
                 len(key),
             )
             return None
         return key
 
     @classmethod
+    def _is_insecure_allowed(cls) -> bool:
+        """是否允许不安全的 base64 降级模式。
+
+        仅在 **非生产环境** 且 `CASE_VAULT_ALLOW_INSECURE=true` 时允许。
+        生产环境无论如何都不允许降级。
+        """
+        from lvyan.config import is_production
+
+        if is_production():
+            return False
+        raw = os.getenv("CASE_VAULT_ALLOW_INSECURE", "").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    @classmethod
+    def validate_encryption_config(cls) -> None:
+        """启动期验证加密配置。
+
+        生产环境缺少合法的 CASE_VAULT_KEY 时拒绝启动。
+        开发环境仅在 CASE_VAULT_ALLOW_INSECURE=true 时允许降级。
+
+        Raises:
+            RuntimeError: 配置不满足安全要求。
+        """
+        from lvyan.config import is_production
+
+        key = cls._get_aes_key()
+        if key is not None:
+            return  # 密钥有效，无需降级
+
+        if is_production():
+            raise RuntimeError(
+                "生产环境必须配置合法的 CASE_VAULT_KEY (64 hex 字符 = 32 字节)。"
+                "不允许降级为 base64 编码。"
+            )
+
+        if not cls._is_insecure_allowed():
+            raise RuntimeError(
+                "CASE_VAULT_KEY 未配置或不合法。如需在开发环境允许 base64 降级，"
+                "请设置 CASE_VAULT_ALLOW_INSECURE=true。"
+            )
+
+        _logger.warning(
+            "CASE_VAULT_KEY 未配置，降级为 base64 编码（仅限开发环境，"
+            "CASE_VAULT_ALLOW_INSECURE=true）"
+        )
+
+    @classmethod
     def _encrypt(cls, plaintext: bytes) -> bytes:
         key = cls._get_aes_key()
         if key is None:
+            if not cls._is_insecure_allowed():
+                raise RuntimeError("加密操作失败：CASE_VAULT_KEY 未配置且不允许不安全降级")
             return base64.b64encode(plaintext)
-        try:
-            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-            nonce = secrets.token_bytes(12)
-            aesgcm = AESGCM(key)
-            ct = aesgcm.encrypt(nonce, plaintext, None)
-            # ct 已包含 tag（cryptography 库默认 16 字节 tag 附在末尾）
-            return cls._AES_HEADER + nonce + ct
-        except ImportError:
-            _logger.warning(
-                "未安装 cryptography 库，无法使用 AES-256-GCM，降级为 base64 编码"
-            )
-            return base64.b64encode(plaintext)
+        nonce = secrets.token_bytes(12)
+        aesgcm = AESGCM(key)
+        ct = aesgcm.encrypt(nonce, plaintext, None)
+        # ct 已包含 tag（cryptography 库默认 16 字节 tag 附在末尾）
+        return cls._AES_HEADER + nonce + ct
 
     @classmethod
     def _decrypt(cls, ciphertext: bytes) -> bytes:
@@ -274,24 +321,22 @@ class CaseVault:
             if key is None:
                 _logger.error("密文为 AES-256-GCM 格式但 CASE_VAULT_KEY 未配置，无法解密")
                 return b""
-            try:
-                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            from cryptography.exceptions import InvalidTag
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-                header_len = len(cls._AES_HEADER)
-                nonce = ciphertext[header_len : header_len + 12]
-                ct_with_tag = ciphertext[header_len + 12 :]
-                aesgcm = AESGCM(key)
+            header_len = len(cls._AES_HEADER)
+            nonce = ciphertext[header_len : header_len + 12]
+            ct_with_tag = ciphertext[header_len + 12 :]
+            aesgcm = AESGCM(key)
+            try:
                 return aesgcm.decrypt(nonce, ct_with_tag, None)
-            except ImportError:
-                _logger.error("未安装 cryptography 库，无法解密 AES-256-GCM 密文")
-                return b""
-            except Exception as exc:
+            except (InvalidTag, TypeError, ValueError) as exc:
                 _logger.error("AES-256-GCM 解密失败：%s", exc)
                 return b""
-        # 降级模式：base64
+        # 降级模式：base64（仅开发环境可到达此路径）
         try:
-            return base64.b64decode(ciphertext)
-        except Exception:
+            return base64.b64decode(ciphertext, validate=True)
+        except (binascii.Error, TypeError, ValueError):
             return b""
 
     # ------------------------------------------------------------------

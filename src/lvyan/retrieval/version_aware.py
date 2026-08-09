@@ -165,7 +165,7 @@ def _load_metadata_map() -> dict[str, LawMetadata]:
     _metadata_cache = {m.source_id: m for m in metas}
     try:
         _groups_cache = build_version_groups(metas)
-    except Exception:
+    except Exception:  # noqa: BLE001 - metadata cache is best-effort
         _groups_cache = []
     return _metadata_cache
 

@@ -159,6 +159,24 @@ jobs:
       - name: Run ruff format check
         run: ruff format --check src/ tests/
 
+      - name: Verify no pickle.load in source
+        run: |
+          if grep -rn "pickle\.load\|pickle\.loads" src/; then
+            echo "ERROR: 源码中仍存在 pickle.load/loads 调用"
+            exit 1
+          else
+            echo "OK: 源码无 pickle.load/loads"
+          fi
+
+      - name: Verify no import pickle in source
+        run: |
+          if grep -rn "^[[:space:]]*import pickle" src/; then
+            echo "ERROR: 源码中仍存在 import pickle"
+            exit 1
+          else
+            echo "OK: 源码无 import pickle"
+          fi
+
   # ---------------------------------------------------------------------------
   # Job 4: PostgreSQL 集成测试（advisory lock / cancel / 级联删除等）
   # P1-8：真实 PG 测试必须被强制执行；若全部 skip 则本 job 失败。

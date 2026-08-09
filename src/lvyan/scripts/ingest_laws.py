@@ -325,7 +325,7 @@ def build_article_index(lawtext_dir: Path | None = None) -> list[ArticleChunk]:
     for meta in metadatas:
         try:
             chunks.extend(chunk_law_articles(meta))
-        except Exception:
+        except Exception:  # noqa: BLE001 - malformed law file is skipped
             continue
     return chunks
 
@@ -344,54 +344,65 @@ def save_index_json(chunks: list[ArticleChunk], output_path: Path) -> None:
     )
 
 
-def _save_article_index_pickle(chunks: list[ArticleChunk], pkl_path: Path) -> None:
-    """P0-2：把 ArticleChunk 列表序列化为 pickle（运行时加载比 JSON 快 3-5x）。
+def _save_article_index_lvix(chunks: list[ArticleChunk], lvix_path: Path) -> None:
+    """P1: 把 ArticleChunk 列表序列化为 LVIX 安全索引（替代 pickle）。
 
-    与 ``lvyan.retrieval.lexical._load_article_chunks`` 的 pickle schema 保持一致：
-    ``{"schema_version": int, "chunks": [ArticleChunk, ...]}``。
+    与 ``lvyan.retrieval.lexical._load_article_chunks`` 的 LVIX schema 保持一致：
+    ``{"schema_version": int, "chunks": [...]}``。
     """
-    import pickle
+    from lvyan.retrieval.safe_index import SafeIndexStore
+    from lvyan.retrieval.lexical import _compute_chunk_signature
 
-    pkl_path = Path(pkl_path)
-    pkl_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
-        "chunks": chunks,
-    }
-    with open(pkl_path, "wb") as f:
-        pickle.dump(payload, f)
+    lvix_path = Path(lvix_path)
+    lvix_path.parent.mkdir(parents=True, exist_ok=True)
+    chunks_data = [c.model_dump(mode="json") if not isinstance(c, dict) else c for c in chunks]
+    corpus_hash = _compute_chunk_signature(chunks_data)
+    SafeIndexStore.save(
+        lvix_path,
+        {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": chunks_data},
+        corpus_hash=corpus_hash,
+        schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+        item_count=len(chunks_data),
+    )
 
 
 def prewarm_bm25_index(chunks: list[ArticleChunk], manifests_dir: Path) -> None:
-    """P0-2：构建并落盘全局 BM25 倒排索引（pickle + JSON）。
+    """P1: 构建并落盘全局 BM25 倒排索引（LVIX + JSON）。
 
     Docker 构建期调用，确保运行时首个用户请求无需等待 10-30s 索引构建。
     复用 ``lvyan.retrieval.lexical`` 的构建 / 序列化逻辑，保证与运行时
     加载逻辑完全一致（schema_version / signature 校验可命中缓存）。
     """
-    import pickle
-
     from lvyan.retrieval.lexical import (
         ARTICLE_INDEX_SCHEMA_VERSION as LEX_SCHEMA_VERSION,
         _build_bm25_index,
+        _compute_chunk_signature,
         _serialize_bm25_index,
     )
+    from lvyan.retrieval.safe_index import SafeIndexStore
 
     manifests_dir = Path(manifests_dir)
     manifests_dir.mkdir(parents=True, exist_ok=True)
 
-    bm25_pkl = manifests_dir / "bm25_index.pkl"
+    bm25_lvix = manifests_dir / "bm25_index_v3.lvix"
     bm25_json = manifests_dir / "bm25_index.json"
 
     print(f"[prewarm] 构建 BM25 倒排索引（{len(chunks)} chunks）...", file=sys.stderr)
     index = _build_bm25_index(chunks)
     serialized = _serialize_bm25_index(index)
-    # _serialize 已写入 schema_version，但显式校验避免未来漂移
     assert serialized["schema_version"] == LEX_SCHEMA_VERSION
 
-    with open(bm25_pkl, "wb") as f:
-        pickle.dump(serialized, f)
-    print(f"[prewarm] 已写入 pickle BM25 索引 -> {bm25_pkl}", file=sys.stderr)
+    chunks_data = [c.model_dump(mode="json") if not isinstance(c, dict) else c for c in chunks]
+    corpus_hash = _compute_chunk_signature(chunks_data)
+
+    SafeIndexStore.save(
+        bm25_lvix,
+        serialized,
+        corpus_hash=corpus_hash,
+        schema_version=LEX_SCHEMA_VERSION,
+        item_count=index["n_docs"],
+    )
+    print(f"[prewarm] 已写入 LVIX BM25 索引 -> {bm25_lvix}", file=sys.stderr)
 
     with open(bm25_json, "w", encoding="utf-8") as f:
         json.dump(serialized, f, ensure_ascii=False)
@@ -545,8 +556,8 @@ def main() -> None:
         "--prewarm",
         action="store_true",
         help=(
-            "P0-2：预热运行时缓存。除 JSON 索引外，额外生成 article_index_v2.pkl "
-            "（pickle 加速加载）与 bm25_index.pkl / bm25_index.json（全局 BM25 "
+            "P1: 预热运行时缓存。除 JSON 索引外，额外生成 article_index_v3.lvix "
+            "（MsgPack 安全索引）与 bm25_index_v3.lvix / bm25_index.json（全局 BM25 "
             "倒排索引）。Docker 构建期使用，避免首个用户请求触发 10-30s 冷启动。"
         ),
     )
@@ -564,16 +575,16 @@ def main() -> None:
     for meta in metadatas:
         try:
             chunks.extend(chunk_law_articles(meta))
-        except Exception:
+        except Exception:  # noqa: BLE001 - malformed law file is skipped
             continue
 
     save_index_json(chunks, args.output)
 
     if args.prewarm:
-        # P0-2：生成 pickle 缓存 + BM25 倒排索引，供运行时直接加载
-        pkl_path = args.output.with_suffix(".pkl")
-        _save_article_index_pickle(chunks, pkl_path)
-        print(f"[ingest] 已写入 pickle 索引：{pkl_path}", file=sys.stderr)
+        # P1：生成 LVIX 安全索引 + BM25 倒排索引，供运行时直接加载
+        lvix_path = args.output.parent / "article_index_v3.lvix"
+        _save_article_index_lvix(chunks, lvix_path)
+        print(f"[ingest] 已写入 LVIX 索引：{lvix_path}", file=sys.stderr)
         prewarm_bm25_index(chunks, args.output.parent)
         # P0-B：生成 corpus_manifest.json，供运行时校验法库/索引一致性
         from lvyan.retrieval.manifest import write_corpus_manifest

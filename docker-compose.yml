@@ -184,6 +184,11 @@ services:
       # —— 反向代理信任（W6）——
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}
 
+      # —— 案件加密空间（P1: 生产必须配置密钥）——
+      CASE_VAULT_KEY: ${CASE_VAULT_KEY:-}
+      # 生产模式会强制拒绝降级；本地开发默认显式开启，避免无密钥时无法启动。
+      CASE_VAULT_ALLOW_INSECURE: ${CASE_VAULT_ALLOW_INSECURE:-true}
+
       # —— 业务参数（有合理默认值，按需覆盖）——
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
       HITL_ENABLED: ${HITL_ENABLED:-true}
