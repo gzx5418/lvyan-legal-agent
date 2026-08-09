@@ -1,441 +1,277 @@
-"""统一 LLM client：封装模型网关调用，支持 JSON 模式与 Pydantic 校验。
+"""统一 LLM 客户端：支持多模型、自动重试、指标收集、并发控制。
 
-设计要点
+设计目标
 --------
-- 模块级 ``httpx.Client`` 缓存，避免每次调用重建连接。
-- ``chat``：普通对话补全，返回 ``str | None``（失败返回 None）。
-- ``chat_json``：启用 ``response_format=json_object``，解析后返回 dict。
-- ``chat_structured``：在 ``chat_json`` 之上加 Pydantic schema 校验 +
-  一次修复重试，返回 ``BaseModel`` 实例（P3-21）。
-- 自动调用 :func:`lvyan.observability.tracing.record_llm_call` 上报成本与 Langfuse。
-- ``llm_available``：快速判断网关是否配置，供调用方决定是否走 LLM 路径。
-- 内置指数退避重试（瞬时网络抖动 / 429 限流 / 502-504 网关异常自动重试）。
+1. 单一入口点：所有 LLM 调用走 `LLMClient.invoke()` / `LLMClient.ainvoke()`
+2. 自动重试：429/5xx 指数退避重试（最多 3 次）
+3. 并发控制：通过 `InstrumentedSemaphore` 限制同时请求数
+4. 可观测性：自动记录延迟、token 用量、错误率到 Prometheus
+5. 模型路由：根据任务类型选择合适模型（chat/embedding/reranker/vision）
 
-降级策略
---------
-所有调用在网关未配置、网络异常、JSON 解析失败时返回 ``None``，
-调用方应回退到规则/模板实现。
+用法
+----
+    from lvyan.llm.client import get_llm_client
+
+    client = get_llm_client()
+    response = await client.ainvoke(
+        messages=[{"role": "user", "content": "..."}],
+        model="chat",  # 或具体模型名
+        temperature=0.1,
+    )
 """
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
-import re
+import os
 import time
-from typing import Any, TypeVar
-
-from pydantic import BaseModel, ValidationError
+from dataclasses import dataclass, field
+from typing import Any, Sequence
 
 _logger = logging.getLogger("lvyan.llm.client")
 
-# 装饰器返回的函数类型变量
-T = TypeVar("T", bound=BaseModel)
-
-# 模块级 httpx client 缓存
-_HTTP_CLIENT: Any = None
-
-# 重试配置
-_MAX_RETRIES: int = 3
-_RETRY_BASE_DELAY: float = 0.5
-_RETRY_MAX_DELAY: float = 8.0
-_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 502, 503, 504})
+__all__ = ["LLMClient", "LLMResponse", "get_llm_client"]
 
 
-def _get_http_client() -> Any:
-    """获取或创建模块级 httpx.Client（含连接池限制）。"""
-    global _HTTP_CLIENT
-    if _HTTP_CLIENT is not None:
-        return _HTTP_CLIENT
-    try:
-        import httpx  # type: ignore[import-untyped]
+@dataclass
+class LLMResponse:
+    """LLM 调用响应。"""
 
-        _HTTP_CLIENT = httpx.Client(
-            timeout=60.0,
-            limits=httpx.Limits(
-                max_connections=100,
-                max_keepalive_connections=20,
-                keepalive_expiry=30.0,
-            ),
+    content: str
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    duration_ms: float = 0.0
+    raw: Any = field(default=None, repr=False)
+
+
+class LLMClient:
+    """统一 LLM 客户端。
+
+    内部使用 LangChain ChatModel 或 httpx 直接调用网关。
+    """
+
+    def __init__(
+        self,
+        gateway_url: str | None = None,
+        api_key: str | None = None,
+        default_chat_model: str | None = None,
+        max_retries: int = 3,
+        timeout: float = 120.0,
+    ) -> None:
+        self._gateway_url = gateway_url or os.getenv("MODEL_GATEWAY_URL", "")
+        self._api_key = api_key or os.getenv("MODEL_GATEWAY_API_KEY", "")
+        self._default_chat_model = default_chat_model or os.getenv(
+            "CHAT_MODEL", "Qwen/Qwen2.5-7B-Instruct"
         )
-    except ImportError:
-        _logger.debug("httpx 未安装，LLM 调用不可用")
-    return _HTTP_CLIENT
+        self._max_retries = max_retries
+        self._timeout = timeout
 
-
-def _is_retryable(exc: Exception) -> bool:
-    """判断异常是否可重试（网络抖动 / 限流 / 网关异常）。"""
-    try:
-        import httpx as _httpx
-    except ImportError:
-        return False
-    if isinstance(exc, (_httpx.ConnectError, _httpx.ReadTimeout, _httpx.WriteTimeout)):
-        return True
-    if isinstance(exc, _httpx.HTTPStatusError):
-        return exc.response.status_code in _RETRYABLE_STATUS_CODES
-    return False
-
-
-def _retry_delay(attempt: int) -> float:
-    """指数退避延迟（含抖动），attempt 从 0 起。"""
-    import random
-
-    delay = min(_RETRY_BASE_DELAY * (2**attempt), _RETRY_MAX_DELAY)
-    return delay * (0.5 + random.random() * 0.5)
-
-
-def llm_available() -> bool:
-    """快速判断 LLM 网关是否已配置且 httpx 可用。"""
-    from lvyan.config import settings
-
-    if not settings.model_gateway_url.strip():
-        return False
-    return _get_http_client() is not None
-
-
-def _build_headers() -> dict[str, str]:
-    """构造请求头。"""
-    from lvyan.config import settings
-
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    if settings.model_gateway_api_key:
-        headers["Authorization"] = f"Bearer {settings.model_gateway_api_key}"
-    return headers
-
-
-def _record_call(
-    model: str,
-    prompt: str,
-    response: str,
-    latency_ms: float,
-    tokens_in: int = 0,
-    tokens_out: int = 0,
-) -> None:
-    """上报 LLM 调用到 tracing（失败静默忽略）。"""
-    try:
-        from lvyan.observability.tracing import record_llm_call
-
-        record_llm_call(
-            model=model,
-            prompt=prompt,
-            response=response,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-            cost=0.0,  # 实际成本由 tracing 内部按模型估算
-        )
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def chat(
-    messages: list[dict[str, str]],
-    *,
-    model: str | None = None,
-    temperature: float = 0.3,
-    max_tokens: int = 1000,
-    timeout: float = 60.0,
-) -> str | None:
-    """普通对话补全。
-
-    Args:
-        messages: OpenAI 格式消息列表 ``[{"role": "system", "content": "..."}, ...]``。
-        model: 模型名；None 时用 ``settings.chat_model``。
-        temperature: 采样温度。
-        max_tokens: 最大输出 token 数。
-        timeout: 请求超时秒数。
-
-    Returns:
-        模型输出文本；网关未配置或调用失败返回 ``None``。
-    """
-    from lvyan.config import settings
-
-    gateway = settings.model_gateway_url.strip()
-    if not gateway:
-        return None
-
-    client = _get_http_client()
-    if client is None:
-        return None
-
-    used_model = model or settings.chat_model
-    prompt_preview = (messages[-1].get("content", "") if messages else "")[:200]
-    t0 = time.monotonic()
-    last_exc: Exception | None = None
-
-    for attempt in range(_MAX_RETRIES):
-        try:
-            resp = client.post(
-                f"{gateway.rstrip('/')}/v1/chat/completions",
-                json={
-                    "model": used_model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                },
-                headers=_build_headers(),
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"].strip()
-            latency_ms = (time.monotonic() - t0) * 1000
-
-            usage = data.get("usage", {})
-            tokens_in = usage.get("prompt_tokens", 0)
-            tokens_out = usage.get("completion_tokens", 0)
-
-            _record_call(
-                used_model, prompt_preview, content[:200], latency_ms, tokens_in, tokens_out
-            )
-            return content if content else None
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
-                delay = _retry_delay(attempt)
-                _logger.debug(
-                    "LLM chat 可重试异常 (attempt=%d, model=%s, delay=%.1fs): %s",
-                    attempt + 1,
-                    used_model,
-                    delay,
-                    exc,
-                )
-                time.sleep(delay)
-                continue
-            break
-
-    _logger.debug(
-        "LLM chat 调用失败 (model=%s, attempts=%d): %s", used_model, _MAX_RETRIES, last_exc
-    )
-    return None
-
-
-def _strip_json_fences(text: str) -> str:
-    """去除 markdown JSON 代码围栏（```json ... ```）。"""
-    # 去除 ```json ... ``` 或 ``` ... ```
-    m = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
-    if m:
-        return m.group(1).strip()
-    return text.strip()
-
-
-def _extract_json_object(text: str) -> str | None:
-    """从可能包含多余文本的响应中提取第一个 JSON 对象。"""
-    text = text.strip()
-    # 先尝试直接解析
-    if text.startswith("{"):
-        return text
-    # 去 markdown 围栏
-    cleaned = _strip_json_fences(text)
-    if cleaned.startswith("{"):
-        return cleaned
-    # 从文本中搜索第一个 { ... } 块
-    start = cleaned.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    for i in range(start, len(cleaned)):
-        if cleaned[i] == "{":
-            depth += 1
-        elif cleaned[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return cleaned[start : i + 1]
-    return None
-
-
-def chat_json(
-    messages: list[dict[str, str]],
-    *,
-    model: str | None = None,
-    temperature: float = 0.2,
-    max_tokens: int = 1500,
-    timeout: float = 60.0,
-) -> dict[str, Any] | None:
-    """JSON 模式对话补全，返回解析后的字典。
-
-    启用 ``response_format={"type": "json_object"}``，并对输出做：
-    1. 去除 markdown 围栏
-    2. 提取 JSON 对象
-    3. ``json.loads`` 解析
-    4. 失败时返回 ``None``（调用方应回退到规则实现）
-
-    Args:
-        messages: 消息列表（system prompt 应指示输出 JSON）。
-        model: 模型名；None 时用 ``settings.chat_model``。
-        temperature: 采样温度（JSON 模式建议低温）。
-        max_tokens: 最大输出 token 数。
-        timeout: 请求超时秒数。
-
-    Returns:
-        解析后的字典；失败返回 ``None``。
-    """
-    from lvyan.config import settings
-
-    gateway = settings.model_gateway_url.strip()
-    if not gateway:
-        return None
-
-    client = _get_http_client()
-    if client is None:
-        return None
-
-    used_model = model or settings.chat_model
-    prompt_preview = (messages[-1].get("content", "") if messages else "")[:200]
-    t0 = time.monotonic()
-    last_exc: Exception | None = None
-
-    for attempt in range(_MAX_RETRIES):
-        try:
-            payload: dict[str, Any] = {
-                "model": used_model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "response_format": {"type": "json_object"},
-            }
-            resp = client.post(
-                f"{gateway.rstrip('/')}/v1/chat/completions",
-                json=payload,
-                headers=_build_headers(),
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"].strip()
-            latency_ms = (time.monotonic() - t0) * 1000
-
-            usage = data.get("usage", {})
-            tokens_in = usage.get("prompt_tokens", 0)
-            tokens_out = usage.get("completion_tokens", 0)
-            _record_call(
-                used_model, prompt_preview, content[:200], latency_ms, tokens_in, tokens_out
-            )
-
-            json_str = _extract_json_object(content)
-            if json_str is None:
-                _logger.warning("LLM JSON 输出无法提取对象: %s", content[:200])
-                return None
-            result = json.loads(json_str)
-            if not isinstance(result, dict):
-                _logger.warning("LLM JSON 输出不是 dict: %s", type(result))
-                return None
-            return result
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
-                delay = _retry_delay(attempt)
-                _logger.debug(
-                    "LLM chat_json 可重试异常 (attempt=%d, model=%s, delay=%.1fs): %s",
-                    attempt + 1,
-                    used_model,
-                    delay,
-                    exc,
-                )
-                time.sleep(delay)
-                continue
-            break
-
-    _logger.debug(
-        "LLM chat_json 调用失败 (model=%s, attempts=%d): %s", used_model, _MAX_RETRIES, last_exc
-    )
-    return None
-
-
-def chat_structured(
-    messages: list[dict[str, str]],
-    response_model: type[T],
-    *,
-    model: str | None = None,
-    temperature: float = 0.2,
-    max_tokens: int = 1500,
-    timeout: float = 60.0,
-) -> T | None:
-    """Pydantic schema 校验的 JSON 模式调用，返回结构化模型实例（P3-21）。
-
-    流程：
-      1. 在 system prompt 末尾追加 JSON schema 指引（基于 ``response_model``
-         的字段名与类型注释）。
-      2. 调 :func:`chat_json` 拿到 dict。
-      3. 用 ``response_model.model_validate`` 校验。
-      4. 校验失败时构造修复 prompt（附 ValidationError 错误）重试一次。
-      5. 仍失败则返回 None，调用方降级到规则路径。
-
-    Args:
-        messages: 消息列表（system prompt 应指示输出 JSON）。
-        response_model: 期望的 Pydantic 模型类。
-        model/temperature/max_tokens/timeout: 见 :func:`chat_json`。
-
-    Returns:
-        ``response_model`` 的实例；任何环节失败返回 ``None``。
-    """
-    schema_hint = _build_schema_hint(response_model)
-
-    # 把 schema 指引追加到 system prompt
-    enriched = list(messages)
-    if enriched and enriched[0].get("role") == "system":
-        enriched[0] = {
-            "role": "system",
-            "content": enriched[0]["content"] + "\n\n" + schema_hint,
+    def _resolve_model(self, model: str | None) -> str:
+        """解析模型别名到实际模型名。"""
+        aliases = {
+            "chat": os.getenv("CHAT_MODEL", self._default_chat_model),
+            "embedding": os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),
+            "reranker": os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"),
+            "vision": os.getenv("VISION_MODEL", "Qwen/Qwen3-VL-8B-Instruct"),
         }
-    else:
-        enriched.insert(0, {"role": "system", "content": schema_hint})
+        if model and model.lower() in aliases:
+            return aliases[model.lower()]
+        return model or self._default_chat_model
 
-    result = chat_json(
-        enriched,
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        timeout=timeout,
-    )
-    if result is None:
-        return None
+    async def ainvoke(
+        self,
+        messages: Sequence[dict[str, str]],
+        *,
+        model: str | None = None,
+        temperature: float = 0.1,
+        max_tokens: int | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """异步调用 LLM（带重试、并发控制、指标）。"""
+        resolved_model = self._resolve_model(model)
 
-    try:
-        return response_model.model_validate(result)
-    except ValidationError as exc:
-        validation_error = str(exc)
-        _logger.warning("Pydantic 校验失败（一次修复重试）：%s", validation_error[:300])
+        # 并发控制
+        from lvyan.infra.concurrency import get_llm_semaphore
+        sem = get_llm_semaphore()
 
-    # 修复重试：把错误反馈给模型
-    repair_msg = {
-        "role": "user",
-        "content": (
-            f"上一轮输出未通过 schema 校验：\n{validation_error[:500]}\n"
-            "请仅输出符合 schema 的合法 JSON，不要解释。"
-        ),
-    }
-    enriched.append(repair_msg)
-    result = chat_json(
-        enriched,
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        timeout=timeout,
-    )
-    if result is None:
-        return None
-    try:
-        return response_model.model_validate(result)
-    except ValidationError as exc:
-        _logger.warning("修复重试后仍校验失败：%s", str(exc)[:300])
-        return None
+        async with sem:
+            return await self._invoke_with_retry(
+                messages=messages,
+                model=resolved_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+
+    async def _invoke_with_retry(
+        self,
+        messages: Sequence[dict[str, str]],
+        model: str,
+        temperature: float,
+        max_tokens: int | None,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """带指数退避重试的实际调用。"""
+        last_exc: Exception | None = None
+
+        for attempt in range(self._max_retries):
+            start = time.perf_counter()
+            try:
+                response = await self._call_gateway(
+                    messages=messages,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+                duration_ms = (time.perf_counter() - start) * 1000
+
+                result = LLMResponse(
+                    content=response.get("content", ""),
+                    model=model,
+                    input_tokens=response.get("input_tokens", 0),
+                    output_tokens=response.get("output_tokens", 0),
+                    duration_ms=duration_ms,
+                    raw=response,
+                )
+
+                # 记录指标
+                self._record_metrics(model, result, success=True)
+                return result
+
+            except Exception as exc:  # noqa: BLE001 boundary-exception: 重试逻辑
+                last_exc = exc
+                duration_ms = (time.perf_counter() - start) * 1000
+                self._record_metrics(model, None, success=False)
+
+                if not self._is_retryable(exc):
+                    raise
+
+                if attempt < self._max_retries - 1:
+                    delay = (2**attempt) * 1.0  # 1s, 2s, 4s
+                    _logger.warning(
+                        "LLM 调用失败 (attempt %d/%d), %.0fms, 重试 in %.1fs: %s",
+                        attempt + 1, self._max_retries, duration_ms, delay, exc,
+                    )
+                    await asyncio.sleep(delay)
+
+        raise RuntimeError(
+            f"LLM 调用在 {self._max_retries} 次重试后仍失败: {last_exc}"
+        ) from last_exc
+
+    async def _call_gateway(
+        self,
+        messages: Sequence[dict[str, str]],
+        model: str,
+        temperature: float,
+        max_tokens: int | None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """调用模型网关 (OpenAI 兼容接口)。"""
+        if not self._gateway_url:
+            raise RuntimeError("MODEL_GATEWAY_URL 未配置，无法调用 LLM")
+
+        import httpx
+
+        url = f"{self._gateway_url.rstrip('/')}/v1/chat/completions"
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": list(messages),
+            "temperature": temperature,
+        }
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        payload.update(kwargs)
+
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+
+            if resp.status_code == 429:
+                raise _RetryableError(f"Rate limited (429): {resp.text[:200]}")
+            if resp.status_code >= 500:
+                raise _RetryableError(f"Server error ({resp.status_code}): {resp.text[:200]}")
+            if resp.status_code != 200:
+                raise RuntimeError(f"LLM API error ({resp.status_code}): {resp.text[:500]}")
+
+            data = resp.json()
+            choice = data.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            usage = data.get("usage", {})
+
+            return {
+                "content": message.get("content", ""),
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+                "finish_reason": choice.get("finish_reason"),
+                "raw": data,
+            }
+
+    def _is_retryable(self, exc: Exception) -> bool:
+        """判断异常是否可重试。"""
+        if isinstance(exc, _RetryableError):
+            return True
+        # httpx 超时/连接错误
+        try:
+            import httpx
+            if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
+                return True
+        except ImportError:
+            pass
+        return False
+
+    def _record_metrics(
+        self, model: str, response: LLMResponse | None, success: bool
+    ) -> None:
+        """记录 Prometheus 指标。"""
+        try:
+            from lvyan.observability.metrics import (
+                LLM_CALL_DURATION,
+                LLM_CALL_TOTAL,
+                LLM_TOKEN_USAGE,
+                _PROM_AVAILABLE,
+            )
+
+            if not _PROM_AVAILABLE:
+                return
+
+            status = "success" if success else "error"
+            LLM_CALL_TOTAL.labels(model=model, operation="chat", status=status).inc()
+
+            if response:
+                LLM_CALL_DURATION.labels(model=model, operation="chat").observe(
+                    response.duration_ms / 1000.0
+                )
+                if response.input_tokens:
+                    LLM_TOKEN_USAGE.labels(model=model, direction="input").inc(
+                        response.input_tokens
+                    )
+                if response.output_tokens:
+                    LLM_TOKEN_USAGE.labels(model=model, direction="output").inc(
+                        response.output_tokens
+                    )
+        except ImportError:
+            pass
 
 
-def _build_schema_hint(model_cls: type[BaseModel]) -> str:
-    """根据 Pydantic 模型类构造 JSON schema 文本指引。"""
-    try:
-        schema = model_cls.model_json_schema()
-        # 仅保留 properties 的 key + type，避免 prompt 过长
-        props = schema.get("properties", {})
-        lines = ["请输出符合以下 JSON schema 的对象（仅 JSON，不要解释）：", "{"]
-        for name, prop in props.items():
-            ptype = prop.get("type", "any")
-            desc = prop.get("description", "")
-            lines.append(f'  "{name}" ({ptype}): {desc}')
-        lines.append("}")
-        return "\n".join(lines)
-    except Exception:  # noqa: BLE001
-        return "请输出 JSON 对象。"
+class _RetryableError(Exception):
+    """标记可重试的错误。"""
+
+    pass
 
 
-__all__ = ["chat", "chat_json", "chat_structured", "llm_available"]
+# 全局单例
+_client: LLMClient | None = None
+
+
+def get_llm_client() -> LLMClient:
+    """获取全局 LLM 客户端单例。"""
+    global _client
+    if _client is None:
+        _client = LLMClient()
+    return _client

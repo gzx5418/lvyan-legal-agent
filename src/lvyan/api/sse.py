@@ -231,6 +231,12 @@ class RunManager:
                 self._tasks.pop(run_id, None) if self._tasks.get(run_id) is completed else None
             )
         )
+        # P3: 注册到停机协调器，优雅关闭时等待此任务完成
+        try:
+            from lvyan.infra.shutdown import get_shutdown_coordinator
+            get_shutdown_coordinator().register_active_task(task)
+        except Exception:  # noqa: BLE001 boundary-exception: 停机协调器不影响核心功能
+            pass
 
     def _start_cancel_watcher(self, ctx: RunContext) -> asyncio.Task[Any] | None:
         """P1-4：启动独立 cancel watcher，周期性检查远端取消请求。
@@ -310,6 +316,14 @@ class RunManager:
     ) -> RunContext:
         """创建并异步启动一次 Agent 运行。"""
         import time as _time
+
+        # P3: 优雅停机期间拒绝新运行
+        try:
+            from lvyan.infra.shutdown import get_shutdown_coordinator
+            if get_shutdown_coordinator().is_shutting_down:
+                raise RuntimeError("服务正在关闭，无法接受新的 Agent 运行")
+        except ImportError:
+            pass
 
         run_id = f"run-{uuid.uuid4().hex}"
         resolved_thread_id = thread_id or f"thread-{uuid.uuid4().hex[:12]}"

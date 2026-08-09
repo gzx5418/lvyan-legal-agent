@@ -843,6 +843,13 @@ def create_app(
         allow_headers=["Content-Type", "Authorization", "X-User-ID"],
     )
 
+    # P4：请求 ID 中间件（最外层，确保所有日志携带 request_id）
+    try:
+        from lvyan.observability.request_id import RequestIDMiddleware
+        app.add_middleware(RequestIDMiddleware)
+    except ImportError:
+        pass
+
     # P4：HTTP 请求指标中间件（必须在 RateLimitMiddleware 之前添加，
     # 确保被限流的 429 响应也被指标覆盖）
     try:
