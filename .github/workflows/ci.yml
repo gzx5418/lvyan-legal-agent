@@ -43,6 +43,11 @@ jobs:
             --tb=short \
             -m "not slow" \
             -p no:cacheprovider \
+            --cov=lvyan \
+            --cov-branch \
+            --cov-report=term-missing:skip-covered \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=70 \
             --junitxml=pytest-results.xml
 
       - name: Upload test results
@@ -52,6 +57,14 @@ jobs:
           name: pytest-results
           path: pytest-results.xml
           retention-days: 7
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 30
 
   # ---------------------------------------------------------------------------
   # Job 2: 金标集回归评测（mock state，不依赖外部服务）

@@ -20,6 +20,7 @@ dist/
 .pytest_cache/
 .coverage
 .coverage.*
+coverage.xml
 htmlcov/
 .tox/
 .ruff_cache/
@@ -59,6 +60,7 @@ data/thread_index.json
 # 索引缓存（大文件，运行时重建）
 knowledge/manifests/*.pkl
 knowledge/manifests/*.json
+knowledge/manifests/*.lvix
 
 # 输出产物（运行时生成）
 outputs/

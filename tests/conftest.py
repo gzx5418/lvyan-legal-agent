@@ -34,6 +34,7 @@ os.environ.setdefault("AUTH_ENABLED", "false")
 os.environ.setdefault("RLS_ENFORCED", "false")
 os.environ.setdefault("RATE_LIMIT_BACKEND", "memory")
 os.environ["AUTH_ENABLED"] = os.environ.get("LVYAN_TEST_AUTH_ENABLED", "false")
+os.environ["AUTH_MODE"] = os.environ.get("LVYAN_TEST_AUTH_MODE", "auto")
 os.environ["RLS_ENFORCED"] = os.environ.get("LVYAN_TEST_RLS_ENFORCED", "false")
 os.environ["RATE_LIMIT_BACKEND"] = os.environ.get("LVYAN_TEST_RATE_LIMIT_BACKEND", "memory")
 

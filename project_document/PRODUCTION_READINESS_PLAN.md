@@ -125,7 +125,7 @@ I/O型节点（需异步化）: fact_extractor, planner, parallel_retrieval, aut
 
 | 阶段 | 目标 | 周期 | 状态 |
 |------|------|------|------|
-| P1 | 安全阻断项 | 1周 | 待开始 |
+| P1 | 安全阻断项 | 1周 | 完成 |
 | P2 | 多租户与生产运行基础 | 2周 | 基本完成 |
 | P3 | 架构拆分、异步化与优雅停机 | 2-3周 | 核心完成 |
 | P4 | 日志、指标和质量门禁 | 2周 (与P3并行) | 核心完成 |
@@ -154,7 +154,7 @@ I/O型节点（需异步化）: fact_extractor, planner, parallel_retrieval, aut
 | #13-15 | 宽异常审计 | 现有代码已有 noqa 标记; 新代码由 Ruff 强制 |
 | #16 | CI pickle 检测 | 完成 |
 | #17 | CI BLE001 集成 | 完成 (通过 ruff check) |
-| #18 | Dockerfile 预生成索引 | 待执行 (需要 Dockerfile 访问) |
+| #18 | Dockerfile 预生成索引 | 完成 |
 
 **退出条件验证**：
 - [x] 源码不存在 `pickle.load/loads` (grep 确认 0 结果)
@@ -171,9 +171,9 @@ I/O型节点（需异步化）: fact_extractor, planner, parallel_retrieval, aut
 | #19 | migrations/006: runtime role 创建 | 完成 |
 | #20 | migrations/007: agent_threads/runs/messages RLS | 完成 |
 | #21 | migrations/008: case_workspace RLS | 完成 |
-| #22 | migrations/009: checkpoint RLS | 待执行 (需LangGraph表结构) |
+| #22 | migrations/010: checkpoint RLS | 完成（建表后运行时安装） |
 | #23 | db/tenant_context.py 租户上下文 | 完成 |
-| #24 | TenantAwareAsyncPostgresSaver | 待执行 |
+| #24 | TenantAwareAsyncPostgresSaver | 完成 |
 | #25 | rls_preflight.py 孤儿检查 | 完成 |
 | #26 | pyproject.toml 添加 redis 可选依赖 | 完成 |
 | #27-29 | rate_limit.py 重构 (抽象后端+Redis+per-user) | 完成 |
@@ -206,6 +206,7 @@ I/O型节点（需异步化）: fact_extractor, planner, parallel_retrieval, aut
 | Prometheus 指标 | 指标定义 + /metrics 端点 | 完成 (lvyan/observability/metrics.py) |
 | HTTP 指标中间件 | 请求延迟/总数/活跃连接 | 完成 (lvyan/observability/http_metrics.py) |
 | .env.example 更新 | 新增 P2-P4 所有配置项 | 完成 |
+| 覆盖率门禁 | CI branch coverage ≥70% | 完成（实测 70.75%） |
 
 ### 阶段5 执行进展 (2026-08-09)
 
@@ -213,7 +214,7 @@ I/O型节点（需异步化）: fact_extractor, planner, parallel_retrieval, aut
 |------|------|------|
 | LLM 客户端 | 统一调用层 (重试/并发/指标/模型路由) | 完成 (lvyan/llm/client.py) |
 | 多源案例库 | CaseSource 协议 + 聚合检索器 | 完成 (lvyan/retrieval/case_source.py) |
-| OpenSearch 接入 | CaseSource 实现 | 待执行 |
+| OpenSearch 接入 | CaseSource 实现 | 完成 |
 | 外部API接入 | 裁判文书网等 | 待执行 |
 | LangGraph 增强 | 新节点/工具集成 | 待执行 |
 
@@ -230,4 +231,4 @@ I/O型节点（需异步化）: fact_extractor, planner, parallel_retrieval, aut
 - [x] tests/security/test_tenant_isolation.py (12 tests)
 - [x] tests/unit/test_rate_limit_backends.py (10 tests)
 - [x] 关键模块验证: 181 passed, 0 failed
-- [x] 全量测试: 905+ passed (待确认全量 0 failed)
+- [x] 全量测试: 928 passed, 8 skipped, 3 deselected；branch coverage 70.75%

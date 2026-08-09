@@ -73,14 +73,24 @@ _PATH_LIMITS: tuple[tuple[str, str, int], ...] = (
 
 # 高成本写路径前缀（Redis 不可用时返回 503）
 _HIGH_COST_PREFIXES: tuple[str, ...] = (
-    "/api/agent/run", "/api/upload", "/api/agent/hitl/",
+    "/api/agent/run",
+    "/api/upload",
+    "/api/agent/hitl/",
 )
 
 # 不限制的路径（健康检查、静态资源、GET 读取）
-_EXEMPT_PATHS: frozenset[str] = frozenset({
-    "/livez", "/readyz", "/api/health", "/metrics",
-    "/", "/docs", "/redoc", "/openapi.json",
-})
+_EXEMPT_PATHS: frozenset[str] = frozenset(
+    {
+        "/livez",
+        "/readyz",
+        "/api/health",
+        "/metrics",
+        "/",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -238,9 +248,7 @@ def _create_backend() -> RateLimitBackend:
         redis_url = os.getenv("REDIS_URL", "").strip()
         if redis_url:
             return RedisBackend(redis_url)
-        _logger.warning(
-            "RATE_LIMIT_BACKEND=redis 但 REDIS_URL 未配置，降级为内存后端"
-        )
+        _logger.warning("RATE_LIMIT_BACKEND=redis 但 REDIS_URL 未配置，降级为内存后端")
     return InMemoryBackend()
 
 
@@ -308,9 +316,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Redis 后端不可用时：高成本写路径返回 503，读取不受影响
         if self._is_redis and not self._backend.is_healthy():
             if self._is_high_cost_path(path):
-                _logger.warning(
-                    "Redis 不可用，拒绝高成本写请求: %s %s", request.method, path
-                )
+                _logger.warning("Redis 不可用，拒绝高成本写请求: %s %s", request.method, path)
                 return JSONResponse(
                     status_code=503,
                     content={"detail": "服务暂时不可用，请稍后重试"},
@@ -323,7 +329,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not self._backend.is_allowed(rate_key, limit):
             _logger.warning(
                 "速率限制触发: %s %s (key=%s, limit=%d/min)",
-                request.method, path, client_key, limit,
+                request.method,
+                path,
+                client_key,
+                limit,
             )
             return JSONResponse(
                 status_code=429,

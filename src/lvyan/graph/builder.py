@@ -366,6 +366,7 @@ async def build_graph_with_postgres_async(dsn: str | None = None) -> Any:
 
     try:
         from psycopg.rows import dict_row
+        from lvyan.db.tenant_saver import TenantAwareCheckpointer
 
         conn = await psycopg.AsyncConnection.connect(
             resolved_dsn,
@@ -374,7 +375,7 @@ async def build_graph_with_postgres_async(dsn: str | None = None) -> Any:
             row_factory=dict_row,
             connect_timeout=3,
         )
-        saver = AsyncPostgresSaver(conn)
+        saver = TenantAwareCheckpointer(AsyncPostgresSaver(conn))
         await saver.setup()
     except Exception as exc:  # noqa: BLE001
         if required:

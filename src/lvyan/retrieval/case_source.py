@@ -27,6 +27,7 @@ __all__ = [
     "CaseSource",
     "MultiSourceRetriever",
     "CuratedCaseSource",
+    "OpenSearchCaseSource",
 ]
 
 
@@ -86,13 +87,13 @@ class CuratedCaseSource(CaseSource):
     """
 
     def __init__(self, cases_dir: str | None = None) -> None:
-        import os
         from pathlib import Path
 
         if cases_dir:
             self._dir = Path(cases_dir)
         else:
             from lvyan.config import AGENT_DIR
+
             self._dir = AGENT_DIR / "knowledge" / "curated" / "cases"
 
         self._cases: list[dict[str, Any]] = []
@@ -143,12 +144,14 @@ class CuratedCaseSource(CaseSource):
 
         for case in self._cases:
             score = 0.0
-            searchable = " ".join([
-                case.get("title", ""),
-                case.get("summary", ""),
-                case.get("case_type", ""),
-                case.get("court", ""),
-            ]).lower()
+            searchable = " ".join(
+                [
+                    case.get("title", ""),
+                    case.get("summary", ""),
+                    case.get("case_type", ""),
+                    case.get("court", ""),
+                ]
+            ).lower()
 
             # 简单 TF 评分
             for term in query_lower.split():
@@ -162,23 +165,146 @@ class CuratedCaseSource(CaseSource):
 
         results = []
         for score, case in scored[:top_k]:
-            results.append(CaseResult(
-                case_id=case.get("case_id", case.get("id", "")),
-                title=case.get("title", ""),
-                court=case.get("court", ""),
-                date=case.get("date", ""),
-                case_type=case.get("case_type", ""),
-                summary=case.get("summary", ""),
-                source="curated",
-                score=score,
-                metadata=case.get("metadata", {}),
-            ))
+            results.append(
+                CaseResult(
+                    case_id=case.get("case_id", case.get("id", "")),
+                    title=case.get("title", ""),
+                    court=case.get("court", ""),
+                    date=case.get("date", ""),
+                    case_type=case.get("case_type", ""),
+                    summary=case.get("summary", ""),
+                    source="curated",
+                    score=score,
+                    metadata=case.get("metadata", {}),
+                )
+            )
 
         return results
 
     async def healthcheck(self) -> bool:
         self._load()
         return True
+
+
+class OpenSearchCaseSource(CaseSource):
+    """OpenSearch 案例库数据源。
+
+    索引文档使用 ``case_id/title/court/date/case_type/summary/full_text`` 字段；
+    其他字段会保留在 :attr:`CaseResult.metadata`。客户端允许注入，便于测试和
+    私有 OpenSearch 部署复用既有认证/TLS 配置。
+    """
+
+    def __init__(
+        self,
+        *,
+        index_name: str | None = None,
+        client: Any | None = None,
+    ) -> None:
+        import os
+
+        self._index_name = index_name or os.getenv("CASE_OPENSEARCH_INDEX", "legal_cases")
+        self._client = client
+
+    @property
+    def name(self) -> str:
+        return "opensearch"
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+
+        from opensearchpy import OpenSearch
+        from lvyan.config import settings
+
+        self._client = OpenSearch(
+            hosts=[settings.opensearch_url],
+            http_auth=(settings.opensearch_user, settings.opensearch_password),
+            use_ssl=settings.opensearch_url.startswith("https://"),
+            verify_certs=False,
+        )
+        return self._client
+
+    def _search_sync(
+        self,
+        query: str,
+        top_k: int,
+        filters: dict[str, Any] | None,
+    ) -> list[CaseResult]:
+        filter_clauses = [{"term": {key: value}} for key, value in (filters or {}).items()]
+        response = self._get_client().search(
+            index=self._index_name,
+            body={
+                "size": top_k,
+                "query": {
+                    "bool": {
+                        "must": [
+                            {
+                                "multi_match": {
+                                    "query": query,
+                                    "fields": [
+                                        "title^3",
+                                        "summary^2",
+                                        "full_text",
+                                        "case_type",
+                                        "court",
+                                    ],
+                                }
+                            }
+                        ],
+                        "filter": filter_clauses,
+                    }
+                },
+            },
+        )
+        hits = response.get("hits", {}).get("hits", [])
+        results: list[CaseResult] = []
+        for hit in hits:
+            source = hit.get("_source", {})
+            if not isinstance(source, dict):
+                continue
+            metadata = {key: value for key, value in source.items() if key not in _CASE_FIELDS}
+            results.append(
+                CaseResult(
+                    case_id=str(source.get("case_id") or hit.get("_id", "")),
+                    title=str(source.get("title", "")),
+                    court=str(source.get("court", "")),
+                    date=str(source.get("date", "")),
+                    case_type=str(source.get("case_type", "")),
+                    summary=str(source.get("summary", "")),
+                    full_text=str(source.get("full_text", "")),
+                    source="opensearch",
+                    score=float(hit.get("_score") or 0.0),
+                    metadata=metadata,
+                )
+            )
+        return results
+
+    async def search(
+        self,
+        query: str,
+        *,
+        top_k: int = 10,
+        filters: dict[str, Any] | None = None,
+    ) -> list[CaseResult]:
+        import asyncio
+
+        try:
+            return await asyncio.to_thread(self._search_sync, query, top_k, filters)
+        except Exception as exc:  # noqa: BLE001 boundary-exception: optional data source
+            _logger.warning("OpenSearch 案例检索失败: %s", exc)
+            return []
+
+    async def healthcheck(self) -> bool:
+        import asyncio
+
+        try:
+            return bool(await asyncio.to_thread(self._get_client().ping))
+        except Exception as exc:  # noqa: BLE001 boundary-exception: optional data source
+            _logger.warning("OpenSearch 案例库健康检查失败: %s", exc)
+            return False
+
+
+_CASE_FIELDS = frozenset({"case_id", "title", "court", "date", "case_type", "summary", "full_text"})
 
 
 class MultiSourceRetriever:
@@ -218,10 +344,7 @@ class MultiSourceRetriever:
             return []
 
         # 并发检索所有源
-        tasks = [
-            source.search(query, top_k=top_k, filters=filters)
-            for source in self._sources
-        ]
+        tasks = [source.search(query, top_k=top_k, filters=filters) for source in self._sources]
         results_per_source = await asyncio.gather(*tasks, return_exceptions=True)
 
         # 聚合、加权、去重

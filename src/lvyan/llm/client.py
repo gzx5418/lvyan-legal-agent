@@ -23,15 +23,29 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Sequence, TypeVar
+
+from pydantic import BaseModel, ValidationError
 
 _logger = logging.getLogger("lvyan.llm.client")
 
-__all__ = ["LLMClient", "LLMResponse", "get_llm_client"]
+__all__ = [
+    "LLMClient",
+    "LLMResponse",
+    "get_llm_client",
+    "chat",
+    "chat_json",
+    "chat_structured",
+    "llm_available",
+]
+
+T = TypeVar("T", bound=BaseModel)
 
 
 @dataclass
@@ -94,6 +108,7 @@ class LLMClient:
 
         # 并发控制
         from lvyan.infra.concurrency import get_llm_semaphore
+
         sem = get_llm_semaphore()
 
         async with sem:
@@ -153,7 +168,11 @@ class LLMClient:
                     delay = (2**attempt) * 1.0  # 1s, 2s, 4s
                     _logger.warning(
                         "LLM 调用失败 (attempt %d/%d), %.0fms, 重试 in %.1fs: %s",
-                        attempt + 1, self._max_retries, duration_ms, delay, exc,
+                        attempt + 1,
+                        self._max_retries,
+                        duration_ms,
+                        delay,
+                        exc,
                     )
                     await asyncio.sleep(delay)
 
@@ -219,15 +238,14 @@ class LLMClient:
         # httpx 超时/连接错误
         try:
             import httpx
+
             if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
                 return True
         except ImportError:
             pass
         return False
 
-    def _record_metrics(
-        self, model: str, response: LLMResponse | None, success: bool
-    ) -> None:
+    def _record_metrics(self, model: str, response: LLMResponse | None, success: bool) -> None:
         """记录 Prometheus 指标。"""
         try:
             from lvyan.observability.metrics import (
@@ -275,3 +293,179 @@ def get_llm_client() -> LLMClient:
     if _client is None:
         _client = LLMClient()
     return _client
+
+
+# ---------------------------------------------------------------------------
+# 同步兼容接口
+# ---------------------------------------------------------------------------
+# 节点仍有同步实现，且公共 API 过去已暴露 chat/chat_json/chat_structured。保留这些
+# 小型适配器以维持兼容；新异步节点应直接使用 LLMClient.ainvoke()。
+
+
+def llm_available() -> bool:
+    """返回模型网关是否已配置，供同步节点决定是否走 LLM 路径。"""
+    from lvyan.config import settings
+
+    return bool(os.getenv("MODEL_GATEWAY_URL", settings.model_gateway_url).strip())
+
+
+def _legacy_request(
+    messages: list[dict[str, str]],
+    *,
+    model: str | None,
+    temperature: float,
+    max_tokens: int,
+    timeout: float,
+    response_format: dict[str, str] | None = None,
+) -> str | None:
+    """兼容同步节点的 OpenAI 网关请求；失败由调用方降级到规则路径。"""
+    from lvyan.config import settings
+
+    gateway = os.getenv("MODEL_GATEWAY_URL", settings.model_gateway_url).strip()
+    if not gateway:
+        return None
+
+    used_model = model or os.getenv("CHAT_MODEL", settings.chat_model)
+    api_key = os.getenv("MODEL_GATEWAY_API_KEY", settings.model_gateway_api_key)
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload: dict[str, Any] = {
+        "model": used_model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format is not None:
+        payload["response_format"] = response_format
+
+    try:
+        import httpx
+    except ImportError:
+        return None
+
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(
+                f"{gateway.rstrip('/')}/v1/chat/completions",
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+        content = data["choices"][0]["message"]["content"]
+        return content.strip() if isinstance(content, str) and content.strip() else None
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        _logger.debug("兼容 LLM 调用失败 (model=%s): %s", used_model, exc)
+        return None
+
+
+def chat(
+    messages: list[dict[str, str]],
+    *,
+    model: str | None = None,
+    temperature: float = 0.3,
+    max_tokens: int = 1000,
+    timeout: float = 60.0,
+) -> str | None:
+    """同步文本补全兼容接口。"""
+    return _legacy_request(
+        messages,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
+
+
+def _extract_json_object(text: str) -> str | None:
+    """从可能带 Markdown 围栏或解释文字的响应中截取第一个 JSON 对象。"""
+    cleaned = text.strip()
+    fenced = re.search(r"```(?:json)?\s*\n?(.*?)```", cleaned, re.DOTALL)
+    if fenced:
+        cleaned = fenced.group(1).strip()
+    start = cleaned.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for index, char in enumerate(cleaned[start:], start):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return cleaned[start : index + 1]
+    return None
+
+
+def chat_json(
+    messages: list[dict[str, str]],
+    *,
+    model: str | None = None,
+    temperature: float = 0.2,
+    max_tokens: int = 1500,
+    timeout: float = 60.0,
+) -> dict[str, Any] | None:
+    """同步 JSON 补全兼容接口。"""
+    content = _legacy_request(
+        messages,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        response_format={"type": "json_object"},
+    )
+    if content is None:
+        return None
+    json_text = _extract_json_object(content)
+    if json_text is None:
+        return None
+    try:
+        result = json.loads(json_text)
+    except json.JSONDecodeError:
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def chat_structured(
+    messages: list[dict[str, str]],
+    response_model: type[T],
+    *,
+    model: str | None = None,
+    temperature: float = 0.2,
+    max_tokens: int = 1500,
+    timeout: float = 60.0,
+) -> T | None:
+    """Pydantic 校验兼容接口；无效输出带校验错误重试一次。"""
+    result = chat_json(
+        messages,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
+    if result is None:
+        return None
+    try:
+        return response_model.model_validate(result)
+    except ValidationError as exc:
+        repair_messages = [
+            *messages,
+            {
+                "role": "user",
+                "content": f"输出未通过 schema 校验：{exc}. 请只返回合法 JSON。",
+            },
+        ]
+    repaired = chat_json(
+        repair_messages,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
+    if repaired is None:
+        return None
+    try:
+        return response_model.model_validate(repaired)
+    except ValidationError:
+        return None

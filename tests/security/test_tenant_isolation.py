@@ -59,12 +59,14 @@ class TestAPITenantIsolation:
     def app_with_auth(self):
         """创建启用认证的测试 app。"""
         import os
+
         os.environ.setdefault("AUTH_ENABLED", "true")
         os.environ.setdefault("AUTH_MODE", "trusted_proxy")
         os.environ.setdefault("RUNTIME_MODE", "development")
         os.environ.setdefault("CASE_VAULT_ALLOW_INSECURE", "true")
 
         from lvyan.api.server import create_app
+
         app = create_app()
         return app
 

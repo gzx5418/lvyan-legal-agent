@@ -87,7 +87,11 @@ class InstrumentedSemaphore:
         if wait_time > 1.0:
             _logger.warning(
                 "%s 信号量等待 %.2fs (active=%d/%d, waiting=%d)",
-                self._name, wait_time, self._active, self._limit, self._waiting,
+                self._name,
+                wait_time,
+                self._active,
+                self._limit,
+                self._waiting,
             )
 
         try:

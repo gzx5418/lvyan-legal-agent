@@ -38,6 +38,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         # 注入到 structlog 上下文变量（若 structlog 可用）
         try:
             import structlog
+
             structlog.contextvars.clear_contextvars()
             structlog.contextvars.bind_contextvars(
                 request_id=request_id,

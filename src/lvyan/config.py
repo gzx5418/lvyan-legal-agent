@@ -470,13 +470,9 @@ def validate_runtime_config() -> None:
             )
         rl_backend = os.getenv("RATE_LIMIT_BACKEND", "memory").strip().lower()
         if rl_backend != "redis":
-            raise RuntimeError(
-                "生产模式下 RATE_LIMIT_BACKEND 必须为 redis（多实例限流必需）"
-            )
+            raise RuntimeError("生产模式下 RATE_LIMIT_BACKEND 必须为 redis（多实例限流必需）")
         if not os.getenv("REDIS_URL", "").strip():
-            raise RuntimeError(
-                "生产模式下 REDIS_URL 必须配置（限流后端依赖）"
-            )
+            raise RuntimeError("生产模式下 REDIS_URL 必须配置（限流后端依赖）")
 
     # W13：JWT 进程内验签的配置组合校验（启动期暴露配置错误，避免首请求才发现）
     if os.getenv("JWT_VERIFY_IN_PROCESS", "").strip().lower() in {"1", "true", "yes", "on"}:

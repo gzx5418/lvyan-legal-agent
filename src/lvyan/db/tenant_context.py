@@ -49,17 +49,15 @@ def set_tenant_context(conn: Any, user_id: str) -> None:
     if not user_id or not user_id.strip():
         raise ValueError("user_id 不能为空：RLS 策略依赖 app.user_id 非空")
 
-    # 支持 SQLAlchemy Connection 和原生 psycopg Connection
-    if hasattr(conn, "execute"):
+    # SQLAlchemy 使用具名绑定；psycopg 使用参数化 set_config。根据连接模块
+    # 明确分流，不能把数据库执行错误误判为“需要回退”的驱动差异。
+    module_name = type(conn).__module__
+    if module_name.startswith("sqlalchemy"):
         from sqlalchemy import text
 
-        try:
-            conn.execute(text("SET LOCAL app.user_id = :uid"), {"uid": user_id})
-        except Exception:
-            # 回退到原生 SQL 拼接（psycopg Connection 对象）
-            conn.execute(
-                "SET LOCAL app.user_id = %s", (user_id,)
-            )
+        conn.execute(text("SELECT set_config('app.user_id', :uid, true)"), {"uid": user_id})
+    else:
+        conn.execute("SELECT set_config('app.user_id', %s, true)", (user_id,))
     _logger.debug("tenant context set: user_id=%s", user_id[:8] + "...")
 
 
@@ -78,9 +76,7 @@ async def set_tenant_context_async(conn: Any, user_id: str) -> None:
 
 
 @contextlib.contextmanager
-def get_tenant_session(
-    engine: Any, user_id: str
-) -> Generator[Any, None, None]:
+def get_tenant_session(engine: Any, user_id: str) -> Generator[Any, None, None]:
     """获取已设置租户上下文的 SQLAlchemy Session（同步）。
 
     使用 context manager 确保：
@@ -96,9 +92,7 @@ def get_tenant_session(
 
 
 @contextlib.asynccontextmanager
-async def get_async_tenant_conn(
-    pool: Any, user_id: str
-) -> AsyncGenerator[Any, None]:
+async def get_async_tenant_conn(pool: Any, user_id: str) -> AsyncGenerator[Any, None]:
     """从连接池获取已设置租户上下文的异步连接。
 
     使用 async context manager 确保：

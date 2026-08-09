@@ -234,6 +234,7 @@ class RunManager:
         # P3: 注册到停机协调器，优雅关闭时等待此任务完成
         try:
             from lvyan.infra.shutdown import get_shutdown_coordinator
+
             get_shutdown_coordinator().register_active_task(task)
         except Exception:  # noqa: BLE001 boundary-exception: 停机协调器不影响核心功能
             pass
@@ -320,7 +321,9 @@ class RunManager:
         # P3: 优雅停机期间拒绝新运行
         try:
             from lvyan.infra.shutdown import get_shutdown_coordinator
-            if get_shutdown_coordinator().is_shutting_down:
+
+            coordinator = get_shutdown_coordinator()
+            if coordinator.is_shutting_down and not coordinator.reset_after_normal_lifespan_exit():
                 raise RuntimeError("服务正在关闭，无法接受新的 Agent 运行")
         except ImportError:
             pass
@@ -534,7 +537,12 @@ class RunManager:
             # 通过 LangGraph Command(resume=...) 恢复执行
             from langgraph.types import Command
 
-            config = {"configurable": {"thread_id": ctx.thread_id}}
+            config = {
+                "configurable": {
+                    "thread_id": ctx.thread_id,
+                    "user_id": current_user_id or ctx.user_id,
+                }
+            }
 
             resume_payload: dict[str, Any] = {"action": request.action}
             if request.action == "edit" and request.edited_output:
@@ -620,7 +628,12 @@ class RunManager:
 
             claimed = False  # P0-2：追踪 claim 是否成功
             for thread_id, meta in thread_candidates:
-                config = {"configurable": {"thread_id": thread_id}}
+                config = {
+                    "configurable": {
+                        "thread_id": thread_id,
+                        "user_id": current_user_id or str(meta.get("user_id", "")),
+                    }
+                }
                 interrupt_info = await _check_interrupt_async(graph, config)
                 if interrupt_info is None:
                     continue
@@ -1249,7 +1262,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
     set_cost_thread(thread_id)
     try:
         graph = await _get_graph()
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": thread_id, "user_id": ctx.user_id}}
 
         # 注册到 CaseMemory 索引
         case_mem = get_case_memory()

@@ -64,12 +64,8 @@ from lvyan.memory.run_metadata import (
     RunMetadataUnavailable,
     ThreadOwnershipError,
 )
-from lvyan.observability.logging_setup import setup_logging
 from lvyan.runtime import get_case_memory
 from lvyan.tools.file_converter import convert_to_markdown
-
-# P4：在模块导入阶段尽早初始化结构化日志
-setup_logging()
 
 from .auth import (
     ANONYMOUS_USER,
@@ -90,6 +86,10 @@ from .models import (
     DeleteResponse,
 )
 from .sse import RunManager, format_sse_event
+from lvyan.observability.logging_setup import setup_logging
+
+# P4：在模块导入阶段尽早初始化结构化日志。
+setup_logging()
 
 _logger = logging.getLogger("lvyan.api.server")
 
@@ -743,6 +743,7 @@ def _lifespan(app: FastAPI) -> Any:
 
         # P3: 安装优雅停机信号处理
         from lvyan.infra.shutdown import get_shutdown_coordinator
+
         coordinator = get_shutdown_coordinator()
         coordinator.install_signal_handlers()
 
@@ -846,6 +847,7 @@ def create_app(
     # P4：请求 ID 中间件（最外层，确保所有日志携带 request_id）
     try:
         from lvyan.observability.request_id import RequestIDMiddleware
+
         app.add_middleware(RequestIDMiddleware)
     except ImportError:
         pass
@@ -854,6 +856,7 @@ def create_app(
     # 确保被限流的 429 响应也被指标覆盖）
     try:
         from lvyan.observability.http_metrics import HTTPMetricsMiddleware
+
         app.add_middleware(HTTPMetricsMiddleware)
     except ImportError:
         pass
@@ -1755,6 +1758,7 @@ def create_app(
     # P4：注册 /metrics 端点（Prometheus 抓取）
     try:
         from lvyan.observability.metrics import register_metrics_endpoint
+
         register_metrics_endpoint(app)
     except ImportError:
         pass

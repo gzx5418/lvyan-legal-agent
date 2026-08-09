@@ -84,9 +84,13 @@ def main() -> int:
 
     try:
         import psycopg
+    except ImportError:
+        _logger.error("未安装 psycopg，无法执行 RLS 预检")
+        return 1
 
+    try:
         conn = psycopg.connect(dsn, autocommit=True)
-    except Exception as exc:
+    except psycopg.Error as exc:
         _logger.error("数据库连接失败: %s", exc)
         return 1
 
@@ -97,7 +101,7 @@ def main() -> int:
         try:
             cur = conn.execute(check_sql)
             count = cur.fetchone()[0]
-        except Exception as exc:
+        except psycopg.Error as exc:
             # 表可能不存在（首次部署），跳过
             _logger.warning("检查跳过 (%s): %s", desc, exc)
             continue
@@ -111,7 +115,7 @@ def main() -> int:
                     conn.execute(fix_sql)
                     _logger.info("已修复: %s", desc)
                     issues_fixed += 1
-                except Exception as exc:
+                except psycopg.Error as exc:
                     _logger.error("修复失败: %s (%s)", desc, exc)
             elif fix_sql is None:
                 _logger.error("  → 不可自动修复，需人工处理")
@@ -120,9 +124,7 @@ def main() -> int:
 
     conn.close()
 
-    _logger.info(
-        "检查完成: 发现 %d 个问题，修复 %d 个", issues_found, issues_fixed
-    )
+    _logger.info("检查完成: 发现 %d 个问题，修复 %d 个", issues_found, issues_fixed)
 
     if issues_found > issues_fixed:
         _logger.error("存在未修复问题，RLS 迁移不可执行")

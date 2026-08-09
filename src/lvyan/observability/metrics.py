@@ -134,9 +134,7 @@ def track_llm_call(model: str, operation: str) -> Callable:
             finally:
                 duration = time.perf_counter() - start
                 LLM_CALL_DURATION.labels(model=model, operation=operation).observe(duration)
-                LLM_CALL_TOTAL.labels(
-                    model=model, operation=operation, status=status
-                ).inc()
+                LLM_CALL_TOTAL.labels(model=model, operation=operation, status=status).inc()
 
         @wraps(func)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -151,9 +149,7 @@ def track_llm_call(model: str, operation: str) -> Callable:
             finally:
                 duration = time.perf_counter() - start
                 LLM_CALL_DURATION.labels(model=model, operation=operation).observe(duration)
-                LLM_CALL_TOTAL.labels(
-                    model=model, operation=operation, status=status
-                ).inc()
+                LLM_CALL_TOTAL.labels(model=model, operation=operation, status=status).inc()
 
         import asyncio
 
@@ -194,9 +190,7 @@ class MetricsRecorder:
         self._nodes[name]["count"] += 1
         self._nodes[name]["total_ms"] += duration_ms
 
-    def record_tool_call(
-        self, name: str, *, duration_ms: float, success: bool
-    ) -> None:
+    def record_tool_call(self, name: str, *, duration_ms: float, success: bool) -> None:
         if name not in self._tools:
             self._tools[name] = {"count": 0, "total_ms": 0.0, "errors": 0}
         self._tools[name]["count"] += 1
@@ -215,7 +209,10 @@ def register_metrics_endpoint(app: Any) -> None:
         return
 
     metrics_enabled = os.getenv("METRICS_ENABLED", "false").strip().lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
     if not metrics_enabled:
         _logger.info("METRICS_ENABLED=false，/metrics 端点未注册")

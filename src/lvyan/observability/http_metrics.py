@@ -23,9 +23,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 _logger = logging.getLogger("lvyan.observability.http_metrics")
 
 # UUID 和数字 ID 归一化（降低 Prometheus 标签基数）
-_UUID_PATTERN = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-)
+_UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _ID_PATTERN = re.compile(r"/\d+(?=/|$)")
 
 # 不收集指标的路径
@@ -84,11 +82,9 @@ class HTTPMetricsMiddleware(BaseHTTPMiddleware):
         finally:
             duration = time.perf_counter() - start
             self._active.dec()
-            self._duration.labels(
-                method=method, path=normalized_path, status_code=status
-            ).observe(duration)
-            self._total.labels(
-                method=method, path=normalized_path, status_code=status
-            ).inc()
+            self._duration.labels(method=method, path=normalized_path, status_code=status).observe(
+                duration
+            )
+            self._total.labels(method=method, path=normalized_path, status_code=status).inc()
 
         return response

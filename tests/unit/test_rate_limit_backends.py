@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 
 class TestInMemoryBackend:
     """内存限流后端的单元测试。"""

@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Optional, Sequence
@@ -42,8 +43,14 @@ class TenantAwareCheckpointer:
         """
         self._inner = inner
         self._rls_enforced = os.getenv("RLS_ENFORCED", "false").strip().lower() in {
-            "1", "true", "yes", "on",
+            "1",
+            "true",
+            "yes",
+            "on",
         }
+        # AsyncPostgresSaver 复用单一连接。tenant context 是连接级状态，必须把
+        # “设置 user_id + 执行 saver 操作”串行化，避免并发请求串租户。
+        self._tenant_lock = asyncio.Lock()
 
     @property
     def inner(self) -> Any:
@@ -74,9 +81,9 @@ class TenantAwareCheckpointer:
 
         if conn is not None:
             try:
-                await conn.execute(
-                    "SELECT set_config('app.user_id', %s, true)", (user_id,)
-                )
+                # AsyncPostgresSaver 使用 autocommit 连接，SET LOCAL 会在当前语句
+                # 结束后丢失；使用会话级 set_config，并在每项操作前重新设置。
+                await conn.execute("SELECT set_config('app.user_id', %s, false)", (user_id,))
             except Exception as exc:  # noqa: BLE001 boundary-exception: 设置上下文失败
                 _logger.warning("设置租户上下文失败: %s", exc)
                 if self._rls_enforced:
@@ -89,8 +96,16 @@ class TenantAwareCheckpointer:
     async def aget(self, config: dict[str, Any]) -> Optional[Any]:
         """获取 checkpoint（带 RLS 上下文）。"""
         user_id = self._extract_user_id(config)
-        await self._set_context(user_id)
-        return await self._inner.aget(config)
+        async with self._tenant_lock:
+            await self._set_context(user_id)
+            return await self._inner.aget(config)
+
+    async def aget_tuple(self, config: dict[str, Any]) -> Optional[Any]:
+        """获取完整 checkpoint tuple（LangGraph 状态读取的实际调用路径）。"""
+        user_id = self._extract_user_id(config)
+        async with self._tenant_lock:
+            await self._set_context(user_id)
+            return await self._inner.aget_tuple(config)
 
     async def aput(
         self,
@@ -101,19 +116,22 @@ class TenantAwareCheckpointer:
     ) -> dict[str, Any]:
         """写入 checkpoint（带 RLS 上下文）。"""
         user_id = self._extract_user_id(config)
-        await self._set_context(user_id)
-        return await self._inner.aput(config, checkpoint, metadata, new_versions)
+        async with self._tenant_lock:
+            await self._set_context(user_id)
+            return await self._inner.aput(config, checkpoint, metadata, new_versions)
 
     async def aput_writes(
         self,
         config: dict[str, Any],
         writes: Sequence[tuple[str, Any]],
         task_id: str,
+        task_path: str = "",
     ) -> None:
         """写入中间 writes（带 RLS 上下文）。"""
         user_id = self._extract_user_id(config)
-        await self._set_context(user_id)
-        return await self._inner.aput_writes(config, writes, task_id)
+        async with self._tenant_lock:
+            await self._set_context(user_id)
+            return await self._inner.aput_writes(config, writes, task_id, task_path)
 
     async def alist(
         self,
@@ -121,18 +139,28 @@ class TenantAwareCheckpointer:
         *,
         filter: Optional[dict[str, Any]] = None,
         before: Optional[dict[str, Any]] = None,
-        limit: int = 10,
+        limit: int | None = None,
     ) -> Any:
         """列出 checkpoints（带 RLS 上下文）。"""
-        if config:
-            user_id = self._extract_user_id(config)
+        user_id = self._extract_user_id(config) if config else None
+        if self._rls_enforced and user_id is None:
+            raise ValueError("RLS_ENFORCED=true 时 alist 必须携带含 user_id 的 config")
+        async with self._tenant_lock:
             await self._set_context(user_id)
-        return self._inner.alist(config, filter=filter, before=before, limit=limit)
+            async for item in self._inner.alist(config, filter=filter, before=before, limit=limit):
+                yield item
 
     async def setup(self) -> None:
-        """初始化 checkpointer schema（无需 RLS）。"""
+        """初始化 checkpointer schema，并在强制模式下安装 checkpoint RLS。"""
         if hasattr(self._inner, "setup"):
             await self._inner.setup()
+        if self._rls_enforced:
+            conn = getattr(self._inner, "conn", None) or getattr(self._inner, "_conn", None)
+            if conn is None:
+                raise RuntimeError("RLS_ENFORCED=true 但无法取得 checkpointer 数据库连接")
+            from lvyan.db.checkpoint_rls import ensure_checkpoint_rls
+
+            await ensure_checkpoint_rls(conn)
 
     # ------------------------------------------------------------------
     # 透传属性：让上层代码认为这就是原始 saver

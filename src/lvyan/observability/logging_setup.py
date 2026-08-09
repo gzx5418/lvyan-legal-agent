@@ -84,6 +84,4 @@ def setup_logging(log_format: str | None = None, level: str = "INFO") -> None:
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
             stream=sys.stderr,
         )
-        logging.getLogger("lvyan").info(
-            "structlog 未安装，使用基础 logging 格式"
-        )
+        logging.getLogger("lvyan").info("structlog 未安装，使用基础 logging 格式")

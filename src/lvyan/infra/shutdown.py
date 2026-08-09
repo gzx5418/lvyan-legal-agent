@@ -57,6 +57,20 @@ class GracefulShutdown:
         """注册异步清理回调（关闭连接池等）。"""
         self._cleanup_callbacks.append(callback)
 
+    def reset_after_normal_lifespan_exit(self) -> bool:
+        """复位测试/嵌入式 ASGI 场景中的正常生命周期退出状态。
+
+        正常 lifespan 退出会执行清理序列但没有收到终止信号；这类进程内应用可被
+        重建（例如 TestClient），不应永久拒绝新 run。若已经收到 SIGTERM/SIGINT，
+        ``shutdown_event`` 已置位，必须保持 fail-closed 并返回 ``False``。
+        """
+        if self._shutdown_event.is_set():
+            return False
+        if self._shutting_down:
+            self._shutting_down = False
+            _logger.debug("正常 lifespan 退出后的 shutdown coordinator 已复位")
+        return True
+
     def install_signal_handlers(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         """安装 SIGTERM/SIGINT handler。"""
         if loop is None:
@@ -85,9 +99,7 @@ class GracefulShutdown:
                 _logger.debug("信号处理安装失败（非主线程或平台不支持）")
                 return
 
-        _logger.info(
-            "优雅停机 handler 已安装 (grace_seconds=%d)", self._grace_seconds
-        )
+        _logger.info("优雅停机 handler 已安装 (grace_seconds=%d)", self._grace_seconds)
 
     def _handle_signal(self, sig: Any) -> None:
         """信号处理入口。"""
@@ -112,7 +124,8 @@ class GracefulShutdown:
         start = time.monotonic()
         _logger.info(
             "等待 %d 个活跃任务完成 (max %ds)...",
-            len(self._active_tasks), self._grace_seconds,
+            len(self._active_tasks),
+            self._grace_seconds,
         )
 
         # 等待活跃任务完成
