@@ -28,6 +28,14 @@ os.environ["PERSISTENCE_REQUIRED"] = os.environ.get("LVYAN_TEST_PERSISTENCE_REQU
 os.environ["CASE_VAULT_ALLOW_INSECURE"] = os.environ.get(
     "LVYAN_TEST_CASE_VAULT_ALLOW_INSECURE", "true"
 )
+# P2: 测试默认关闭认证 / 不强制 RLS / 使用内存限流，避免 shell 残留
+# 生产配置导致 create_app() 模块级调用时 401 / 启动失败。
+os.environ.setdefault("AUTH_ENABLED", "false")
+os.environ.setdefault("RLS_ENFORCED", "false")
+os.environ.setdefault("RATE_LIMIT_BACKEND", "memory")
+os.environ["AUTH_ENABLED"] = os.environ.get("LVYAN_TEST_AUTH_ENABLED", "false")
+os.environ["RLS_ENFORCED"] = os.environ.get("LVYAN_TEST_RLS_ENFORCED", "false")
+os.environ["RATE_LIMIT_BACKEND"] = os.environ.get("LVYAN_TEST_RATE_LIMIT_BACKEND", "memory")
 
 # 关键：在「开发默认环境」下立即 import lvyan.config，使 ``settings`` 单例在此刻
 # 冻结为 development / persistence_required=False。否则 ``settings`` 会在第一个

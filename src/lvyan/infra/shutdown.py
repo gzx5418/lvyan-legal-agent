@@ -66,13 +66,24 @@ class GracefulShutdown:
                 _logger.warning("无法获取事件循环，信号处理未安装")
                 return
 
+        installed = False
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 loop.add_signal_handler(sig, self._handle_signal, sig)
-            except (NotImplementedError, OSError):
-                # Windows 不支持 add_signal_handler，使用 signal.signal 回退
-                signal.signal(sig, lambda s, f: self._handle_signal(s))
-                break
+                installed = True
+            except (NotImplementedError, OSError, RuntimeError):
+                # Windows ProactorEventLoop 或已关闭的循环不支持 add_signal_handler
+                pass
+
+        if not installed:
+            # Windows 回退：使用 signal.signal（仅主线程有效）
+            try:
+                signal.signal(signal.SIGINT, lambda s, f: self._handle_signal(s))
+                signal.signal(signal.SIGTERM, lambda s, f: self._handle_signal(s))
+            except (OSError, ValueError):
+                # 非主线程或信号不可用
+                _logger.debug("信号处理安装失败（非主线程或平台不支持）")
+                return
 
         _logger.info(
             "优雅停机 handler 已安装 (grace_seconds=%d)", self._grace_seconds
