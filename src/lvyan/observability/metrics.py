@@ -175,6 +175,39 @@ def record_token_usage(model: str, input_tokens: int, output_tokens: int) -> Non
 # ---------------------------------------------------------------------------
 # FastAPI 路由注册
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# MetricsRecorder: 轻量级 Agent 内部指标收集器（兼容旧接口）
+# ---------------------------------------------------------------------------
+class MetricsRecorder:
+    """运行级别的节点/工具调用指标收集器。
+
+    用于单次 Agent run 内部的性能追踪，与 Prometheus 全局指标互补。
+    """
+
+    def __init__(self) -> None:
+        self._nodes: dict[str, dict[str, float]] = {}
+        self._tools: dict[str, dict[str, Any]] = {}
+
+    def record_node(self, name: str, *, duration_ms: float) -> None:
+        if name not in self._nodes:
+            self._nodes[name] = {"count": 0, "total_ms": 0.0}
+        self._nodes[name]["count"] += 1
+        self._nodes[name]["total_ms"] += duration_ms
+
+    def record_tool_call(
+        self, name: str, *, duration_ms: float, success: bool
+    ) -> None:
+        if name not in self._tools:
+            self._tools[name] = {"count": 0, "total_ms": 0.0, "errors": 0}
+        self._tools[name]["count"] += 1
+        self._tools[name]["total_ms"] += duration_ms
+        if not success:
+            self._tools[name]["errors"] += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"nodes": dict(self._nodes), "tools": dict(self._tools)}
+
+
 def register_metrics_endpoint(app: Any) -> None:
     """注册 /metrics 端点到 FastAPI app。"""
     if not _PROM_AVAILABLE:
