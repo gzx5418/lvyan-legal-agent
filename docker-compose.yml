@@ -91,6 +91,25 @@ services:
       retries: 5
 
   # ---------------------------------------------------------------------------
+  # Redis：分布式限流 + 缓存（生产必须）
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: lvyan-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - lvyan-redis-data:/data
+    networks:
+      - lvyan-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
   # Langfuse：可观测性（可选，未配置 key 时应用自动关闭 trace 上报）
   # ---------------------------------------------------------------------------
   langfuse:
@@ -122,11 +141,15 @@ services:
     image: lvyan-agent:latest
     container_name: lvyan-app
     restart: unless-stopped
-    # 强依赖仅 postgres（生产模式 checkpointer + 元数据必须可用）。
+    # P3: 优雅停机宽限期（SHUTDOWN_GRACE_SECONDS + 15s 余量）
+    stop_grace_period: 45s
+    # 强依赖 postgres + redis（生产模式 checkpointer/元数据/限流必须可用）。
     # opensearch / minio 为检索与对象存储服务，当前代码未硬依赖，
     # 不阻塞启动；按需随 compose 一起拉起即可。
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     environment:
       # 默认以开发模式启动，保证未配置认证的首次本地部署安全语义一致。
@@ -189,6 +212,21 @@ services:
       # 生产模式会强制拒绝降级；本地开发默认显式开启，避免无密钥时无法启动。
       CASE_VAULT_ALLOW_INSECURE: ${CASE_VAULT_ALLOW_INSECURE:-true}
 
+      # —— 多租户与限流（P2: 生产必须 redis + RLS）——
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      RATE_LIMIT_BACKEND: ${RATE_LIMIT_BACKEND:-redis}
+      RLS_ENFORCED: ${RLS_ENFORCED:-true}
+
+      # —— 可观测性（P4）——
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:-}
+
+      # —— 优雅停机与并发控制（P3）——
+      SHUTDOWN_GRACE_SECONDS: ${SHUTDOWN_GRACE_SECONDS:-30}
+      MAX_LLM_CONCURRENCY: ${MAX_LLM_CONCURRENCY:-10}
+      MAX_RETRIEVAL_CONCURRENCY: ${MAX_RETRIEVAL_CONCURRENCY:-20}
+
       # —— 业务参数（有合理默认值，按需覆盖）——
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
       HITL_ENABLED: ${HITL_ENABLED:-true}
@@ -230,6 +268,7 @@ volumes:
   lvyan-postgres-data:
   lvyan-opensearch-data:
   lvyan-minio-data:
+  lvyan-redis-data:
   lvyan-app-data:
   lvyan-app-outputs:
   lvyan-app-manifests:

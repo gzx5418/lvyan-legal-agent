@@ -1,15 +1,26 @@
-"""基于滑动窗口的内存速率限制中间件。
+"""速率限制中间件（支持内存 / Redis 后端）。
 
-为关键写入端点提供 per-IP 速率限制，防止未认证场景下的资源滥用。
-非分布式（进程内），适用于单实例部署；多实例生产部署应在 API Gateway 层做限流。
+为关键写入端点提供 per-user / per-IP 速率限制，防止资源滥用。
+
+后端选择
+--------
+- ``RATE_LIMIT_BACKEND=memory``：进程内滑动窗口（单实例，开发/测试）
+- ``RATE_LIMIT_BACKEND=redis``：Redis sorted set（多实例生产环境）
 
 配置
 ----
 通过环境变量控制：
   - ``RATE_LIMIT_ENABLED``：是否启用（默认 true）
+  - ``RATE_LIMIT_BACKEND``：后端类型 memory|redis（默认 memory）
+  - ``REDIS_URL``：Redis 连接地址（redis backend 必需）
   - ``RATE_LIMIT_RUN_RPM``：/api/agent/run 每分钟请求上限（默认 10）
   - ``RATE_LIMIT_UPLOAD_RPM``：/api/upload 每分钟请求上限（默认 20）
   - ``RATE_LIMIT_DEFAULT_RPM``：其他写入端点每分钟请求上限（默认 60）
+
+限流键策略
+----------
+- 已认证用户：按 user_id 限流（独立于 IP）
+- 匿名请求：按 X-Forwarded-For 可信代理解析后的 IP 限流
 """
 
 from __future__ import annotations
@@ -18,7 +29,7 @@ import os
 import time
 import logging
 from collections import defaultdict
-from typing import Any
+from typing import Any, Protocol
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -46,6 +57,11 @@ def _is_enabled() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _get_backend_type() -> str:
+    raw = os.getenv("RATE_LIMIT_BACKEND", "memory").strip().lower()
+    return raw if raw in {"memory", "redis"} else "memory"
+
+
 # 受限路径前缀 → 环境变量名
 _PATH_LIMITS: tuple[tuple[str, str, int], ...] = (
     ("/api/agent/run", "RATE_LIMIT_RUN_RPM", 10),
@@ -55,20 +71,36 @@ _PATH_LIMITS: tuple[tuple[str, str, int], ...] = (
     ("/api/cases", "RATE_LIMIT_DEFAULT_RPM", 60),
 )
 
-# 不限制的路径（健康检查、静态资源、GET 读取）
-_EXEMPT_PATHS: frozenset[str] = frozenset(
-    {
-        "/livez",
-        "/readyz",
-        "/api/health",
-        "/",
-        "/docs",
-        "/redoc",
-        "/openapi.json",
-    }
+# 高成本写路径前缀（Redis 不可用时返回 503）
+_HIGH_COST_PREFIXES: tuple[str, ...] = (
+    "/api/agent/run", "/api/upload", "/api/agent/hitl/",
 )
 
+# 不限制的路径（健康检查、静态资源、GET 读取）
+_EXEMPT_PATHS: frozenset[str] = frozenset({
+    "/livez", "/readyz", "/api/health", "/metrics",
+    "/", "/docs", "/redoc", "/openapi.json",
+})
 
+
+# ---------------------------------------------------------------------------
+# 后端协议
+# ---------------------------------------------------------------------------
+class RateLimitBackend(Protocol):
+    """速率限制后端协议。"""
+
+    def is_allowed(self, key: str, limit: int) -> bool:
+        """检查是否允许请求。返回 True 允许，False 拒绝。"""
+        ...
+
+    def is_healthy(self) -> bool:
+        """后端是否健康可用。"""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# 内存后端
+# ---------------------------------------------------------------------------
 class _SlidingWindowCounter:
     """简单的滑动窗口计数器（60 秒窗口）。"""
 
@@ -94,35 +126,159 @@ class _SlidingWindowCounter:
         return len(self._timestamps)
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    """基于客户端 IP 的滑动窗口速率限制。
+class InMemoryBackend:
+    """进程内滑动窗口限流后端（单实例用）。"""
 
-    仅限制 POST/PATCH/DELETE 写入操作；GET 请求和健康检查端点不限制。
-    超限返回 429 Too Many Requests。
+    _GC_INTERVAL: float = 300.0
+
+    def __init__(self) -> None:
+        self._counters: dict[str, _SlidingWindowCounter] = defaultdict(_SlidingWindowCounter)
+        self._last_gc: float = time.monotonic()
+
+    def is_allowed(self, key: str, limit: int) -> bool:
+        self._gc()
+        return self._counters[key].is_allowed(limit)
+
+    def is_healthy(self) -> bool:
+        return True
+
+    def _gc(self) -> None:
+        now = time.monotonic()
+        if now - self._last_gc < self._GC_INTERVAL:
+            return
+        self._last_gc = now
+        stale = [k for k, c in self._counters.items() if c.count == 0]
+        for k in stale:
+            del self._counters[k]
+
+
+# ---------------------------------------------------------------------------
+# Redis 后端
+# ---------------------------------------------------------------------------
+class RedisBackend:
+    """基于 Redis sorted set 的滑动窗口限流后端（多实例生产用）。
+
+    算法：对每个 key 维护一个 sorted set，score = 请求时间戳。
+    检查时先清理 60s 前的条目，再判断集合大小是否超限。
     """
 
-    # GC：每 5 分钟清理过期的 IP 计数器，避免内存泄漏
-    _GC_INTERVAL: float = 300.0
+    _WINDOW_SECONDS: int = 60
+
+    def __init__(self, redis_url: str) -> None:
+        self._redis_url = redis_url
+        self._client: Any = None
+        self._healthy = False
+        self._connect()
+
+    def _connect(self) -> None:
+        try:
+            import redis
+
+            self._client = redis.Redis.from_url(
+                self._redis_url,
+                socket_connect_timeout=2.0,
+                socket_timeout=1.0,
+                decode_responses=False,
+            )
+            self._client.ping()
+            self._healthy = True
+            _logger.info("Redis 限流后端连接成功: %s", self._redis_url[:30] + "...")
+        except Exception as exc:  # noqa: BLE001 boundary-exception: Redis连接失败降级
+            _logger.error("Redis 限流后端连接失败: %s", exc)
+            self._healthy = False
+
+    def is_allowed(self, key: str, limit: int) -> bool:
+        if not self._healthy or self._client is None:
+            return self._reconnect_and_check(key, limit)
+
+        try:
+            now = time.time()
+            cutoff = now - self._WINDOW_SECONDS
+            pipe = self._client.pipeline(transaction=True)
+            rkey = f"rl:{key}"
+            pipe.zremrangebyscore(rkey, 0, cutoff)
+            pipe.zcard(rkey)
+            pipe.zadd(rkey, {f"{now}": now})
+            pipe.expire(rkey, self._WINDOW_SECONDS + 5)
+            results = pipe.execute()
+            current_count = results[1]
+            if current_count >= limit:
+                # 超限：移除刚添加的
+                self._client.zrem(rkey, f"{now}")
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001 boundary-exception: Redis操作失败
+            _logger.warning("Redis 限流操作失败: %s", exc)
+            self._healthy = False
+            return True  # Redis 故障时不阻塞（fail-open for reads）
+
+    def is_healthy(self) -> bool:
+        if self._healthy:
+            return True
+        self._reconnect_and_check("__health__", 999)
+        return self._healthy
+
+    def _reconnect_and_check(self, key: str, limit: int) -> bool:
+        try:
+            self._connect()
+            if self._healthy:
+                return self.is_allowed(key, limit)
+        except Exception:  # noqa: BLE001 boundary-exception: 重连失败
+            pass
+        return True  # 不可用时 fail-open
+
+
+# ---------------------------------------------------------------------------
+# 后端工厂
+# ---------------------------------------------------------------------------
+def _create_backend() -> RateLimitBackend:
+    """根据配置创建限流后端实例。"""
+    backend_type = _get_backend_type()
+    if backend_type == "redis":
+        redis_url = os.getenv("REDIS_URL", "").strip()
+        if redis_url:
+            return RedisBackend(redis_url)
+        _logger.warning(
+            "RATE_LIMIT_BACKEND=redis 但 REDIS_URL 未配置，降级为内存后端"
+        )
+    return InMemoryBackend()
+
+
+# ---------------------------------------------------------------------------
+# 中间件
+# ---------------------------------------------------------------------------
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """速率限制中间件。
+
+    支持 per-user（认证用户）和 per-IP（匿名用户）限流。
+    后端可选内存或 Redis。Redis 不可用时高成本写路径返回 503。
+    """
 
     def __init__(self, app: Any, **kwargs: Any) -> None:
         super().__init__(app, **kwargs)
-        self._counters: dict[str, dict[str, _SlidingWindowCounter]] = defaultdict(
-            lambda: defaultdict(_SlidingWindowCounter)
-        )
-        self._last_gc: float = time.monotonic()
         self._enabled = _is_enabled()
+        self._backend: RateLimitBackend = _create_backend()
+        self._is_redis = _get_backend_type() == "redis"
         if self._enabled:
-            _logger.info("速率限制已启用")
+            backend_name = "redis" if self._is_redis else "memory"
+            _logger.info("速率限制已启用（后端: %s）", backend_name)
         else:
             _logger.info("速率限制已禁用（RATE_LIMIT_ENABLED=false）")
 
-    def _get_client_ip(self, request: Request) -> str:
+    def _get_client_key(self, request: Request) -> str:
+        """获取限流键：已认证用户用 user_id，否则用 IP。"""
+        # 尝试从请求 state 获取已认证的 user_id
+        user_id = getattr(request.state, "user_id", None) if hasattr(request, "state") else None
+        if user_id and user_id != "anonymous":
+            return f"user:{user_id}"
+
+        # 匿名请求：使用可信代理解析后的 IP
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
-            return forwarded.split(",")[0].strip()
+            return f"ip:{forwarded.split(',')[0].strip()}"
         if request.client:
-            return request.client.host
-        return "unknown"
+            return f"ip:{request.client.host}"
+        return "ip:unknown"
 
     def _get_limit(self, path: str) -> int | None:
         for prefix, env_name, default in _PATH_LIMITS:
@@ -130,20 +286,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return _get_int(env_name, default)
         return None
 
-    def _gc(self) -> None:
-        now = time.monotonic()
-        if now - self._last_gc < self._GC_INTERVAL:
-            return
-        self._last_gc = now
-        stale_paths: list[str] = []
-        for path, ip_counters in self._counters.items():
-            stale_ips = [ip for ip, c in ip_counters.items() if c.count == 0]
-            for ip in stale_ips:
-                del ip_counters[ip]
-            if not ip_counters:
-                stale_paths.append(path)
-        for p in stale_paths:
-            del self._counters[p]
+    def _is_high_cost_path(self, path: str) -> bool:
+        """路径是否为高成本写操作（Redis 不可用时应拒绝）。"""
+        return any(path.startswith(p) for p in _HIGH_COST_PREFIXES)
 
     async def dispatch(self, request: Request, call_next: Any) -> Response:
         if not self._enabled:
@@ -160,16 +305,25 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if limit is None:
             return await call_next(request)
 
-        client_ip = self._get_client_ip(request)
-        counter = self._counters[path][client_ip]
+        # Redis 后端不可用时：高成本写路径返回 503，读取不受影响
+        if self._is_redis and not self._backend.is_healthy():
+            if self._is_high_cost_path(path):
+                _logger.warning(
+                    "Redis 不可用，拒绝高成本写请求: %s %s", request.method, path
+                )
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "服务暂时不可用，请稍后重试"},
+                    headers={"Retry-After": "30"},
+                )
 
-        if not counter.is_allowed(limit):
+        client_key = self._get_client_key(request)
+        rate_key = f"{path}:{client_key}"
+
+        if not self._backend.is_allowed(rate_key, limit):
             _logger.warning(
-                "速率限制触发: %s %s (client=%s, limit=%d/min)",
-                request.method,
-                path,
-                client_ip,
-                limit,
+                "速率限制触发: %s %s (key=%s, limit=%d/min)",
+                request.method, path, client_key, limit,
             )
             return JSONResponse(
                 status_code=429,
@@ -179,5 +333,4 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 headers={"Retry-After": "60"},
             )
 
-        self._gc()
         return await call_next(request)

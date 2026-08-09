@@ -9,7 +9,7 @@
 # - 非 root 用户运行（lvyan:1000），限制容器内提权。
 # - 健康检查走 /livez（不查依赖，仅探测进程存活），与 K8s livenessProbe 语义一致。
 # - knowledge/curated 作为只读资源打入镜像；manifests/ 在 builder 阶段预热
-#   （article_index_v2.{json,pkl} + bm25_index.{json,pkl}），首个请求无需冷启动。
+#   （article_index_v3.lvix + bm25_index_v3.lvix + JSON 兼容），首个请求无需冷启动。
 # - migrations/*.sql 由 docker-compose 挂载到 postgres 的
 #   /docker-entrypoint-initdb.d/ 首次启动自动执行；应用层 _ensure_schema 也可兜底。
 
@@ -46,11 +46,13 @@ COPY external/lvyan-lawtext/content ./external/lvyan-lawtext/content
 # （包已装进 venv，__file__ 推导出的路径是 site-packages，必须显式覆盖）
 ENV AGENT_DIR=/build
 
-# 预热：扫描法条 → 切分 85639 chunks → 生成 article_index_v2.{json,pkl} +
-# bm25_index.{json,pkl}。产物在 /build/knowledge/manifests/，runtime 阶段 COPY。
+# 预热：扫描法条 → 切分 chunks → 生成 article_index_v3.lvix + bm25_index_v3.lvix
+# + JSON 兼容文件。产物在 /build/knowledge/manifests/，runtime 阶段 COPY。
 # 若法律库为空（submodule 未检出），命令仍成功退出（生成空索引），不阻断构建。
 RUN /opt/venv/bin/python -m lvyan.scripts.ingest_laws --prewarm \
         --output /build/knowledge/manifests/article_index_v2.json \
+    && /opt/venv/bin/python -m lvyan.scripts.rebuild_indexes \
+        --manifests-dir /build/knowledge/manifests \
     && ls -lh /build/knowledge/manifests/
 
 # ---------------------------------------------------------------------------
@@ -86,8 +88,8 @@ COPY README.md ./
 # 也可通过运行时挂卷 + LAWTEXT_DIR 环境变量覆盖（见 .env.example）。
 COPY external/lvyan-lawtext/content ./external/lvyan-lawtext/content
 
-# P0-2：从 builder 复制构建期预热的检索索引（article_index_v2.{json,pkl} +
-# bm25_index.{json,pkl}），运行时直接载入，首个请求无需冷启动构建。
+# P1：从 builder 复制构建期预热的检索索引（article_index_v3.lvix +
+# bm25_index_v3.lvix + JSON 兼容），运行时直接载入，首个请求无需冷启动构建。
 # Docker 命名卷行为：compose 用 lvyan-app-manifests 卷挂载到该路径时，首次启动
 # 会把镜像内此目录的内容 **复制进** 空卷（而非覆盖为空），因此预热索引可被保留。
 COPY --from=builder /build/knowledge/manifests ./knowledge/manifests

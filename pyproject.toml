@@ -33,7 +33,13 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-asyncio",
+    "pytest-cov",
     "ruff",
+]
+production = [
+    "redis>=5.0",
+    "prometheus-client>=0.20",
+    "structlog>=24.0",
 ]
 # P2-17：文档转换作为可选依赖，避免核心安装强依赖 markitdown 全家桶
 documents = [

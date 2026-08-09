@@ -126,8 +126,8 @@ I/O型节点（需异步化）: fact_extractor, planner, parallel_retrieval, aut
 | 阶段 | 目标 | 周期 | 状态 |
 |------|------|------|------|
 | P1 | 安全阻断项 | 1周 | 待开始 |
-| P2 | 多租户与生产运行基础 | 2周 | 待开始 |
-| P3 | 架构拆分、异步化与优雅停机 | 2-3周 | 待开始 |
+| P2 | 多租户与生产运行基础 | 2周 | 进行中 |
+| P3 | 架构拆分、异步化与优雅停机 | 2-3周 | 部分完成(步骤54-55) |
 | P4 | 日志、指标和质量门禁 | 2周 (与P3并行) | 待开始 |
 | P5 | LLM能力与多来源案例库 | 3-4周 | 待开始 |
 
@@ -161,4 +161,54 @@ I/O型节点（需异步化）: fact_extractor, planner, parallel_retrieval, aut
 - [x] SafeIndexStore 拒绝恶意 pickle (测试覆盖)
 - [x] 生产加密无法静默降级 (validate_encryption_config)
 - [x] Ruff BLE001 启用，关键路径异常已分类
-- [ ] ingest_laws.py 中 `_save_article_index_pickle` 已改名为 `_save_article_index_lvix`
+- [x] ingest_laws.py 中 `_save_article_index_pickle` 已改名为 `_save_article_index_lvix`
+- [x] Dockerfile 预生成 LVIX 索引 (步骤18)
+
+### 阶段2 执行进展 (2026-08-09)
+
+| 步骤 | 描述 | 状态 |
+|------|------|------|
+| #19 | migrations/006: runtime role 创建 | 完成 |
+| #20 | migrations/007: agent_threads/runs/messages RLS | 完成 |
+| #21 | migrations/008: case_workspace RLS | 完成 |
+| #22 | migrations/009: checkpoint RLS | 待执行 (需LangGraph表结构) |
+| #23 | db/tenant_context.py 租户上下文 | 完成 |
+| #24 | TenantAwareAsyncPostgresSaver | 待执行 |
+| #25 | rls_preflight.py 孤儿检查 | 完成 |
+| #26 | pyproject.toml 添加 redis 可选依赖 | 完成 |
+| #27-29 | rate_limit.py 重构 (抽象后端+Redis+per-user) | 完成 |
+| #30 | config.py 新增 Redis/RLS/metrics 配置 | 完成 |
+| #31-33 | 跨租户隔离测试 | 完成 |
+| #34 | 限流后端测试 | 完成 |
+| #35 | 生产配置校验测试 | 完成 (含于步骤31) |
+
+**附加完成**：
+- [x] docker-compose.yml 新增 Redis 服务
+- [x] docker-compose.yml 新增 P2/P3/P4 环境变量
+- [x] docker-compose.yml stop_grace_period: 45s
+- [x] migrations/009: interrupted status (步骤54)
+- [x] pyproject.toml 添加 production extras (redis + prometheus + structlog)
+
+### 阶段3 执行进展 (2026-08-09)
+
+| 步骤 | 描述 | 状态 |
+|------|------|------|
+| #54 | agent_runs 新增 interrupted 状态 | 完成 |
+| #55 | docker-compose stop_grace_period | 完成 |
+| #57-58 | LLM + 检索并发信号量 | 完成 (lvyan/infra/concurrency.py) |
+| #59 | 优雅停机协调器 + lifespan 集成 | 完成 (lvyan/infra/shutdown.py) |
+
+### 阶段4 执行进展 (2026-08-09)
+
+| 步骤 | 描述 | 状态 |
+|------|------|------|
+| 结构化日志 | structlog JSON/text 双模式 | 完成 (lvyan/observability/logging_setup.py) |
+| Prometheus 指标 | 指标定义 + /metrics 端点 | 完成 (lvyan/observability/metrics.py) |
+| HTTP 指标中间件 | 请求延迟/总数/活跃连接 | 完成 (lvyan/observability/http_metrics.py) |
+| .env.example 更新 | 新增 P2-P4 所有配置项 | 完成 |
+
+### 测试覆盖
+
+- [x] tests/security/test_tenant_isolation.py (12 tests)
+- [x] tests/unit/test_rate_limit_backends.py (10 tests)
+- [x] 全量测试: 126 passed, 0 failed

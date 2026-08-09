@@ -64,8 +64,12 @@ from lvyan.memory.run_metadata import (
     RunMetadataUnavailable,
     ThreadOwnershipError,
 )
+from lvyan.observability.logging_setup import setup_logging
 from lvyan.runtime import get_case_memory
 from lvyan.tools.file_converter import convert_to_markdown
+
+# P4：在模块导入阶段尽早初始化结构化日志
+setup_logging()
 
 from .auth import (
     ANONYMOUS_USER,
@@ -737,11 +741,22 @@ def _lifespan(app: FastAPI) -> Any:
     async def _impl(app: FastAPI) -> Any:
         import asyncio
 
+        # P3: 安装优雅停机信号处理
+        from lvyan.infra.shutdown import get_shutdown_coordinator
+        coordinator = get_shutdown_coordinator()
+        coordinator.install_signal_handlers()
+
         try:
             await asyncio.to_thread(warm_corpus_in_background)
         except Exception:  # noqa: BLE001
             _logger.exception("法律索引启动预热失败（lifespan）")
+
         yield
+
+        # P3: lifespan 退出时执行停机序列
+        if not coordinator.is_shutting_down:
+            coordinator._shutting_down = True
+            await coordinator._shutdown_sequence()
 
     return _impl(app)
 
@@ -827,6 +842,14 @@ def create_app(
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Authorization", "X-User-ID"],
     )
+
+    # P4：HTTP 请求指标中间件（必须在 RateLimitMiddleware 之前添加，
+    # 确保被限流的 429 响应也被指标覆盖）
+    try:
+        from lvyan.observability.http_metrics import HTTPMetricsMiddleware
+        app.add_middleware(HTTPMetricsMiddleware)
+    except ImportError:
+        pass
 
     # P1-4：基于滑动窗口的速率限制（防止未认证场景下的资源滥用）
     app.add_middleware(RateLimitMiddleware)
@@ -1722,6 +1745,13 @@ def create_app(
 
     # --- 静态文件与前端页面 ---
     _static_dir = Path(__file__).parent / "static"
+    # P4：注册 /metrics 端点（Prometheus 抓取）
+    try:
+        from lvyan.observability.metrics import register_metrics_endpoint
+        register_metrics_endpoint(app)
+    except ImportError:
+        pass
+
     if _static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 

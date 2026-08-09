@@ -241,6 +241,48 @@ class Settings(BaseModel):
         description="开发环境是否允许 base64 降级（CASE_VAULT_KEY 未配置时）",
     )
 
+    # --- P2: 多租户与 Redis ---
+    redis_url: str = Field(
+        default="",
+        description="Redis 连接地址（生产环境限流必需）",
+    )
+    rate_limit_backend: str = Field(
+        default="memory",
+        description="限流后端：memory（单实例）/ redis（多实例生产）",
+    )
+    rls_enforced: bool = Field(
+        default=False,
+        description="RLS 策略是否强制（生产必须为 true）",
+    )
+
+    # --- P3: 优雅停机与并发控制 ---
+    shutdown_grace_seconds: int = Field(
+        default=30,
+        description="SIGTERM 收到后等待运行中任务完成的最大秒数",
+    )
+    max_llm_concurrency: int = Field(
+        default=10,
+        description="LLM 并发请求数上限（信号量）",
+    )
+    max_retrieval_concurrency: int = Field(
+        default=20,
+        description="检索并发请求数上限（信号量）",
+    )
+
+    # --- P4: 可观测性 ---
+    log_format: str = Field(
+        default="text",
+        description="日志格式：text（开发彩色）/ json（生产结构化）",
+    )
+    metrics_enabled: bool = Field(
+        default=False,
+        description="是否启用 Prometheus /metrics 端点",
+    )
+    metrics_auth_token: str = Field(
+        default="",
+        description="指标端点 Bearer 令牌（生产环境保护）",
+    )
+
 
 def _build_settings() -> Settings:
     """从环境变量构造 Settings 单例。
@@ -311,6 +353,15 @@ def _build_settings() -> Settings:
         zip_uncompressed_bytes_limit=_get_int("ZIP_UNCOMPRESSED_BYTES_LIMIT", 100 * 1024 * 1024),
         max_legal_reasoner_iterations=_get_int("MAX_LEGAL_REASONER_ITERATIONS", 1),
         case_vault_allow_insecure=_get_bool("CASE_VAULT_ALLOW_INSECURE", False),
+        redis_url=_get("REDIS_URL", ""),
+        rate_limit_backend=_get("RATE_LIMIT_BACKEND", "memory").strip().lower(),
+        rls_enforced=_get_bool("RLS_ENFORCED", False),
+        shutdown_grace_seconds=_get_int("SHUTDOWN_GRACE_SECONDS", 30),
+        max_llm_concurrency=_get_int("MAX_LLM_CONCURRENCY", 10),
+        max_retrieval_concurrency=_get_int("MAX_RETRIEVAL_CONCURRENCY", 20),
+        log_format=_get("LOG_FORMAT", "text").strip().lower(),
+        metrics_enabled=_get_bool("METRICS_ENABLED", False),
+        metrics_auth_token=_get("METRICS_AUTH_TOKEN", ""),
     )
 
 
@@ -409,6 +460,23 @@ def validate_runtime_config() -> None:
     from lvyan.memory.case_vault import CaseVault
 
     CaseVault.validate_encryption_config()
+
+    # P2: 多租户配置校验（生产环境必须强制 RLS + Redis 限流）
+    if is_production():
+        rls_val = os.getenv("RLS_ENFORCED", "false").strip().lower()
+        if rls_val not in {"1", "true", "yes", "on"}:
+            raise RuntimeError(
+                "生产模式下 RLS_ENFORCED 必须为 true（确保 RLS 策略已部署并强制启用）"
+            )
+        rl_backend = os.getenv("RATE_LIMIT_BACKEND", "memory").strip().lower()
+        if rl_backend != "redis":
+            raise RuntimeError(
+                "生产模式下 RATE_LIMIT_BACKEND 必须为 redis（多实例限流必需）"
+            )
+        if not os.getenv("REDIS_URL", "").strip():
+            raise RuntimeError(
+                "生产模式下 REDIS_URL 必须配置（限流后端依赖）"
+            )
 
     # W13：JWT 进程内验签的配置组合校验（启动期暴露配置错误，避免首请求才发现）
     if os.getenv("JWT_VERIFY_IN_PROCESS", "").strip().lower() in {"1", "true", "yes", "on"}:
