@@ -126,10 +126,10 @@ I/O型节点（需异步化）: fact_extractor, planner, parallel_retrieval, aut
 | 阶段 | 目标 | 周期 | 状态 |
 |------|------|------|------|
 | P1 | 安全阻断项 | 1周 | 待开始 |
-| P2 | 多租户与生产运行基础 | 2周 | 进行中 |
-| P3 | 架构拆分、异步化与优雅停机 | 2-3周 | 部分完成(步骤54-55) |
-| P4 | 日志、指标和质量门禁 | 2周 (与P3并行) | 待开始 |
-| P5 | LLM能力与多来源案例库 | 3-4周 | 待开始 |
+| P2 | 多租户与生产运行基础 | 2周 | 基本完成 |
+| P3 | 架构拆分、异步化与优雅停机 | 2-3周 | 核心完成 |
+| P4 | 日志、指标和质量门禁 | 2周 (与P3并行) | 核心完成 |
+| P5 | LLM能力与多来源案例库 | 3-4周 | 基础完成 |
 
 ---
 
@@ -207,8 +207,27 @@ I/O型节点（需异步化）: fact_extractor, planner, parallel_retrieval, aut
 | HTTP 指标中间件 | 请求延迟/总数/活跃连接 | 完成 (lvyan/observability/http_metrics.py) |
 | .env.example 更新 | 新增 P2-P4 所有配置项 | 完成 |
 
+### 阶段5 执行进展 (2026-08-09)
+
+| 步骤 | 描述 | 状态 |
+|------|------|------|
+| LLM 客户端 | 统一调用层 (重试/并发/指标/模型路由) | 完成 (lvyan/llm/client.py) |
+| 多源案例库 | CaseSource 协议 + 聚合检索器 | 完成 (lvyan/retrieval/case_source.py) |
+| OpenSearch 接入 | CaseSource 实现 | 待执行 |
+| 外部API接入 | 裁判文书网等 | 待执行 |
+| LangGraph 增强 | 新节点/工具集成 | 待执行 |
+
+### Bug 修复 (2026-08-09)
+
+| 问题 | 修复 | 状态 |
+|------|------|------|
+| MetricsRecorder 删除导致旧测试失败 | 恢复兼容类 | 完成 |
+| Windows ProactorEventLoop 信号处理 | shutdown.py 回退到 signal.signal() | 完成 |
+| Shell 环境污染导致 20 个测试 401 | conftest.py 强制重置 AUTH/RLS/RATE_LIMIT | 完成 |
+
 ### 测试覆盖
 
 - [x] tests/security/test_tenant_isolation.py (12 tests)
 - [x] tests/unit/test_rate_limit_backends.py (10 tests)
-- [x] 全量测试: 126 passed, 0 failed
+- [x] 关键模块验证: 181 passed, 0 failed
+- [x] 全量测试: 905+ passed (待确认全量 0 failed)
