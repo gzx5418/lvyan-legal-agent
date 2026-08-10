@@ -99,7 +99,12 @@
         <section class="settings-panel active" data-settings-content="general" aria-labelledby="settings-general-title">
           <div class="settings-section-heading"><h2 id="settings-general-title">通用</h2><p>这些选项只保存在当前浏览器。</p></div>
           <div class="settings-card">
-            <div class="settings-row"><span><strong>回答方式</strong><small>回答会依据问题内容组织为简答、材料清单、办理步骤、深度分析或文书。</small></span></div>
+            <div class="settings-row"><span><strong>回答方式</strong><small>回答结构仍依据问题内容；此处只设置默认详略偏好。</small></span>
+              <select id="settings-response-style"><option value="brief">简洁</option><option value="detailed">详细</option></select>
+            </div>
+            <label class="settings-row" for="settings-doc-format"><span><strong>默认文书格式</strong><small>生成文书时优先使用的导出格式。</small></span>
+              <select id="settings-doc-format"><option value="md">Markdown</option><option value="docx">DOCX</option></select>
+            </label>
             <label class="settings-row" for="settings-density"><span><strong>阅读密度</strong><small>调整对话和设置页面的留白。</small></span>
               <select id="settings-density"><option value="comfortable">舒适</option><option value="compact">紧凑</option></select>
             </label>

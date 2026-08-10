@@ -1,0 +1,10 @@
+# 仅录入经官方来源人工核验的版本元数据，禁止推测日期。
+# 示例（保持注释，不会参与运行）：
+# overrides:
+#   source-id:
+#     status: repealed
+#     expiry_date: 2024-01-01
+#     superseded_by: replacement-source-id
+#     official_urls:
+#       - https://example.gov.cn/official-page
+overrides: {}

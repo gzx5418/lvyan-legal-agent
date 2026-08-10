@@ -30,6 +30,7 @@ PR1 改进
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -693,7 +694,7 @@ def _get_conversion_semaphore() -> asyncio.Semaphore:
     return _conversion_semaphore
 
 
-def _load_attachment_markdown(meta: dict[str, Any], fid: str) -> str:
+def _load_attachment_markdown(meta: dict[str, Any], fid: str, case_vault: Any = None) -> str:
     """从附件元数据读取 Markdown 正文，按以下顺序：
 
     1. 优先读取 ``markdown_path`` 指向的 ``.md`` 文件（M5 新格式）。
@@ -704,6 +705,18 @@ def _load_attachment_markdown(meta: dict[str, Any], fid: str) -> str:
     """
     markdown_path_str = meta.get("markdown_path")
     if markdown_path_str:
+        if str(markdown_path_str).startswith("vault://"):
+            if case_vault is None:
+                raise HTTPException(status_code=503, detail="附件加密空间不可用")
+            vault_ref = str(markdown_path_str)[len("vault://") :]
+            try:
+                thread_id, doc_id = vault_ref.split("/", 1)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="附件加密引用无效") from exc
+            content = case_vault.retrieve(thread_id, doc_id)
+            if content is None:
+                raise HTTPException(status_code=404, detail=f"附件 {fid} 不存在或已过期")
+            return content.decode("utf-8", errors="replace")
         md_path = _resolve_upload_path(markdown_path_str)
         if not md_path.is_file():
             raise HTTPException(
@@ -767,6 +780,8 @@ def create_app(
     memory: CaseMemory | None = None,
     metadata_store: RunMetadataStore | None = None,
     workspace_store: CaseWorkspaceStore | None = None,
+    preference_store: Any = None,
+    case_vault: Any = None,
 ) -> FastAPI:
     """构造 FastAPI 应用。
 
@@ -833,6 +848,25 @@ def create_app(
         else:
             workspace_store = InMemoryCaseWorkspaceStore()
     app.state.workspace_store = workspace_store
+    from lvyan.memory.user_preferences import UserPreferences
+    from lvyan.memory.case_vault import CaseVault
+
+    preference_store = preference_store or UserPreferences()
+    case_vault = case_vault or CaseVault()
+    try:
+        CaseVault.validate_encryption_config()
+        case_vault_enabled = True
+    except RuntimeError:
+        if _is_prod:
+            raise
+        case_vault_enabled = False
+        _logger.warning(
+            "案件 Vault 未启用：开发环境需配置 CASE_VAULT_KEY，或显式设置 "
+            "CASE_VAULT_ALLOW_INSECURE=true；附件暂沿用受限上传目录"
+        )
+    app.state.preference_store = preference_store
+    app.state.case_vault = case_vault
+    app.state.case_vault_enabled = case_vault_enabled
 
     app.add_middleware(
         CORSMiddleware,
@@ -993,6 +1027,10 @@ def create_app(
             },
         )
 
+    from .routes_preferences import create_preferences_router
+
+    app.include_router(create_preferences_router(preference_store))
+
     # P2-4：案件工作空间路由已拆分到 routes_workspace.py
     from .routes_workspace import create_workspace_router
 
@@ -1016,6 +1054,7 @@ def create_app(
         # 改为以 DocumentRef 形式收集，由 attachment_retriever 节点切块 + 按需检索。
         query_text = req.query
         attachment_refs: list[dict] = []
+        attachment_markdown: dict[str, str] = {}
         if req.attachments:
             from lvyan.config import settings as _settings
 
@@ -1070,7 +1109,7 @@ def create_app(
 
                 # M5：读取 Markdown 正文（优先 .md 文件，回退旧 markdown，再回退 preview）
                 # P0-3：读取失败（404/503）会向上抛出，终止整个 run。
-                md = _load_attachment_markdown(meta, fid)
+                md = _load_attachment_markdown(meta, fid, case_vault)
                 if not md:
                     raise HTTPException(
                         status_code=422,
@@ -1093,11 +1132,17 @@ def create_app(
                         ),
                     )
 
+                attachment_markdown[fid] = md
+
                 # P0 性能：构造 DocumentRef；stored_path 指向 markdown 文件，
                 # attachment_retriever 节点据此切块 + 按需检索。
                 markdown_path_str = meta.get("markdown_path", "")
                 stored_path = (
-                    str(_resolve_upload_path(markdown_path_str)) if markdown_path_str else ""
+                    str(markdown_path_str)
+                    if str(markdown_path_str).startswith("vault://")
+                    else str(_resolve_upload_path(markdown_path_str))
+                    if markdown_path_str
+                    else ""
                 )
                 attachment_refs.append(
                     {
@@ -1139,27 +1184,73 @@ def create_app(
                             detail="会话不存在",
                         )
 
+        # Resolve the thread before starting the background task so selected
+        # attachments enter the encrypted vault before graph execution begins.
+        resolved_thread_id = req.thread_id or f"thread-{uuid.uuid4().hex[:12]}"
+        vaulted_doc_ids: list[str] = []
+        for ref in attachment_refs:
+            if not case_vault_enabled:
+                break
+            doc_id = str(ref.get("doc_id", ""))
+            markdown = attachment_markdown.get(doc_id, "")
+            if not markdown:
+                continue
+            try:
+                await asyncio.to_thread(
+                    case_vault.store,
+                    resolved_thread_id,
+                    doc_id,
+                    markdown.encode("utf-8"),
+                    {
+                        "filename": ref.get("filename", doc_id),
+                        "content_hash": ref.get("content_hash", ""),
+                        "user_id": user_id,
+                        "purpose": "agent_attachment_context",
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 encryption/persistence boundary
+                for stored_doc_id in vaulted_doc_ids:
+                    await asyncio.to_thread(case_vault.delete, resolved_thread_id, stored_doc_id)
+                raise HTTPException(status_code=503, detail="案件材料无法写入加密空间") from exc
+            vaulted_doc_ids.append(doc_id)
+            ref["stored_path"] = f"vault://{resolved_thread_id}/{doc_id}"
+
+        # Snapshot the sanitized preference at run creation.  This keeps an
+        # injected/custom store consistent with the settings API and avoids a
+        # second store instance inside the background runner.
+        try:
+            preference = await asyncio.to_thread(preference_store.get, user_id)
+            preference_payload = preference.model_dump(mode="json", exclude={"user_id"})
+        except (OSError, ValueError, TypeError):
+            preference_payload = {}
+
         try:
             ctx = manager.create_run(
                 query_text,
-                req.thread_id,
+                resolved_thread_id,
                 complexity,
                 user_id=user_id,
                 law_as_of_date=req.law_as_of_date,
                 attachments=req.attachments,
                 attachment_refs=attachment_refs,
+                user_preferences=preference_payload,
                 display_query=req.query,
             )
         except ThreadOwnershipError as exc:
+            for stored_doc_id in vaulted_doc_ids:
+                await asyncio.to_thread(case_vault.delete, resolved_thread_id, stored_doc_id)
             raise HTTPException(
                 status_code=404,
                 detail="会话不存在",
             ) from exc
         except RunMetadataUnavailable as exc:
+            for stored_doc_id in vaulted_doc_ids:
+                await asyncio.to_thread(case_vault.delete, resolved_thread_id, stored_doc_id)
             raise HTTPException(
                 status_code=503,
                 detail="无法创建可恢复的 Agent run",
             ) from exc
+
         # P2-13：把 user_id 写入 CaseMemory 索引，便于后续 ownership 过滤
         try:
             mem.register(
@@ -1415,6 +1506,8 @@ def create_app(
                     status_code=503,
                     detail="checkpoint 删除失败",
                 ) from exc
+        # 会话删除同时清除加密案件材料；该动作由用户显式 DELETE 请求触发。
+        await asyncio.to_thread(case_vault.delete_thread, thread_id)
         return DeleteResponse(deleted=True, thread_id=thread_id)
 
     @app.get("/api/agent/threads", response_model=ThreadListResponse)
@@ -1591,7 +1684,39 @@ def create_app(
             _atomic_write_text(markdown_path, markdown_text, encoding="utf-8")
             created.append(markdown_path)
 
-            # 4) JSON 元数据（只存路径与预览，不再嵌入全文）
+            raw_storage_path = str(raw_path)
+            markdown_storage_path = str(markdown_path)
+            if case_vault_enabled:
+                pending_thread_id = (
+                    "upload-" + hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:32]
+                )
+                raw_doc_id = f"{file_id}-raw"
+                markdown_doc_id = f"{file_id}-markdown"
+                try:
+                    await asyncio.to_thread(
+                        case_vault.store,
+                        pending_thread_id,
+                        raw_doc_id,
+                        content,
+                        {"filename": filename, "user_id": user_id, "purpose": "pending_upload"},
+                    )
+                    await asyncio.to_thread(
+                        case_vault.store,
+                        pending_thread_id,
+                        markdown_doc_id,
+                        markdown_text.encode("utf-8"),
+                        {"filename": filename, "user_id": user_id, "purpose": "pending_markdown"},
+                    )
+                except Exception:
+                    await asyncio.to_thread(case_vault.delete, pending_thread_id, raw_doc_id)
+                    await asyncio.to_thread(case_vault.delete, pending_thread_id, markdown_doc_id)
+                    raise
+                raw_storage_path = f"vault://{pending_thread_id}/{raw_doc_id}"
+                markdown_storage_path = f"vault://{pending_thread_id}/{markdown_doc_id}"
+                raw_path.unlink(missing_ok=True)
+                markdown_path.unlink(missing_ok=True)
+
+            # 4) JSON 元数据（只存受限引用与预览，不再嵌入全文）
             meta = {
                 "file_id": file_id,
                 "filename": filename,
@@ -1600,10 +1725,10 @@ def create_app(
                 "ext": ext,
                 "category": category,
                 "converter": converter,
-                "raw_path": str(raw_path),
+                "raw_path": raw_storage_path,
                 # M5：Markdown 全文存独立 .md 文件，JSON 仅记录路径
-                "markdown_path": str(markdown_path),
-                "text_preview": text_preview,
+                "markdown_path": markdown_storage_path,
+                "text_preview": "" if case_vault_enabled else text_preview,
                 "char_count": char_count,
                 "uploaded_at": time.time(),
                 "user_id": user_id,

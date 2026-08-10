@@ -52,6 +52,7 @@ from lvyan.tools.statutes import (
     get_statute_article,
     search_statutes,
     verify_statute_status,
+    search_procedure_rules,
 )
 
 __all__ = [
@@ -65,6 +66,7 @@ __all__ = [
     "search_statutes",
     "get_statute_article",
     "verify_statute_status",
+    "search_procedure_rules",
     # 案例工具
     "CaseHit",
     "CaseSearchResult",

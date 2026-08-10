@@ -29,6 +29,7 @@ class RunContext:
         user_id: str = "anonymous",
         law_as_of_date: date | None = None,
         attachment_refs: list[dict] | None = None,
+        user_preferences: dict[str, Any] | None = None,
         load_history: Any = None,
     ) -> None:
         self.run_id = run_id
@@ -38,6 +39,9 @@ class RunContext:
         self.law_as_of_date = law_as_of_date
         # P0 性能：附件以 DocumentRef dict 形式传入，不再拼进 user_goal
         self.attachment_refs: list[dict] = list(attachment_refs or [])
+        # Only sanitized display preferences belong here; case facts and raw
+        # documents must remain in the checkpoint/vault channels.
+        self.user_preferences: dict[str, Any] = dict(user_preferences or {})
         # 多轮记忆：由 RunManager 注入的回调，runner 调用它读取本 thread 历史。
         # 签名：() -> list[dict]；为 None 表示无持久化存储（无历史可读）。
         self.load_history: Any = load_history

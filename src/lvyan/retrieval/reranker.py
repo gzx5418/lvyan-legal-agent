@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from lvyan.config import settings
@@ -136,6 +137,17 @@ def rerank(
         scores = real_scores
     else:
         # Jaccard 桩
+        allow_fallback = os.getenv("ALLOW_HEURISTIC_RERANKER_FALLBACK", "true").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not allow_fallback:
+            raise RuntimeError(
+                "真实 Reranker 不可用，且 ALLOW_HEURISTIC_RERANKER_FALLBACK=false；"
+                "拒绝使用启发式分数冒充模型重排"
+            )
         query_tokens = _tokenize_set(query)
         scores = [
             _jaccard_similarity(query_tokens, _tokenize_set(text)) for text in candidate_texts

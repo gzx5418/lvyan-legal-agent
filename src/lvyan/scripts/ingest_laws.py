@@ -427,8 +427,8 @@ def _tcp_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
 def write_to_opensearch(chunks: list[ArticleChunk]) -> int:
     """将 chunks 写入 OpenSearch。
 
-    桩实现：检查 OpenSearch 是否可达，不可达则打印警告并返回 0。
-    真正的写入逻辑可在后续完善，重点保证桩优雅降级。
+    自动创建条文索引，并使用 bulk API 幂等覆盖同一 ``chunk_id``。
+    该索引只保存法规条文，不依赖或伪装成类案数据库。
     """
     url = settings.opensearch_url
     try:
@@ -445,9 +445,9 @@ def write_to_opensearch(chunks: list[ArticleChunk]) -> int:
         )
         return 0
 
-    # 可达时的真实写入逻辑（后续完善）
     try:
         from opensearchpy import OpenSearch  # type: ignore[import-untyped]
+        from opensearchpy.helpers import bulk  # type: ignore[import-untyped]
 
         client = OpenSearch(
             hosts=[{"host": host, "port": port}],
@@ -456,11 +456,40 @@ def write_to_opensearch(chunks: list[ArticleChunk]) -> int:
             verify_certs=False,
             ssl_show_warn=False,
         )
-        for chunk in chunks:
-            client.index(
-                index="law_articles_v2", id=chunk.chunk_id, body=chunk.model_dump(mode="json")
+        index_name = "law_articles_v2"
+        if not client.indices.exists(index=index_name):
+            client.indices.create(
+                index=index_name,
+                body={
+                    "settings": {"index": {"number_of_shards": 1, "number_of_replicas": 0}},
+                    "mappings": {
+                        "properties": {
+                            "chunk_id": {"type": "keyword"},
+                            "source_id": {"type": "keyword"},
+                            "title": {"type": "text"},
+                            "article_number": {"type": "keyword"},
+                            "article_text": {"type": "text"},
+                            "authority_level": {"type": "keyword"},
+                            "status": {"type": "keyword"},
+                            "effective_date": {"type": "date"},
+                            "expiry_date": {"type": "date"},
+                            "content_hash": {"type": "keyword"},
+                        }
+                    },
+                },
             )
-        return len(chunks)
+        actions = (
+            {
+                "_op_type": "index",
+                "_index": index_name,
+                "_id": chunk.chunk_id,
+                "_source": chunk.model_dump(mode="json"),
+            }
+            for chunk in chunks
+        )
+        succeeded, _ = bulk(client, actions, raise_on_error=False, stats_only=True)
+        client.indices.refresh(index=index_name)
+        return int(succeeded)
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] OpenSearch 写入失败：{exc}", file=sys.stderr)
         return 0

@@ -473,6 +473,31 @@ def validate_runtime_config() -> None:
             raise RuntimeError("生产模式下 RATE_LIMIT_BACKEND 必须为 redis（多实例限流必需）")
         if not os.getenv("REDIS_URL", "").strip():
             raise RuntimeError("生产模式下 REDIS_URL 必须配置（限流后端依赖）")
+        gateway = os.getenv("MODEL_GATEWAY_URL", settings.model_gateway_url).strip()
+        allow_local_models = os.getenv("ALLOW_LOCAL_MODELS", "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not gateway and not allow_local_models:
+            raise RuntimeError(
+                "生产模式必须配置 MODEL_GATEWAY_URL，或显式设置 ALLOW_LOCAL_MODELS=true"
+            )
+        if os.getenv("ALLOW_HASH_EMBEDDING_FALLBACK", "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            raise RuntimeError("生产模式禁止 ALLOW_HASH_EMBEDDING_FALLBACK=true")
+        if os.getenv("ALLOW_HEURISTIC_RERANKER_FALLBACK", "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            raise RuntimeError("生产模式禁止 ALLOW_HEURISTIC_RERANKER_FALLBACK=true")
 
     # W13：JWT 进程内验签的配置组合校验（启动期暴露配置错误，避免首请求才发现）
     if os.getenv("JWT_VERIFY_IN_PROCESS", "").strip().lower() in {"1", "true", "yes", "on"}:

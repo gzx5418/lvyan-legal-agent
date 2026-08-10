@@ -211,6 +211,67 @@ def _check_unhandled_statute_conflicts(
     return None, None
 
 
+def _try_llm_critic(
+    reasoning_result: Any,
+    statutes: list[Any],
+    facts: list[Any],
+) -> tuple[list[str], list[str]]:
+    """LLM 对抗评审；法条仅传入已检索候选，输出不具有新增来源权限。"""
+    from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_registry import get_prompt
+    from lvyan.observability.metrics import record_llm_fallback
+
+    if reasoning_result is None or not llm_available():
+        if reasoning_result is not None:
+            record_llm_fallback("critic", "unavailable")
+        return [], []
+    if hasattr(reasoning_result, "model_dump"):
+        reasoning_payload = reasoning_result.model_dump(mode="json")
+    else:
+        reasoning_payload = reasoning_result
+    statute_payload = [
+        {
+            "source_id": str(_get(item, "source_id", "")),
+            "title": str(_get(item, "title", "")),
+            "article_number": str(_get(item, "article_number", "") or ""),
+            "status": str(_get(item, "status", "unknown")),
+        }
+        for item in statutes[:30]
+    ]
+    fact_payload = [str(_get(item, "content", "")) for item in facts[:30]]
+    spec = get_prompt("critic")
+    try:
+        payload = chat_json(
+            messages=[
+                {"role": "system", "content": f"{spec.system}\nprompt_version={spec.version}"},
+                {
+                    "role": "user",
+                    "content": (
+                        f"事实：{fact_payload}\n来源：{statute_payload}\n推理：{reasoning_payload}\n"
+                        '输出 {"passed":true|false,"issues":["问题"],'
+                        '"suggestions":["可执行修正"]}。最多各 6 项。'
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=900,
+        )
+    except Exception:  # noqa: BLE001 boundary-exception: LLM 降级边界
+        record_llm_fallback("critic", "error")
+        return [], []
+    if not isinstance(payload, dict):
+        record_llm_fallback("critic", "invalid_json")
+        return [], []
+    raw_issues = payload.get("issues", [])
+    raw_suggestions = payload.get("suggestions", [])
+    if not isinstance(raw_issues, list) or not isinstance(raw_suggestions, list):
+        record_llm_fallback("critic", "invalid_schema")
+        return [], []
+    issues = [str(item).strip()[:500] for item in raw_issues[:6] if str(item).strip()]
+    suggestions = [str(item).strip()[:500] for item in raw_suggestions[:6] if str(item).strip()]
+    return issues, suggestions
+
+
 # ---------------------------------------------------------------------------
 # 节点函数
 # ---------------------------------------------------------------------------
@@ -229,6 +290,7 @@ def critic(state: CaseState) -> dict[str, Any]:
     reasoning_result = _get(state, "reasoning_result", None)
     statutes = _get(state, "statutes", []) or []
     conflicts = _get(state, "conflicts", []) or []
+    facts = _get(state, "facts", []) or []
     iteration = _get(state, "iteration", 0)
     existing_feedback = _get(state, "critic_feedback", []) or []
 
@@ -245,6 +307,15 @@ def critic(state: CaseState) -> dict[str, Any]:
         if issue:
             issues.append(issue)
             suggestions.append(suggestion)
+
+        # LLM 只补充对抗性问题；确定性规则的结论不会被 LLM 覆盖或删除。
+        llm_issues, llm_suggestions = _try_llm_critic(reasoning_result, statutes, facts)
+        for llm_issue in llm_issues:
+            if llm_issue not in issues:
+                issues.append(llm_issue)
+        for llm_suggestion in llm_suggestions:
+            if llm_suggestion not in suggestions:
+                suggestions.append(llm_suggestion)
 
         # --- 检查 2：过度推断 ---
         issue, suggestion = _check_over_inference(reasoning_result)

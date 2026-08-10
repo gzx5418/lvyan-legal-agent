@@ -207,6 +207,15 @@ def validate_grounding(
                 )
             )
 
+    # 字符重叠容易把“同一主题但不支持该结论”误判为通过。模型可用时增加一层
+    # 受约束的蕴含审查；它只能把既有引用标为不支持，不能创建来源或覆盖硬错误。
+    for semantic_issue in _llm_grounding_issues(citations, statutes):
+        if semantic_issue.citation_id in error_citation_ids:
+            continue
+        issues.append(semantic_issue)
+        if semantic_issue.severity == "error":
+            error_citation_ids.add(semantic_issue.citation_id)
+
     grounded_citations = max(0, total - len(error_citation_ids))
     has_error = any(issue.severity == "error" for issue in issues)
 
@@ -216,3 +225,81 @@ def validate_grounding(
         issues=issues,
         passed=not has_error,
     )
+
+
+def _llm_grounding_issues(
+    citations: list[dict[str, Any]], statutes: list[Any]
+) -> list[GroundingIssue]:
+    """对已匹配引用做受约束蕴含判断；不可用或无效输出时安全降级。"""
+    from lvyan.llm import chat_json, llm_available
+    from lvyan.observability.metrics import record_llm_fallback
+
+    if not citations or not llm_available():
+        if citations:
+            record_llm_fallback("grounding_validator", "unavailable")
+        return []
+    candidates: list[dict[str, str]] = []
+    for citation in citations[:20]:
+        matched = _find_matching_statute(citation, statutes)
+        if matched is None:
+            continue
+        candidates.append(
+            {
+                "citation_id": str(citation["citation_id"]),
+                "conclusion_context": str(citation["context"])[:500],
+                "article_text": str(_get(matched, "article_text", ""))[:1200],
+            }
+        )
+    if not candidates:
+        return []
+    try:
+        payload = chat_json(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是法律引用蕴含校验器。判断给定条文是否直接支持结论上下文。"
+                        "不得补充外部知识或新法条，只输出 JSON。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"候选：{candidates}\n"
+                        '输出 {"items":[{"citation_id":"原ID","supported":true|false,'
+                        '"reason":"简短理由"}]}。只有条文能够推出或直接支撑结论才为 true。'
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=1000,
+        )
+    except Exception:  # noqa: BLE001 boundary-exception: 可选语义校验降级
+        record_llm_fallback("grounding_validator", "error")
+        return []
+    raw = payload.get("items", []) if isinstance(payload, dict) else []
+    if not isinstance(raw, list):
+        record_llm_fallback("grounding_validator", "invalid_schema")
+        return []
+    by_id = {item["citation_id"]: item for item in candidates}
+    result: list[GroundingIssue] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        citation_id = str(item.get("citation_id", ""))
+        if citation_id not in by_id or item.get("supported") is not False:
+            continue
+        candidate = by_id[citation_id]
+        result.append(
+            GroundingIssue(
+                citation_id=citation_id,
+                issue_type="no_support",
+                conclusion=_truncate(candidate["conclusion_context"]),
+                cited_text=_truncate(candidate["article_text"]),
+                jaccard=0.0,
+                common_bigrams=0,
+                severity="error",
+                detail=f"语义蕴含审查未通过：{str(item.get('reason', '条文不直接支持结论'))[:300]}",
+            )
+        )
+    return result

@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -173,15 +172,28 @@ def _build_app(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_UPLOAD_DIR", upload_dir)
     # 关闭认证，避免 401 干扰
     monkeypatch.delenv("AUTH_ENABLED", raising=False)
+    monkeypatch.setenv("CASE_VAULT_KEY", "b" * 64)
+    monkeypatch.setenv("CASE_VAULT_ALLOW_INSECURE", "false")
 
     # 注入一个不依赖 PG / 图运行时的 runner。
     async def runner(*_args):
         return "ok"
 
-    return create_app(runner=runner, memory=None, metadata_store=None), upload_dir
+    from lvyan.memory.case_vault import CaseVault
+
+    vault = CaseVault(base_dir=tmp_path / "vault")
+    return (
+        create_app(
+            runner=runner,
+            memory=None,
+            metadata_store=None,
+            case_vault=vault,
+        ),
+        upload_dir,
+    )
 
 
-def test_upload_writes_three_files_and_json_has_no_markdown(monkeypatch, tmp_path):
+def test_upload_encrypts_content_and_json_has_no_markdown(monkeypatch, tmp_path):
     pytest.importorskip("fastapi.testclient")
     from fastapi.testclient import TestClient
 
@@ -195,23 +207,66 @@ def test_upload_writes_three_files_and_json_has_no_markdown(monkeypatch, tmp_pat
     data = resp.json()
     file_id = data["file_id"]
 
-    # 三件套
+    # Only metadata remains in the upload directory; both content forms live
+    # in the encrypted case vault.
     raw = upload_dir / f"{file_id}.txt"
     md = upload_dir / f"{file_id}.md"
     js = upload_dir / f"{file_id}.json"
-    assert raw.is_file()
-    assert md.is_file()
+    assert not raw.exists()
+    assert not md.exists()
     assert js.is_file()
 
     meta = json.loads(js.read_text(encoding="utf-8"))
     # M5：JSON 不再存 markdown 全文
     assert "markdown" not in meta
-    # 但保留了 markdown_path
-    assert "markdown_path" in meta
-    assert Path(meta["markdown_path"]).name == f"{file_id}.md"
-    # .md 文件内容应包含转换结果（直接读取的文本文件）
-    md_text = md.read_text(encoding="utf-8")
-    assert "hello world" in md_text
+    assert meta["raw_path"].startswith("vault://")
+    assert meta["markdown_path"].startswith("vault://")
+    assert meta["text_preview"] == ""
+    thread_id, doc_id = meta["markdown_path"][len("vault://") :].split("/", 1)
+    encrypted_markdown = app.state.case_vault.retrieve(thread_id, doc_id)
+    assert encrypted_markdown is not None
+    assert "hello world" in encrypted_markdown.decode("utf-8")
+
+
+def test_upload_uses_encrypted_pending_vault_when_enabled(monkeypatch, tmp_path):
+    pytest.importorskip("fastapi.testclient")
+    from fastapi.testclient import TestClient
+
+    from lvyan.api import server
+    from lvyan.api.server import create_app
+    from lvyan.memory.case_vault import CaseVault
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    vault = CaseVault(base_dir=tmp_path / "vault")
+    monkeypatch.setattr(server, "_UPLOAD_DIR", upload_dir)
+    monkeypatch.delenv("AUTH_ENABLED", raising=False)
+    monkeypatch.setenv("CASE_VAULT_KEY", "a" * 64)
+    monkeypatch.setenv("CASE_VAULT_ALLOW_INSECURE", "false")
+
+    async def runner(*_args):
+        return "ok"
+
+    app = create_app(
+        runner=runner,
+        memory=None,
+        metadata_store=None,
+        case_vault=vault,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/upload",
+            files={"file": ("note.txt", "encrypted body".encode(), "text/plain")},
+        )
+    assert response.status_code == 200, response.text
+    file_id = response.json()["file_id"]
+    meta = json.loads((upload_dir / f"{file_id}.json").read_text(encoding="utf-8"))
+    assert meta["raw_path"].startswith("vault://")
+    assert meta["markdown_path"].startswith("vault://")
+    assert not (upload_dir / f"{file_id}.txt").exists()
+    assert not (upload_dir / f"{file_id}.md").exists()
+    thread_id, doc_id = meta["markdown_path"][len("vault://") :].split("/", 1)
+    assert b"encrypted body" in (vault.retrieve(thread_id, doc_id) or b"")
 
 
 # ---------------------------------------------------------------------------

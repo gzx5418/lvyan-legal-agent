@@ -302,11 +302,42 @@ curl -N http://localhost:8000/api/agent/stream/run-...
 | `DELETE` | `/api/agent/state/{thread_id}` | 删除会话 |
 | `GET` | `/api/agent/threads` | 列出当前用户会话 |
 | `POST` | `/api/upload` | 上传并转换证据文件 |
+| `GET/PATCH/DELETE` | `/api/preferences` | 读取、更新或重置回答风格与默认文书格式 |
 | `GET` | `/livez` | 进程存活检查 |
 | `GET` | `/readyz` | 数据库、元数据表和检索就绪检查 |
 | `GET` | `/api/health` | 综合健康状态 |
 
 完整交互式接口文档：启动服务后访问 [http://localhost:8000/docs](http://localhost:8000/docs)（生产模式禁用 `/docs` 以避免 API 结构泄露）。
+
+## MCP 工具服务
+
+安装项目后可通过标准输入输出启动同一套受边界约束的法律工具：
+
+```bash
+lvyan-mcp
+```
+
+服务提供法规检索、条文获取、效力核验、程序规则检索、上传文件提取、合同条款分析、时间线/期限/金额计算、证据清单和受限目录 DOCX 导出。文件工具只接受本应用生成的上传 ID，不能读取任意本地路径；导出只能写入配置的输出目录。
+
+当前尚未接入真实类案数据库。`search_cases` / `get_case_detail` 只返回仓库内明确标注的精编裁判规则，不应当被解释为真实裁判文书检索结果。
+
+## 法规版本数据治理
+
+法规 front matter 可通过 `knowledge/law_metadata_overrides.yaml` 进行人工复核覆盖。同步前运行：
+
+```bash
+python -m lvyan.scripts.sync_sources \
+  --baseline knowledge/version_quality_baseline.json \
+  --report version-quality-report.json
+```
+
+CI 会阻止未知状态、缺失生效日期、废止但无失效日期、缺失替代关系或官方来源的数量继续增加。现有历史缺口不会通过猜测日期补齐；只有经过官方来源核验后才能写入覆盖文件。发布方可在元数据全部合格后增加 `--strict` 作为零缺陷门禁。
+
+## 生产安全要求
+
+- 必须配置 64 位十六进制 `CASE_VAULT_KEY`；选入运行的附件会先写入 AES-256-GCM 案件空间，再启动状态图。
+- 必须配置模型网关，或明确启用本地真实模型；生产模式禁止哈希 embedding 和启发式 reranker 静默冒充真实模型。
+- `RLS_ENFORCED=true`、Redis 全局限流、PostgreSQL checkpoint 和可信身份认证均为生产启动硬门禁。
 
 ## 多实例部署说明
 

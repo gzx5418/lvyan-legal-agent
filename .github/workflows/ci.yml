@@ -134,9 +134,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run pipeline evaluation (前 3 条用例)
+      - name: Run full pipeline evaluation
         run: |
-          python tests/evals/pipeline_eval.py --limit 3 --json pipeline-report.json
+          python tests/evals/pipeline_eval.py --json pipeline-report.json
+
+      - name: Verify statute metadata does not regress
+        run: |
+          python -m lvyan.scripts.sync_sources \
+            --baseline knowledge/version_quality_baseline.json \
+            --report version-quality-report.json
 
       - name: Upload pipeline report
         if: always()
@@ -144,6 +150,14 @@ jobs:
         with:
           name: pipeline-report
           path: pipeline-report.json
+          retention-days: 30
+
+      - name: Upload statute metadata quality report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-quality-report
+          path: version-quality-report.json
           retention-days: 30
 
   # ---------------------------------------------------------------------------
@@ -248,3 +262,54 @@ jobs:
             echo "ERROR: 没有 PostgreSQL 集成测试被实际执行（全部 skip）"
             exit 1
           fi
+
+  external-services-integration:
+    name: Redis and OpenSearch Integration
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      opensearch:
+        image: opensearchproject/opensearch:2.19.1
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: "true"
+          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -fsS http://localhost:9200/_cluster/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PYTHONPATH: src
+      LVYAN_TEST_REDIS_URL: redis://localhost:6379/15
+      LVYAN_TEST_OPENSEARCH_URL: http://localhost:9200
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,production]"
+
+      - name: Run external service integration tests
+        run: |
+          python -m pytest tests/integration/test_external_services.py -v --tb=short -rA

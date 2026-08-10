@@ -232,9 +232,16 @@ def main() -> int:
         description="Agent pipeline 端到端回归评测（P1-4）",
     )
     parser.add_argument("--golden", default=str(DEFAULT_GOLDEN_PATH))
-    parser.add_argument("--limit", type=int, default=3)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="仅运行前 N 条；默认运行完整黄金集",
+    )
     parser.add_argument("--complexity", default="light", choices=["light", "deep", "document"])
     parser.add_argument("--json", default=None)
+    parser.add_argument("--min-statute-accuracy", type=float, default=0.80)
+    parser.add_argument("--max-fabrication-rate", type=float, default=0.20)
     args = parser.parse_args()
 
     print(f"[Pipeline] golden={args.golden} limit={args.limit}", file=sys.stderr)
@@ -252,8 +259,13 @@ def main() -> int:
         )
         print(f"\n[Pipeline] JSON 报告已写入: {args.json}", file=sys.stderr)
 
-    # pipeline 成功率 < 0.7 视为 CI 失败
-    return 0 if report.pipeline_success_rate >= 0.7 else 1
+    # 同时约束可执行性与法律质量，避免“管线不崩溃”掩盖引用退化。
+    passed = (
+        report.pipeline_success_rate >= 0.7
+        and report.avg_statute_accuracy >= args.min_statute_accuracy
+        and report.avg_fabrication_rate <= args.max_fabrication_rate
+    )
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

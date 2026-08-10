@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 from typing import Any
 
 from lvyan.config import settings
@@ -192,6 +193,17 @@ def embed_text(text: str) -> list[float]:
         real = _try_real_embedding(text)
         if real is not None:
             return real
+    allow_fallback = os.getenv("ALLOW_HASH_EMBEDDING_FALLBACK", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not allow_fallback:
+        raise RuntimeError(
+            "真实 Embedding 不可用，且 ALLOW_HASH_EMBEDDING_FALLBACK=false；"
+            "拒绝用伪向量生成法律检索结果"
+        )
     return _hash_embed(text)
 
 

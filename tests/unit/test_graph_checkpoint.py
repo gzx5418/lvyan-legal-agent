@@ -82,13 +82,13 @@ def test_build_graph_returns_compiled_graph():
 # ---------------------------------------------------------------------------
 # 2. 图包含全部 14 个节点
 # ---------------------------------------------------------------------------
-def test_graph_contains_all_twelve_nodes():
+def test_graph_contains_all_registered_nodes():
     g = build_graph()
     graph_nodes = set(g.get_graph().nodes.keys())
-    # 14 个业务节点全部注册
+    # 15 个业务节点全部注册（含正式接入的 evidence_analyzer）
     for name in NODE_NAMES:
         assert name in graph_nodes, f"节点 {name} 未注册到图中"
-    assert len(NODE_NAMES) == 14
+    assert len(NODE_NAMES) == 15
 
 
 # ---------------------------------------------------------------------------

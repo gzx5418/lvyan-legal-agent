@@ -143,6 +143,64 @@ def _detect_complexity(user_goal: str) -> str:
     return "light"
 
 
+def _try_llm_triage(user_goal: str, conversation_summary: str) -> dict[str, str | None] | None:
+    """LLM 语义分诊；输出必须落入封闭枚举，安全规则仍拥有最终优先级。"""
+    from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_registry import get_prompt
+    from lvyan.observability.metrics import record_llm_fallback
+
+    if not llm_available():
+        record_llm_fallback("jurisdiction_triage", "unavailable")
+        return None
+    spec = get_prompt("jurisdiction_triage")
+    try:
+        payload = chat_json(
+            messages=[
+                {"role": "system", "content": f"{spec.system}\nprompt_version={spec.version}"},
+                {
+                    "role": "user",
+                    "content": (
+                        f"当前问题：{user_goal}\n历史摘要：{conversation_summary[:2000]}\n"
+                        '输出 {"jurisdiction":"中国大陆|港澳台/涉外",'
+                        '"case_type":"工伤认定|劳动争议|合同纠纷|侵权纠纷|婚姻家庭|'
+                        '知识产权|其他|null","complexity":"light|deep|document",'
+                        '"risk_level":"low|medium|high"}'
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=300,
+        )
+    except Exception:  # noqa: BLE001 boundary-exception: LLM 降级边界
+        record_llm_fallback("jurisdiction_triage", "error")
+        return None
+    if not isinstance(payload, dict):
+        record_llm_fallback("jurisdiction_triage", "invalid_json")
+        return None
+    allowed_case_types = {*_CASE_TYPE_KEYWORDS, "其他"}
+    jurisdiction = payload.get("jurisdiction")
+    case_type = payload.get("case_type")
+    complexity = payload.get("complexity")
+    risk_level = payload.get("risk_level")
+    if jurisdiction not in {"中国大陆", "港澳台/涉外"}:
+        jurisdiction = None
+    if case_type not in allowed_case_types:
+        case_type = None
+    if complexity not in {"light", "deep", "document"}:
+        complexity = None
+    if risk_level not in {"low", "medium", "high"}:
+        risk_level = None
+    if not any((jurisdiction, case_type, complexity, risk_level)):
+        record_llm_fallback("jurisdiction_triage", "invalid_schema")
+        return None
+    return {
+        "jurisdiction": jurisdiction,
+        "case_type": None if case_type == "其他" else case_type,
+        "complexity": complexity,
+        "risk_level": risk_level,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 节点函数
 # ---------------------------------------------------------------------------
@@ -158,8 +216,9 @@ def jurisdiction_triage(state: CaseState) -> dict[str, Any]:
         - ``risk_level``: low / medium / high
         - ``missing_facts``: 涉外案件追加非阻断风险提示
     """
-    # 当前使用关键词规则做分流判断；可接入 LLM 做语义级增强
     user_goal = _get(state, "user_goal", "") or ""
+    conversation_summary = str(_get(state, "conversation_summary", "") or "")
+    llm_triage = _try_llm_triage(user_goal, conversation_summary)
 
     # --- 管辖判断 ---
     is_foreign = any(kw in user_goal for kw in _FOREIGN_KEYWORDS)
@@ -185,8 +244,10 @@ def jurisdiction_triage(state: CaseState) -> dict[str, Any]:
     # --- 案由识别 ---
     case_type = _detect_case_type(
         user_goal,
-        str(_get(state, "conversation_summary", "") or ""),
+        conversation_summary,
     )
+    if case_type is None and llm_triage is not None:
+        case_type = llm_triage.get("case_type")
 
     # --- 紧急期限与人身安全检测 ---
     has_urgency = any(kw in user_goal for kw in _URGENCY_KEYWORDS)
@@ -201,6 +262,19 @@ def jurisdiction_triage(state: CaseState) -> dict[str, Any]:
     # 回答形态只由当前问题意图决定；不采纳前端或调用方预先写入的模式，
     # 避免“选了深度”就把一句追问强制渲染为完整报告。
     complexity = _detect_complexity(user_goal)
+    # 规则明确识别 document/deep 时不得被 LLM 下调；规则仅 light 时允许语义升级。
+    if complexity == "light" and llm_triage is not None:
+        complexity = str(llm_triage.get("complexity") or complexity)
+
+    # 涉外、安全和期限规则是硬边界；仅在规则未发现风险时采纳 LLM 的保守升级。
+    if not is_foreign and llm_triage is not None:
+        if llm_triage.get("jurisdiction") == "港澳台/涉外":
+            jurisdiction = "港澳台/涉外"
+            risk_level = "high"
+        rank = {"low": 0, "medium": 1, "high": 2}
+        llm_risk = str(llm_triage.get("risk_level") or "low")
+        if rank.get(llm_risk, 0) > rank.get(risk_level, 0):
+            risk_level = llm_risk
 
     return {
         "jurisdiction": jurisdiction,

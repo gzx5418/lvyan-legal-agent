@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -113,6 +113,8 @@ class CaseState(BaseModel):
     conversation_summary: str = ""
     user_id: str = "anonymous"
     law_as_of_date: date | None = None
+    # 经 UserPreferences 白名单过滤后的长期偏好；不得放入案件材料或身份信息。
+    user_preferences: dict[str, Any] = {}
 
     # --- 案件元信息 ---
     jurisdiction: str | None = None  # 中国大陆/港澳台/涉外

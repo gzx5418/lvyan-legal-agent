@@ -1018,6 +1018,13 @@ def composer(state: CaseState) -> dict[str, Any]:
         - ``legal_answer``: dict | None（结构化输出初稿，由 finalizer 覆盖）
     """
     complexity = str(_get(state, "complexity", "light") or "light")
+    preferences = _get(state, "user_preferences", {}) or {}
+    response_style = str(_get(preferences, "response_style", "brief") or "brief")
+    # Preference controls presentation depth, not triage/retrieval/reasoning.
+    # A user asking for detailed answers receives the deep renderer even when
+    # the adaptive classifier selected a light analysis path.
+    if response_style == "detailed" and complexity == "light":
+        complexity = "deep"
     risk_level = str(_get(state, "risk_level", "low") or "low")
     citation_audit = _get(state, "citation_audit", None)
 

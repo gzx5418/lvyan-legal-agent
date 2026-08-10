@@ -184,7 +184,69 @@ def evidence_analyzer(state: CaseState) -> dict[str, Any]:
             )
         )
 
+    requirements = _llm_refine_evidence(requirements, facts)
     return {"evidence_requirements": requirements}
+
+
+def _llm_refine_evidence(
+    requirements: list[EvidenceRequirement], facts: list[Any]
+) -> list[EvidenceRequirement]:
+    """仅在既有清单内修正证据状态；任何未知 requirement_id 都会被丢弃。"""
+    from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_registry import get_prompt
+    from lvyan.observability.metrics import record_llm_fallback
+
+    if not requirements or not llm_available():
+        if requirements:
+            record_llm_fallback("evidence_analyzer", "unavailable")
+        return requirements
+    allowed = {item.requirement_id: item for item in requirements}
+    input_items = [item.model_dump(mode="json") for item in requirements]
+    fact_text = "；".join(str(_get(item, "content", "")) for item in facts[:30])
+    spec = get_prompt("evidence_analyzer")
+    try:
+        payload = chat_json(
+            messages=[
+                {"role": "system", "content": f"{spec.system}\nprompt_version={spec.version}"},
+                {
+                    "role": "user",
+                    "content": (
+                        f"已知事实和证据：{fact_text or '无'}\n证据清单：{input_items}\n"
+                        '输出 {"items":[{"requirement_id":"原ID",'
+                        '"current_status":"met|partial|missing","gap_description":"说明或null"}]}'
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=900,
+        )
+    except Exception:  # noqa: BLE001 boundary-exception: LLM 降级边界
+        record_llm_fallback("evidence_analyzer", "error")
+        return requirements
+    raw = payload.get("items", []) if isinstance(payload, dict) else []
+    if not isinstance(raw, list):
+        record_llm_fallback("evidence_analyzer", "invalid_schema")
+        return requirements
+    updates: dict[str, EvidenceRequirement] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        requirement_id = str(item.get("requirement_id", ""))
+        status = item.get("current_status")
+        if requirement_id not in allowed or status not in {"met", "partial", "missing"}:
+            continue
+        gap = item.get("gap_description")
+        updates[requirement_id] = allowed[requirement_id].model_copy(
+            update={
+                "current_status": status,
+                "gap_description": str(gap)[:500] if gap else None,
+            }
+        )
+    if not updates:
+        if raw:
+            record_llm_fallback("evidence_analyzer", "ungrounded_ids")
+        return requirements
+    return [updates.get(item.requirement_id, item) for item in requirements]
 
 
 # ---------------------------------------------------------------------------
@@ -406,8 +468,74 @@ def authority_resolver(state: CaseState) -> dict[str, Any]:
 
     # --- 效力层级排序 ---
     sorted_statutes = _sort_by_authority_level(deduped)
+    sorted_statutes = _llm_rank_authorities(sorted_statutes, str(_get(state, "user_goal", "")))
 
     return {
         "statutes": sorted_statutes,
         "conflicts": conflicts,
     }
+
+
+def _authority_key(authority: Authority) -> str:
+    source_id = str(_get(authority, "source_id", "") or "")
+    article = str(_get(authority, "article_number", "") or "")
+    return f"{source_id}#{article}" if article else source_id
+
+
+def _llm_rank_authorities(authorities: list[Authority], user_goal: str) -> list[Authority]:
+    """在确定性效力层级内重排候选，禁止 LLM 创建或跨层级提升来源。"""
+    from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_registry import get_prompt
+    from lvyan.observability.metrics import record_llm_fallback
+
+    if len(authorities) < 2 or not llm_available():
+        if len(authorities) >= 2:
+            record_llm_fallback("authority_resolver", "unavailable")
+        return authorities
+    candidates = [
+        {
+            "id": _authority_key(item),
+            "title": str(_get(item, "title", "")),
+            "article_number": str(_get(item, "article_number", "") or ""),
+            "authority_level": str(_get(item, "authority_level", "")),
+            "status": str(_get(item, "status", "unknown")),
+            "excerpt": str(_get(item, "article_text", ""))[:300],
+        }
+        for item in authorities[:40]
+    ]
+    allowed = {_authority_key(item): item for item in authorities}
+    spec = get_prompt("authority_resolver")
+    try:
+        payload = chat_json(
+            messages=[
+                {"role": "system", "content": f"{spec.system}\nprompt_version={spec.version}"},
+                {
+                    "role": "user",
+                    "content": f'用户问题：{user_goal}\n候选：{candidates}\n输出 {{"ordered_ids":["原ID"]}}',
+                },
+            ],
+            temperature=0.0,
+            max_tokens=700,
+        )
+    except Exception:  # noqa: BLE001 boundary-exception: LLM 降级边界
+        record_llm_fallback("authority_resolver", "error")
+        return authorities
+    ordered = payload.get("ordered_ids", []) if isinstance(payload, dict) else []
+    if not isinstance(ordered, list):
+        record_llm_fallback("authority_resolver", "invalid_schema")
+        return authorities
+    requested = [str(item) for item in ordered if str(item) in allowed]
+    if not requested:
+        record_llm_fallback("authority_resolver", "ungrounded_ids")
+        return authorities
+
+    # 只在相同 authority_level 内采用 LLM 顺序，防止下位法越过上位法。
+    rank = {key: index for index, key in enumerate(requested)}
+    original_rank = {_authority_key(item): index for index, item in enumerate(authorities)}
+    return sorted(
+        authorities,
+        key=lambda item: (
+            _level_weight(str(_get(item, "authority_level", ""))),
+            rank.get(_authority_key(item), len(rank) + original_rank[_authority_key(item)]),
+        ),
+    )

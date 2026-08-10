@@ -161,6 +161,26 @@ class DeleteResponse(BaseModel):
     thread_id: str
 
 
+class UserPreferenceResponse(BaseModel):
+    """允许跨会话保存的非敏感展示偏好。"""
+
+    response_style: Literal["brief", "detailed"] = "brief"
+    prefer_depth: Literal["light", "deep"] = "light"
+    preferred_doc_format: Literal["md", "docx"] = "md"
+    language: Literal["zh", "en"] = "zh"
+
+
+class UserPreferenceUpdate(BaseModel):
+    """偏好增量更新；未知字段被拒绝，避免误写案件材料。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    response_style: Literal["brief", "detailed"] | None = None
+    prefer_depth: Literal["light", "deep"] | None = None
+    preferred_doc_format: Literal["md", "docx"] | None = None
+    language: Literal["zh", "en"] | None = None
+
+
 class CaseCreateRequest(BaseModel):
     """创建一个受当前用户隔离的案件工作空间。"""
 
@@ -254,6 +274,8 @@ __all__ = [
     "ThreadSummary",
     "ThreadListResponse",
     "DeleteResponse",
+    "UserPreferenceResponse",
+    "UserPreferenceUpdate",
     "CaseCreateRequest",
     "EvidenceLinkRequest",
     "DocumentCreateRequest",

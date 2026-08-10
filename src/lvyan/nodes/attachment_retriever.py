@@ -30,6 +30,15 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
 def _load_markdown(stored_path: str) -> str:
     """从 stored_path 读取 markdown 正文；失败返回空串。"""
     try:
+        if stored_path.startswith("vault://"):
+            from lvyan.memory.case_vault import CaseVault
+
+            ref = stored_path[len("vault://") :]
+            thread_id, separator, doc_id = ref.partition("/")
+            if not separator or not thread_id or not doc_id:
+                return ""
+            payload = CaseVault().retrieve(thread_id, doc_id)
+            return payload.decode("utf-8") if payload is not None else ""
         p = Path(stored_path)
         if not p.is_file():
             return ""

@@ -157,6 +157,9 @@ class TestProductionConfigValidation:
         monkeypatch.setenv("RLS_ENFORCED", "true")
         monkeypatch.setenv("RATE_LIMIT_BACKEND", "redis")
         monkeypatch.setenv("REDIS_URL", "redis://localhost:6379")
+        monkeypatch.setenv("MODEL_GATEWAY_URL", "http://model-gateway:8080")
+        monkeypatch.setenv("ALLOW_HASH_EMBEDDING_FALLBACK", "false")
+        monkeypatch.setenv("ALLOW_HEURISTIC_RERANKER_FALLBACK", "false")
 
     def test_production_rls_not_enforced_fails(self, monkeypatch):
         """生产模式 + RLS_ENFORCED=false → 启动失败。"""
@@ -183,6 +186,22 @@ class TestProductionConfigValidation:
         from lvyan.config import validate_runtime_config
 
         with pytest.raises(RuntimeError, match="REDIS_URL"):
+            validate_runtime_config()
+
+    def test_production_hash_embedding_fallback_fails(self, monkeypatch):
+        monkeypatch.setenv("ALLOW_HASH_EMBEDDING_FALLBACK", "true")
+
+        from lvyan.config import validate_runtime_config
+
+        with pytest.raises(RuntimeError, match="ALLOW_HASH_EMBEDDING_FALLBACK"):
+            validate_runtime_config()
+
+    def test_production_heuristic_reranker_fallback_fails(self, monkeypatch):
+        monkeypatch.setenv("ALLOW_HEURISTIC_RERANKER_FALLBACK", "true")
+
+        from lvyan.config import validate_runtime_config
+
+        with pytest.raises(RuntimeError, match="ALLOW_HEURISTIC_RERANKER_FALLBACK"):
             validate_runtime_config()
 
     def test_production_all_valid_passes(self, monkeypatch):

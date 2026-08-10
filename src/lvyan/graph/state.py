@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import operator
 from datetime import date
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from lvyan.schemas.authority import Authority
 from lvyan.schemas.case import (
@@ -201,6 +201,12 @@ class GraphState(TypedDict):
     # 多轮记忆：本 thread 此前若干轮的紧凑摘要（覆盖语义）。
     # 由 default_runner 在 run 开始时写入；LLM 节点据此理解追问上下文。
     conversation_summary: str
+    # 当前租户和历史法律适用时间点。此前 CaseState 已包含这两个字段，
+    # GraphState 漏列后依赖 TypedDict 的静态检查和状态文档会与运行时不一致。
+    user_id: str
+    law_as_of_date: date | None
+    # 长期记忆只允许保存展示偏好，不保存案件事实或原始材料。
+    user_preferences: dict[str, Any]
 
     # --- 案件元信息（覆盖） ---
     jurisdiction: str | None

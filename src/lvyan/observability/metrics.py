@@ -73,6 +73,11 @@ if _PROM_AVAILABLE:
         "LLM token 使用量",
         labelnames=["model", "direction"],
     )
+    NODE_LLM_FALLBACK = Counter(
+        "lvyan_llm_fallback_total",
+        "节点 LLM 不可用或输出无效后降级到确定性规则的次数",
+        labelnames=["node", "reason"],
+    )
 
     # 检索
     RETRIEVAL_DURATION = Histogram(
@@ -166,6 +171,13 @@ def record_token_usage(model: str, input_tokens: int, output_tokens: int) -> Non
         return
     LLM_TOKEN_USAGE.labels(model=model, direction="input").inc(input_tokens)
     LLM_TOKEN_USAGE.labels(model=model, direction="output").inc(output_tokens)
+
+
+def record_llm_fallback(node: str, reason: str) -> None:
+    """记录节点级降级；Prometheus 未安装时保持 no-op。"""
+    if not _PROM_AVAILABLE:
+        return
+    NODE_LLM_FALLBACK.labels(node=node, reason=reason[:48] or "unknown").inc()
 
 
 # ---------------------------------------------------------------------------

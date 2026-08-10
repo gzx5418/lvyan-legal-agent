@@ -14,7 +14,7 @@ import logging
 import re
 from typing import Any
 
-from lvyan.schemas import CaseState, PlanStep, RetrievalQuery
+from lvyan.schemas import CaseState, MissingFact, PlanStep, RetrievalQuery
 
 # 复用 triage 的案由识别与 fact_extractor 的缺失事实评估
 from lvyan.nodes.fact_extractor import _assess_missing_facts, _get, _short_id
@@ -125,9 +125,9 @@ def missing_fact_assessor(state: CaseState) -> dict[str, Any]:
     路由逻辑在 :mod:`lvyan.graph.routing` 的 :func:`route_after_missing_fact`
     中实现，本节点只需确保 ``missing_facts`` 正确传递/补充。
     """
-    # 当前使用规则引擎做缺失事实评估；可接入 LLM 做语义级增强
     missing_facts = _get(state, "missing_facts", []) or []
-    # 已有缺失事实评估时不重复追加，避免 missing_facts 列表出现重复项
+    # Fact extractor 已完成一轮缺口评估时不再重复生成。重复执行会覆盖或
+    # 累加同义问题；是否阻断由路由层读取 ``is_blocking`` 决定。
     if missing_facts:
         return {}
 
@@ -147,6 +147,16 @@ def missing_fact_assessor(state: CaseState) -> dict[str, Any]:
 
     existing_facts = _get(state, "facts", []) or []
     new_missing = _assess_missing_facts(case_type, existing_facts)
+    llm_missing = _try_llm_missing_facts(
+        user_goal=user_goal,
+        case_type=case_type,
+        facts=existing_facts,
+    )
+    existing_keys = {str(_get(item, "fact_key", "")) for item in [*missing_facts, *new_missing]}
+    for item in llm_missing:
+        if item.fact_key not in existing_keys:
+            new_missing.append(item)
+            existing_keys.add(item.fact_key)
 
     if not new_missing:
         return {}
@@ -155,6 +165,67 @@ def missing_fact_assessor(state: CaseState) -> dict[str, Any]:
     if case_type_changed:
         update["case_type"] = case_type
     return update
+
+
+def _try_llm_missing_facts(
+    *, user_goal: str, case_type: str, facts: list[Any]
+) -> list[MissingFact]:
+    """从语义层识别规则模板遗漏的决定性事实，失败时返回空列表。"""
+    from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_registry import get_prompt
+    from lvyan.observability.metrics import record_llm_fallback
+
+    if not llm_available():
+        record_llm_fallback("missing_fact_assessor", "unavailable")
+        return []
+    fact_text = "；".join(str(_get(item, "content", "")) for item in facts[:20])
+    spec = get_prompt("missing_fact_assessor")
+    try:
+        payload = chat_json(
+            messages=[
+                {"role": "system", "content": f"{spec.system}\nprompt_version={spec.version}"},
+                {
+                    "role": "user",
+                    "content": (
+                        f"案由：{case_type}\n问题：{user_goal}\n已确认事实：{fact_text or '无'}\n"
+                        '输出 {"missing_facts":[{"fact_key":"英文或拼音稳定键",'
+                        '"question":"向用户提出的单一问题","reason":"为何影响结论",'
+                        '"is_blocking":true|false}]}，最多 5 项。'
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=700,
+        )
+    except Exception:  # noqa: BLE001 boundary-exception: LLM 降级边界
+        record_llm_fallback("missing_fact_assessor", "error")
+        return []
+    raw = payload.get("missing_facts", []) if isinstance(payload, dict) else []
+    if not isinstance(raw, list):
+        record_llm_fallback("missing_fact_assessor", "invalid_schema")
+        return []
+    result: list[MissingFact] = []
+    for index, item in enumerate(raw[:5]):
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        key = re.sub(r"[^A-Za-z0-9_-]", "_", str(item.get("fact_key", "")))[:64]
+        if not key:
+            key = f"llm_missing_{index + 1}"
+        if not question or not reason:
+            continue
+        result.append(
+            MissingFact(
+                fact_key=key,
+                question=question[:300],
+                reason=reason[:500],
+                is_blocking=bool(item.get("is_blocking", False)),
+            )
+        )
+    if not result and raw:
+        record_llm_fallback("missing_fact_assessor", "invalid_items")
+    return result
 
 
 def _try_llm_plan(

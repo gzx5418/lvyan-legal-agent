@@ -313,6 +313,7 @@ class RunManager:
         law_as_of_date: date | None = None,
         attachments: list[str] | None = None,
         attachment_refs: list[dict] | None = None,
+        user_preferences: dict[str, Any] | None = None,
         display_query: str | None = None,
     ) -> RunContext:
         """创建并异步启动一次 Agent 运行。"""
@@ -338,6 +339,7 @@ class RunManager:
                 user_id=user_id,
                 law_as_of_date=law_as_of_date,
                 attachment_refs=attachment_refs,
+                user_preferences=user_preferences,
                 load_history=self._make_history_loader(resolved_thread_id, user_id),
             )
         )
@@ -1296,6 +1298,7 @@ async def default_runner(query: str, thread_id: str, complexity: str, ctx: RunCo
             law_as_of_date=ctx.law_as_of_date,
             uploaded_documents=uploaded_docs,
             conversation_summary=conversation_summary,
+            user_preferences=ctx.user_preferences,
         )
         final_output = ""
         last_state: dict[str, Any] = {}

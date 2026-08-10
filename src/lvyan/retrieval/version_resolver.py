@@ -21,15 +21,17 @@ effective_date / status / official_urls / content_hash 等关键元数据，并�
 from __future__ import annotations
 
 import hashlib
+import os
 from collections import Counter, defaultdict
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
 
-from lvyan.config import settings
+from lvyan.config import AGENT_DIR, settings
 
 # ---------------------------------------------------------------------------
 # 类型与常量
@@ -109,10 +111,75 @@ def _parse_date(value: Any) -> date | None:
     return None
 
 
+@lru_cache(maxsize=1)
+def _metadata_overrides() -> dict[str, dict[str, Any]]:
+    """读取人工核验后的元数据覆盖表。
+
+    覆盖表必须按 ``source_id`` 定位，且只允许法律版本字段；它用于录入可追溯的
+    官方核验结果，不会根据标题或日期猜测缺失信息。
+    """
+    default_path = AGENT_DIR / "knowledge" / "law_metadata_overrides.yaml"
+    path = Path(os.getenv("LAW_METADATA_OVERRIDES", str(default_path)))
+    if not path.is_file():
+        return {}
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    records = raw.get("overrides", raw) if isinstance(raw, dict) else {}
+    if not isinstance(records, dict):
+        raise ValueError("法规元数据覆盖表必须是 source_id -> fields 映射")
+    allowed = {
+        "publication_date",
+        "effective_date",
+        "expiry_date",
+        "superseded_by",
+        "status",
+        "official_urls",
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for source_id, fields in records.items():
+        if not isinstance(source_id, str) or not isinstance(fields, dict):
+            continue
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"{source_id} 含不允许的覆盖字段: {sorted(unknown)}")
+        result[source_id] = dict(fields)
+    return result
+
+
+def _apply_metadata_override(metadata: LawMetadata) -> LawMetadata:
+    override = _metadata_overrides().get(metadata.source_id)
+    if not override:
+        return metadata
+    update: dict[str, Any] = {}
+    for field in ("publication_date", "effective_date", "expiry_date"):
+        if field in override:
+            parsed = _parse_date(override[field])
+            if parsed is None and override[field] not in (None, ""):
+                raise ValueError(f"{metadata.source_id}.{field} 不是有效日期")
+            update[field] = parsed
+    if "status" in override:
+        status = _map_status(override["status"])
+        if status == "unknown" and str(override["status"]).strip().lower() != "unknown":
+            raise ValueError(f"{metadata.source_id}.status 非法")
+        update["status"] = status
+    if "superseded_by" in override:
+        value = override["superseded_by"]
+        update["superseded_by"] = str(value) if value else None
+    if "official_urls" in override:
+        update["official_urls"] = _as_str_list(override["official_urls"])
+    expiry = update.get("expiry_date", metadata.expiry_date)
+    effective = update.get("effective_date", metadata.effective_date)
+    if expiry is not None and effective is not None and expiry <= effective:
+        raise ValueError(f"{metadata.source_id} 的 expiry_date 必须晚于 effective_date")
+    return metadata.model_copy(update=update)
+
+
 def _map_status(raw: Any) -> AuthorityStatus:
-    """中文状态值映射到 AuthorityStatus。"""
+    """中文或规范英文状态值映射到 AuthorityStatus。"""
     if isinstance(raw, str):
-        return _STATUS_MAP.get(raw.strip(), "unknown")
+        normalized = raw.strip()
+        if normalized in {"effective", "repealed", "not_yet_effective", "unknown"}:
+            return normalized  # type: ignore[return-value]
+        return _STATUS_MAP.get(normalized, "unknown")
     return "unknown"
 
 
@@ -201,7 +268,7 @@ def parse_law_metadata(filepath: Path) -> LawMetadata:
     # P0-1：expiry_date 优先取自身字段，缺失时回退到 repeal_date
     expiry_raw = _get("expiry_date", _get("repeal_date"))
 
-    return LawMetadata(
+    metadata = LawMetadata(
         source_id=source_id,
         title=title,
         link_title=link_title,
@@ -217,6 +284,7 @@ def parse_law_metadata(filepath: Path) -> LawMetadata:
         raw_filepath=str(filepath),
         content_hash=compute_content_hash(body_text),
     )
+    return _apply_metadata_override(metadata)
 
 
 # ---------------------------------------------------------------------------

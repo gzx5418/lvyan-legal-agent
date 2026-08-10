@@ -126,6 +126,8 @@ const els = {
   settingsClose: $('settings-close'),
   settingsDensity: $('settings-density'),
   settingsReduceMotion: $('settings-reduce-motion'),
+  settingsResponseStyle: $('settings-response-style'),
+  settingsDocFormat: $('settings-doc-format'),
   settingsHealthDot: $('settings-health-dot'),
   settingsHealthTitle: $('settings-health-title'),
   settingsHealthDetail: $('settings-health-detail'),
@@ -224,6 +226,8 @@ function init() {
     persistUiPreferences();
     applyUiPreferences();
   });
+  els.settingsResponseStyle.addEventListener('change', saveServerPreferences);
+  els.settingsDocFormat.addEventListener('change', saveServerPreferences);
   els.settingsRefreshHealth.addEventListener('click', refreshSettingsHealth);
   els.settingsClearLocal.addEventListener('click', clearLocalHistoryCache);
   els.workspaceBtn.addEventListener('click', openWorkspace);
@@ -380,7 +384,37 @@ function openSettings() {
   showSettingsPanel('general');
   updateSettingsHistoryCount();
   refreshSettingsHealth();
+  loadServerPreferences();
   els.settingsClose.focus();
+}
+
+async function loadServerPreferences() {
+  try {
+    const resp = await apiFetch('/api/preferences');
+    if (!resp.ok) throw new Error(await responseError(resp, '读取偏好失败'));
+    const pref = await resp.json();
+    els.settingsResponseStyle.value = pref.response_style || 'brief';
+    els.settingsDocFormat.value = pref.preferred_doc_format || 'md';
+  } catch (error) {
+    showToast(`无法读取服务端偏好：${error.message}`, 'warning');
+  }
+}
+
+async function saveServerPreferences() {
+  try {
+    const resp = await apiFetch('/api/preferences', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        response_style: els.settingsResponseStyle.value,
+        preferred_doc_format: els.settingsDocFormat.value,
+      }),
+    });
+    if (!resp.ok) throw new Error(await responseError(resp, '保存偏好失败'));
+    showToast('偏好已保存');
+  } catch (error) {
+    showToast(`无法保存偏好：${error.message}`, 'error');
+  }
 }
 
 function closeSettings() {

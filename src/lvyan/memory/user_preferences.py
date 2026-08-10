@@ -174,6 +174,18 @@ class UserPreferences:
         pref = UserPreference.model_validate(merged)
         self._write(user_id, pref)
 
+    def delete(self, user_id: str) -> bool:
+        """删除用户长期偏好；不存在时返回 ``False``。
+
+        删除后下一次 :meth:`get` 会重新创建不含任何用户数据的默认偏好。
+        """
+        path = self._path_of(user_id)
+        with _LOCK:
+            if not path.exists():
+                return False
+            path.unlink()
+            return True
+
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------

@@ -417,6 +417,35 @@ def verify_statute_status(source_id: str, as_of: str | None = None) -> StatuteSt
     )
 
 
+def search_procedure_rules(
+    query: str,
+    *,
+    as_of: str | None = None,
+    top_k: int = 10,
+) -> StatuteSearchResult:
+    """检索诉讼、仲裁、管辖、时效和执行等程序规则。
+
+    在统一条文索引中增加程序法语义限定，返回模型与 ``search_statutes`` 一致，
+    以便 Graph、API 与 MCP 复用同一套版本过滤和引用字段。
+    """
+    normalized = query.strip()
+    if not normalized:
+        return StatuteSearchResult(
+            tool_name="search_procedure_rules",
+            success=False,
+            error="查询不能为空",
+            query=query,
+            total=0,
+            results=[],
+        )
+    result = search_statutes(
+        f"{normalized} 诉讼程序 仲裁 管辖 时效 执行",
+        as_of=as_of,
+        top_k=top_k,
+    )
+    return result.model_copy(update={"tool_name": "search_procedure_rules", "query": query})
+
+
 __all__ = [
     "StatuteHit",
     "StatuteSearchResult",

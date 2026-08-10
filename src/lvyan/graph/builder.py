@@ -75,7 +75,7 @@ from lvyan.config import settings
 from lvyan.nodes.citation_verifier import citation_verifier
 from lvyan.nodes.composer import composer
 from lvyan.nodes.critic import critic
-from lvyan.nodes.evidence_analyzer import authority_resolver
+from lvyan.nodes.evidence_analyzer import authority_resolver, evidence_analyzer
 from lvyan.nodes.fact_extractor import fact_extractor
 from lvyan.nodes.legal_answer_finalizer import legal_answer_finalizer
 from lvyan.nodes.legal_reasoner import legal_reasoner
@@ -102,7 +102,7 @@ __all__ = [
     "PersistenceUnavailable",
 ]
 
-# 14 个节点名（注册顺序 = 主链顺序，不含 START/END）
+# 15 个节点名（注册顺序 = 主链顺序，不含 START/END）
 NODE_NAMES: tuple[str, ...] = (
     "preflight",
     "attachment_retriever",
@@ -112,17 +112,18 @@ NODE_NAMES: tuple[str, ...] = (
     "planner",
     "parallel_retrieval",
     "authority_resolver",
+    "evidence_analyzer",
     "legal_reasoner",
     "critic",
-    "citation_verifier",
     "composer",
+    "citation_verifier",
     "output_guardrail",
     "legal_answer_finalizer",
 )
 
 
 def _register_nodes(graph: StateGraph) -> None:
-    """向 StateGraph 注册全部 14 个节点。"""
+    """向 StateGraph 注册全部 15 个节点。"""
     graph.add_node("preflight", preflight)
     graph.add_node("attachment_retriever", attachment_retriever)
     graph.add_node("jurisdiction_triage", jurisdiction_triage)
@@ -131,6 +132,7 @@ def _register_nodes(graph: StateGraph) -> None:
     graph.add_node("planner", planner)
     graph.add_node("parallel_retrieval", parallel_retrieval)
     graph.add_node("authority_resolver", authority_resolver)
+    graph.add_node("evidence_analyzer", evidence_analyzer)
     graph.add_node("legal_reasoner", legal_reasoner)
     graph.add_node("critic", critic)
     graph.add_node("citation_verifier", citation_verifier)
@@ -168,10 +170,12 @@ def _wire_edges(graph: StateGraph) -> None:
         {"ask_user": END, "continue": "planner"},
     )
 
-    # planner → parallel_retrieval → authority_resolver → legal_reasoner → critic
+    # planner → parallel_retrieval → authority_resolver → evidence_analyzer
+    # → legal_reasoner → critic
     graph.add_edge("planner", "parallel_retrieval")
     graph.add_edge("parallel_retrieval", "authority_resolver")
-    graph.add_edge("authority_resolver", "legal_reasoner")
+    graph.add_edge("authority_resolver", "evidence_analyzer")
+    graph.add_edge("evidence_analyzer", "legal_reasoner")
     graph.add_edge("legal_reasoner", "critic")
 
     # P1-9b：Critic 评审后 → composer（先组装初稿）或回退 legal_reasoner

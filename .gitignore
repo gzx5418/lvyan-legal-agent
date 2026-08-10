@@ -61,6 +61,8 @@ data/thread_index.json
 knowledge/manifests/*.pkl
 knowledge/manifests/*.json
 knowledge/manifests/*.lvix
+knowledge/manifests/user_prefs/
+knowledge/manifests/vault/
 
 # 输出产物（运行时生成）
 outputs/

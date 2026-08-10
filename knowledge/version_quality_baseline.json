@@ -1,0 +1,11 @@
+{
+  "total": 2445,
+  "unknown_status": 656,
+  "missing_effective_date": 574,
+  "repealed_without_expiry": 249,
+  "superseded_without_relation": 13,
+  "missing_official_source": 5,
+  "unknown_ratio": 0.268303,
+  "ready": false,
+  "note": "2026-08-10 审计基线；仅用于防止质量倒退，不能替代官方元数据补录。"
+}

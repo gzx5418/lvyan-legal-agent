@@ -27,7 +27,12 @@ dependencies = [
     "langfuse",                        # 可观测性
     "opentelemetry-api",               # 追踪 API
     "opentelemetry-sdk",               # 追踪 SDK
+    "mcp>=1.10,<2.0",                  # 标准法律工具 MCP Server
 ]
+
+[project.scripts]
+lvyan = "lvyan.cli:main"
+lvyan-mcp = "lvyan.mcp_server:main"
 
 [project.optional-dependencies]
 dev = [
