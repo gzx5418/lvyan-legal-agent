@@ -249,6 +249,36 @@ def test_check_cost_budget_exceeded(monkeypatch: pytest.MonkeyPatch):
     assert check_cost_budget(_state_for_policies(iteration=3)) is False
 
 
+def test_check_cost_budget_uses_real_cost_when_thread_exists(monkeypatch):
+    """P0-10：有 thread_id 且 CostTracker 已有真实成本时，优先用真实成本。"""
+    from lvyan.observability import tracing
+
+    monkeypatch.setattr(settings, "max_cost_budget_usd", 1.0)
+    tracing.set_cost_thread("budget-thread")
+    try:
+        # 真实成本 2.5 USD > 预算 1.0 → 即使 iteration 很小也应判定超支
+        tracing._global_cost_tracker.add("budget-thread", 1_000_000, 0, 2.5)
+        state = _state_for_policies(iteration=1)
+        state["thread_id"] = "budget-thread"
+        assert check_cost_budget(state) is False, "真实成本超支应判 False"
+
+        # 真实成本 0.5 USD <= 预算 1.0 → 即使 iteration 估算超支也应放行
+        tracing._global_cost_tracker.reset("budget-thread")
+        tracing._global_cost_tracker.add("budget-thread", 100_000, 0, 0.5)
+        assert check_cost_budget(state) is True, "真实成本在预算内应判 True"
+    finally:
+        tracing.set_cost_thread(None)
+        tracing._global_cost_tracker.reset("budget-thread")
+
+
+def test_check_cost_budget_fallback_when_no_real_cost(monkeypatch):
+    """P0-10：有 thread_id 但尚无成本记录时回退到占位估算。"""
+    monkeypatch.setattr(settings, "max_cost_budget_usd", 1.0)
+    state = _state_for_policies(iteration=3)
+    state["thread_id"] = "unknown-thread"
+    assert check_cost_budget(state) is False, "无真实成本记录应回退占位估算"
+
+
 # ---------------------------------------------------------------------------
 # 4-7. enforce_policies
 # ---------------------------------------------------------------------------

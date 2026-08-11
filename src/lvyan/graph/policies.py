@@ -6,9 +6,9 @@
 
 成本估算说明
 ------------
-当前无真实成本追踪，``check_cost_budget`` 用 ``state.iteration * 0.5`` 作为
-占位估算（每次迭代约 0.5 USD）。待接入模型网关的 token 计费后，应替换为
-真实累计成本字段。
+P0-10 后：``check_cost_budget`` 优先读取 CostTracker 中该 thread 的真实累计
+成本（LLM 成功调用的 token 用量按单价表折算 USD）；无 thread_id 或尚无成本
+记录时回退到 ``iteration * 0.5`` 占位估算。
 """
 
 from __future__ import annotations
@@ -61,9 +61,21 @@ def check_retrieval_budget(state: Any) -> bool:
 def check_cost_budget(state: Any) -> bool:
     """检查累计成本是否超出预算。
 
-    用 ``state.iteration * 0.5`` 估算成本（占位）。返回 ``True`` 表示在预算内，
-    ``False`` 表示超支。真实成本追踪接入后应替换此估算。
+    P0-10：优先使用 CostTracker 中该 thread 的真实累计成本（LLM 成功调用
+    的 token 用量按单价表折算 USD）；无 ``thread_id`` 或尚无成本记录时回退
+    到按迭代次数的占位估算（``iteration * 0.5``）。返回 ``True`` 表示在
+    预算内，``False`` 表示超支。
     """
+    thread_id = _get(state, "thread_id", None)
+    if thread_id:
+        try:
+            from lvyan.observability.tracing import get_cost_summary
+
+            real_cost = get_cost_summary(thread_id).total_cost
+            if real_cost > 0:
+                return real_cost <= settings.max_cost_budget_usd
+        except Exception:  # noqa: BLE001 - 成本读取失败回退占位估算
+            pass
     iteration = _get(state, "iteration", 0)
     estimated_cost = iteration * 0.5
     return estimated_cost <= settings.max_cost_budget_usd

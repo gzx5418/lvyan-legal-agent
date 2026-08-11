@@ -433,6 +433,25 @@ def _legacy_request(
             response.raise_for_status()
             data = response.json()
         content = data["choices"][0]["message"]["content"]
+        # P0-10：生产节点实际走同步兼容路径（chat_json/chat_structured），
+        # 成功调用同样记录 token 用量与成本到 CostTracker，与 ainvoke 一致。
+        usage = data.get("usage") or {}
+        tokens_in = int(usage.get("prompt_tokens", 0) or 0)
+        tokens_out = int(usage.get("completion_tokens", 0) or 0)
+        if tokens_in or tokens_out:
+            try:
+                from lvyan.observability.tracing import record_llm_call
+
+                record_llm_call(
+                    model=used_model,
+                    prompt="",
+                    response="",
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    cost=_estimate_cost_usd(used_model, tokens_in, tokens_out),
+                )
+            except Exception:  # noqa: BLE001 - 成本上报不影响主链
+                _logger.debug("CostTracker 上报失败（已忽略）", exc_info=True)
         return content.strip() if isinstance(content, str) and content.strip() else None
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         _logger.debug("兼容 LLM 调用失败 (model=%s): %s", used_model, exc)
