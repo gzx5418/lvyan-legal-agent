@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -54,7 +54,7 @@ from .models import (
 _logger = logging.getLogger("lvyan.api.routes_workspace")
 
 
-def _workspace_missing() -> None:
+def _workspace_missing() -> NoReturn:
     """资源不存在与无权访问使用同一响应，避免跨租户枚举。"""
     raise HTTPException(status_code=404, detail="资源不存在")
 

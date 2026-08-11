@@ -317,13 +317,12 @@ def dense_search_bge_m3(
 
     通过 settings.embedding_model 配置切换到 BGE-M3；当前复用 dense_search 通道。
     """
-    # 临时切换 embedding_model
+    # 临时切换 embedding_model 到 BGE-M3
     original = settings.embedding_model
     try:
-        # 直接复用 dense_search 流程；真实接入后这里改为加载 BGE-M3
+        settings.embedding_model = "BAAI/bge-m3"
         return dense_search(query=query, top_k=top_k, chunks=chunks)
     finally:
-        # settings 是 BaseModel 实例，复原不影响
         settings.embedding_model = original
 
 

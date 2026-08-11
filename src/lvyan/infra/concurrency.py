@@ -102,11 +102,24 @@ class InstrumentedSemaphore:
 
     async def __aenter__(self) -> "InstrumentedSemaphore":
         self._waiting += 1
+        start = time.perf_counter()
         try:
             await self._semaphore.acquire()
         finally:
             self._waiting -= 1
+
+        wait_time = time.perf_counter() - start
         self._active += 1
+
+        if wait_time > 1.0:
+            _logger.warning(
+                "%s 信号量等待 %.2fs (active=%d/%d, waiting=%d)",
+                self._name,
+                wait_time,
+                self._active,
+                self._limit,
+                self._waiting,
+            )
         return self
 
     async def __aexit__(self, *args: object) -> None:
@@ -139,6 +152,47 @@ def get_retrieval_semaphore() -> InstrumentedSemaphore:
     return _retrieval_sem
 
 
-# 便捷别名
-llm_semaphore = get_llm_semaphore
-retrieval_semaphore = get_retrieval_semaphore
+class _LazySemaphoreProxy:
+    """惰性代理：首次访问 __aenter__/__aexit__/acquire 时初始化真实信号量。
+
+    允许 ``async with llm_semaphore:`` 直接使用，而无需调用 getter 函数。
+    """
+
+    def __init__(self, factory: "type[object] | Any") -> None:
+        self._factory = factory
+        self._instance: InstrumentedSemaphore | None = None
+
+    def _get(self) -> InstrumentedSemaphore:
+        if self._instance is None:
+            self._instance = self._factory()
+        return self._instance
+
+    async def __aenter__(self) -> InstrumentedSemaphore:
+        return await self._get().__aenter__()
+
+    async def __aexit__(self, *args: object) -> None:
+        return await self._get().__aexit__(*args)
+
+    def acquire(self) -> "AsyncGenerator[None, None]":
+        return self._get().acquire()
+
+    @property
+    def active(self) -> int:
+        return self._get().active
+
+    @property
+    def waiting(self) -> int:
+        return self._get().waiting
+
+    @property
+    def limit(self) -> int:
+        return self._get().limit
+
+    @property
+    def available(self) -> int:
+        return self._get().available
+
+
+# 便捷别名：可直接用 ``async with llm_semaphore:`` 语法
+llm_semaphore = _LazySemaphoreProxy(get_llm_semaphore)
+retrieval_semaphore = _LazySemaphoreProxy(get_retrieval_semaphore)

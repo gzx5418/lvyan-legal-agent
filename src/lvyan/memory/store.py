@@ -137,7 +137,17 @@ class CaseMemory:
             json.dump(self._index, fh, ensure_ascii=False, indent=2)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, self._index_path)
+        # Windows 上 os.replace 在目标文件被占用时可能抛出 PermissionError，
+        # 添加重试以提高并发场景下的可靠性
+        import time
+        for attempt in range(5):
+            try:
+                os.replace(tmp, self._index_path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
     # ------------------------------------------------------------------
     # 公开 API：索引操作（线程安全，无图依赖）

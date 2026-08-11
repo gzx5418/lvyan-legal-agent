@@ -304,6 +304,7 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
         print(f"[lvyan.graph] psycopg 未安装（{exc}），回退到 MemorySaver")
         return build_graph()
 
+    conn = None
     try:
         from psycopg.rows import dict_row
 
@@ -317,6 +318,11 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
         saver = PostgresSaver(conn)
         saver.setup()
     except Exception as exc:  # noqa: BLE001
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
         if required:
             raise PersistenceUnavailable(
                 f"PostgreSQL 不可达（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
@@ -327,6 +333,11 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
     try:
         return _build_graph_with_checkpointer(saver)
     except Exception as exc:  # noqa: BLE001
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
         if required:
             raise PersistenceUnavailable(
                 f"PostgresSaver 初始化失败（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
@@ -368,6 +379,7 @@ async def build_graph_with_postgres_async(dsn: str | None = None) -> Any:
         print(f"[lvyan.graph] psycopg 未安装（{exc}），回退到 MemorySaver")
         return build_graph()
 
+    conn = None
     try:
         from psycopg.rows import dict_row
         from lvyan.db.tenant_saver import TenantAwareCheckpointer
@@ -382,6 +394,11 @@ async def build_graph_with_postgres_async(dsn: str | None = None) -> Any:
         saver = TenantAwareCheckpointer(AsyncPostgresSaver(conn))
         await saver.setup()
     except Exception as exc:  # noqa: BLE001
+        if conn is not None:
+            try:
+                await conn.close()
+            except Exception:  # noqa: BLE001
+                pass
         if required:
             raise PersistenceUnavailable(
                 f"PostgreSQL 不可达（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
@@ -392,6 +409,11 @@ async def build_graph_with_postgres_async(dsn: str | None = None) -> Any:
     try:
         return _build_graph_with_checkpointer(saver)
     except Exception as exc:  # noqa: BLE001
+        if conn is not None:
+            try:
+                await conn.close()
+            except Exception:  # noqa: BLE001
+                pass
         if required:
             raise PersistenceUnavailable(
                 f"AsyncPostgresSaver 初始化失败（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"

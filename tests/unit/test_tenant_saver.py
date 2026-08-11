@@ -9,8 +9,10 @@ class _FakeConn:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
 
-    async def execute(self, query: str, params: object = None) -> None:
-        self.calls.append((query, params))
+    async def execute(self, query: object, params: object = None) -> None:
+        # sql.Composed / sql.SQL 对象转为字符串以便测试断言
+        q = query.as_string(None) if hasattr(query, "as_string") else str(query)
+        self.calls.append((q, params))
 
 
 class _FakeSaver:
@@ -90,4 +92,4 @@ async def test_setup_installs_checkpoint_rls_when_enforced(monkeypatch):
     await TenantAwareCheckpointer(inner).setup()
 
     assert inner.setup_called is True
-    assert any("CREATE POLICY tenant_checkpoints" in query for query, _ in inner.conn.calls)
+    assert any("CREATE POLICY" in query and "tenant_checkpoints" in query for query, _ in inner.conn.calls)

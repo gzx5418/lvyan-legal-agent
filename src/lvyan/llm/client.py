@@ -456,16 +456,16 @@ def chat_structured(
                 "content": f"输出未通过 schema 校验：{exc}. 请只返回合法 JSON。",
             },
         ]
-    repaired = chat_json(
-        repair_messages,
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        timeout=timeout,
-    )
-    if repaired is None:
-        return None
-    try:
-        return response_model.model_validate(repaired)
-    except ValidationError:
-        return None
+        repaired = chat_json(
+            repair_messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+        )
+        if repaired is None:
+            return None
+        try:
+            return response_model.model_validate(repaired)
+        except ValidationError:
+            return None

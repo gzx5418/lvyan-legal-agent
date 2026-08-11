@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from psycopg import sql
+
 __all__ = ["ensure_checkpoint_rls"]
 
 
@@ -18,28 +20,31 @@ async def ensure_checkpoint_rls(conn: Any) -> None:
     成功后执行。缺少 ``agent_threads`` 或无法安装策略时让异常向上传播，避免
     ``RLS_ENFORCED=true`` 的生产实例静默以未隔离状态运行。
     """
-    for table in _CHECKPOINT_TABLES:
-        policy = f"tenant_{table}"
-        await conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
-        await conn.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
-        await conn.execute(f"DROP POLICY IF EXISTS {policy} ON {table}")
+    for table_name in _CHECKPOINT_TABLES:
+        table = sql.Identifier(table_name)
+        policy = sql.Identifier(f"tenant_{table_name}")
+        await conn.execute(sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(table))
+        await conn.execute(sql.SQL("ALTER TABLE {} FORCE ROW LEVEL SECURITY").format(table))
+        await conn.execute(sql.SQL("DROP POLICY IF EXISTS {} ON {}").format(policy, table))
         await conn.execute(
-            f"""
-            CREATE POLICY {policy} ON {table}
-            FOR ALL
-            USING (
-                EXISTS (
-                    SELECT 1 FROM agent_threads
-                    WHERE agent_threads.thread_id = {table}.thread_id
-                      AND agent_threads.user_id = current_setting('app.user_id', true)
+            sql.SQL(
+                """
+                CREATE POLICY {} ON {}
+                FOR ALL
+                USING (
+                    EXISTS (
+                        SELECT 1 FROM agent_threads
+                        WHERE agent_threads.thread_id = {}.thread_id
+                          AND agent_threads.user_id = current_setting('app.user_id', true)
+                    )
                 )
-            )
-            WITH CHECK (
-                EXISTS (
-                    SELECT 1 FROM agent_threads
-                    WHERE agent_threads.thread_id = {table}.thread_id
-                      AND agent_threads.user_id = current_setting('app.user_id', true)
+                WITH CHECK (
+                    EXISTS (
+                        SELECT 1 FROM agent_threads
+                        WHERE agent_threads.thread_id = {}.thread_id
+                          AND agent_threads.user_id = current_setting('app.user_id', true)
+                    )
                 )
-            )
-            """
+                """
+            ).format(policy, table, table, table)
         )

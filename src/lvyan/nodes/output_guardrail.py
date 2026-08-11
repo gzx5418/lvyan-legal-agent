@@ -39,6 +39,7 @@ from langgraph.types import interrupt
 from lvyan.config import settings
 from lvyan.schemas import CaseState
 from lvyan.validators.output import (
+    NUMERIC_PROBABILITY_PATTERNS,
     STANDARD_RISK_DISCLAIMER,
     OutputValidationResult,
     validate_output,
@@ -73,14 +74,8 @@ _IRREVERSIBLE_OPERATIONS: tuple[tuple[str, str], ...] = (
     ("代为签署", "代为签署"),
 )
 
-# 数字概率移除模式（与 validators.output 一致）
-_NUMERIC_PROBABILITY_RES = tuple(
-    (
-        re.compile(r"\d+(?:\.\d+)?\s*[%％]"),
-        re.compile(r"\d+(?:\.\d+)?\s*(?:概率|胜诉率|胜率|胜诉概率)"),
-        re.compile(r"(?:概率|胜诉率|胜率|胜诉概率)\s*[:：]?\s*\d+(?:\.\d+)?"),
-    )
-)
+# 数字概率移除模式——统一从 validators.output 导入，避免重复定义不同步
+_NUMERIC_PROBABILITY_RES = NUMERIC_PROBABILITY_PATTERNS
 
 # 引用行移除模式：匹配以「- 《...》第...条」或「《...》第...条」开头的行
 _CITATION_LINE_RE = re.compile(
@@ -274,7 +269,7 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
                 notes.append("用户已拒绝不可逆操作，原分析正文已保留")
                 pending_human_approval["status"] = "rejected"
                 # 直接进入最终输出阶段（跳过下面的「待确认」拼接）
-                pending_human_approval = pending_human_approval  # noqa: B018
+                pass
 
             elif action == "edit":
                 if not edited_output:

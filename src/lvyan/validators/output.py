@@ -30,6 +30,7 @@ __all__ = [
     "ValidationErrorType",
     "OutputValidationResult",
     "validate_output",
+    "NUMERIC_PROBABILITY_PATTERNS",
 ]
 
 
@@ -163,11 +164,14 @@ STANDARD_RISK_DISCLAIMER: str = (
 )
 
 # 数字概率模式：百分比 / 概率 / 胜诉率
-_NUMERIC_PROBABILITY_PATTERNS: tuple[re.Pattern[str], ...] = (
+# 唯一真实来源——output_guardrail 等模块统一从此处导入
+NUMERIC_PROBABILITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\d+(?:\.\d+)?\s*[%％]"),
     re.compile(r"\d+(?:\.\d+)?\s*(?:概率|胜诉率|胜率|胜诉概率)"),
     re.compile(r"(?:概率|胜诉率|胜率|胜诉概率)\s*[:：]?\s*\d+(?:\.\d+)?"),
 )
+# 保持内部向后兼容别名
+_NUMERIC_PROBABILITY_PATTERNS = NUMERIC_PROBABILITY_PATTERNS
 
 # 定性标签替换表（用于 guardrail 将数字概率替换为定性标签）
 _QUALITATIVE_LABELS: tuple[str, ...] = (

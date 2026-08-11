@@ -204,18 +204,20 @@ class RedisBackend:
         try:
             now = time.time()
             cutoff = now - self._WINDOW_SECONDS
-            pipe = self._client.pipeline(transaction=True)
             rkey = f"rl:{key}"
+            # 阶段 1：清理过期条目并获取当前计数
+            pipe = self._client.pipeline(transaction=True)
             pipe.zremrangebyscore(rkey, 0, cutoff)
             pipe.zcard(rkey)
-            pipe.zadd(rkey, {f"{now}": now})
-            pipe.expire(rkey, self._WINDOW_SECONDS + 5)
             results = pipe.execute()
             current_count = results[1]
             if current_count >= limit:
-                # 超限：移除刚添加的
-                self._client.zrem(rkey, f"{now}")
                 return False
+            # 阶段 2：在限额内才添加新条目
+            pipe2 = self._client.pipeline(transaction=True)
+            pipe2.zadd(rkey, {f"{now}": now})
+            pipe2.expire(rkey, self._WINDOW_SECONDS + 5)
+            pipe2.execute()
             return True
         except Exception as exc:  # noqa: BLE001 boundary-exception: Redis操作失败
             _logger.warning("Redis 限流操作失败: %s", exc)

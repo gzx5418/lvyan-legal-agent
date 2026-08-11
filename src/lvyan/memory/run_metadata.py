@@ -109,14 +109,43 @@ class PostgresRunMetadataStore:
         resolved = dsn if dsn is not None else os.getenv("DATABASE_URL", settings.database_url)
         self.dsn = _to_dsn(resolved)
         self._schema_ready = False
+        self._pool: Any = None
+
+    def _get_pool(self) -> Any:
+        """获取或初始化连接池。"""
+        if self._pool is None:
+            try:
+                from psycopg_pool import ConnectionPool
+                from psycopg.rows import dict_row
+
+                self._pool = ConnectionPool(
+                    self.dsn,
+                    min_size=1,
+                    max_size=10,
+                    kwargs={
+                        "autocommit": True,
+                        "row_factory": dict_row,
+                    },
+                    open=True,
+                    timeout=3.0,
+                )
+            except ImportError:
+                _logger.info("psycopg_pool 未安装，回退到每次创建新连接")
+        return self._pool
 
     def _connect(self):
-        """打开新连接。
+        """从连接池获取连接，若连接池不可用则创建新连接。
+
+        返回上下文管理器，确保连接在使用后正确归还池或关闭。
 
         注意：``autocommit=True`` 仅用于 CRUD 路径（每条语句各自提交）。
         :meth:`_ensure_schema` 在内部临时把连接切到事务模式，确保 advisory
         lock 与 migration 在同一事务内提交（H2）。
         """
+        pool = self._get_pool()
+        if pool is not None:
+            return pool.connection()
+
         import psycopg
         from psycopg.rows import dict_row
 
@@ -238,7 +267,6 @@ class PostgresRunMetadataStore:
                             INSERT INTO agent_messages
                                 (run_id, thread_id, user_id, role, content, attachments)
                             VALUES (%s, %s, %s, 'user', %s, %s)
-                            ON CONFLICT (run_id, role) DO NOTHING
                             """,
                             (
                                 run_id,
@@ -403,9 +431,6 @@ class PostgresRunMetadataStore:
                     INSERT INTO agent_messages
                         (run_id, thread_id, user_id, role, content, attachments)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (run_id, role) DO UPDATE SET
-                        content = EXCLUDED.content,
-                        attachments = EXCLUDED.attachments
                     """,
                     (
                         run_id,
