@@ -38,6 +38,19 @@ except ImportError:
     _PROM_AVAILABLE = False
     _logger.debug("prometheus_client 未安装，指标收集禁用")
 
+# 尝试导入 FastAPI 类型（用于 register_metrics_endpoint 的类型注解解析）。
+# 必须在模块级别导入：文件顶部 from __future__ import annotations 会将所有注解
+# 转为字符串，FastAPI 通过 typing.get_type_hints() 解析时在模块 globals 查找，
+# 若 Request/Response 仅在函数内部导入则无法解析，会被误判为 query 参数（422）。
+try:
+    from fastapi import Request
+    from fastapi.responses import Response
+
+    _FASTAPI_AVAILABLE = True
+except ImportError:  # pragma: no cover - 仅在未安装 fastapi 时触发
+    _FASTAPI_AVAILABLE = False
+    _logger.debug("fastapi 未安装，/metrics 端点不可用")
+
 
 # ---------------------------------------------------------------------------
 # 指标定义（仅在 prometheus_client 可用时创建）
@@ -220,6 +233,10 @@ def register_metrics_endpoint(app: Any) -> None:
         _logger.info("prometheus_client 未安装，/metrics 端点未注册")
         return
 
+    if not _FASTAPI_AVAILABLE:
+        _logger.info("fastapi 未安装，/metrics 端点未注册")
+        return
+
     metrics_enabled = os.getenv("METRICS_ENABLED", "false").strip().lower() in {
         "1",
         "true",
@@ -230,17 +247,17 @@ def register_metrics_endpoint(app: Any) -> None:
         _logger.info("METRICS_ENABLED=false，/metrics 端点未注册")
         return
 
-    from fastapi import Request
-    from fastapi.responses import Response
-
     auth_token = os.getenv("METRICS_AUTH_TOKEN", "").strip()
 
     @app.get("/metrics", include_in_schema=False)
     async def metrics_endpoint(request: Request) -> Response:
-        # Token 保护（生产环境）
+        # Token 保护（生产环境）-- 使用常量时间比较防止时序侧信道
         if auth_token:
+            import hmac
+
             auth_header = request.headers.get("authorization", "")
-            if auth_header != f"Bearer {auth_token}":
+            expected = f"Bearer {auth_token}"
+            if not hmac.compare_digest(auth_header, expected):
                 return Response(status_code=403, content="Forbidden")
 
         body = generate_latest()

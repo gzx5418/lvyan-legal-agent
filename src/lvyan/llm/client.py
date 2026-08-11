@@ -246,7 +246,7 @@ class LLMClient:
         return False
 
     def _record_metrics(self, model: str, response: LLMResponse | None, success: bool) -> None:
-        """记录 Prometheus 指标。"""
+        """记录 Prometheus 指标并把成功调用计入 CostTracker。"""
         try:
             from lvyan.observability.metrics import (
                 LLM_CALL_DURATION,
@@ -255,26 +255,105 @@ class LLMClient:
                 _PROM_AVAILABLE,
             )
 
-            if not _PROM_AVAILABLE:
-                return
+            if _PROM_AVAILABLE:
+                status = "success" if success else "error"
+                LLM_CALL_TOTAL.labels(model=model, operation="chat", status=status).inc()
 
-            status = "success" if success else "error"
-            LLM_CALL_TOTAL.labels(model=model, operation="chat", status=status).inc()
-
-            if response:
-                LLM_CALL_DURATION.labels(model=model, operation="chat").observe(
-                    response.duration_ms / 1000.0
-                )
-                if response.input_tokens:
-                    LLM_TOKEN_USAGE.labels(model=model, direction="input").inc(
-                        response.input_tokens
+                if response:
+                    LLM_CALL_DURATION.labels(model=model, operation="chat").observe(
+                        response.duration_ms / 1000.0
                     )
-                if response.output_tokens:
-                    LLM_TOKEN_USAGE.labels(model=model, direction="output").inc(
-                        response.output_tokens
-                    )
+                    if response.input_tokens:
+                        LLM_TOKEN_USAGE.labels(model=model, direction="input").inc(
+                            response.input_tokens
+                        )
+                    if response.output_tokens:
+                        LLM_TOKEN_USAGE.labels(model=model, direction="output").inc(
+                            response.output_tokens
+                        )
         except ImportError:
             pass
+
+        # P0-10：成功调用计入 CostTracker（按 model 单价表估算 USD）。
+        # record_llm_call 内部会读取当前 cost thread contextvar 并累加；
+        # 失败或无 cost thread 时不会累加（归属安全）。
+        if success and response:
+            try:
+                from lvyan.observability.tracing import record_llm_call
+
+                cost = _estimate_cost_usd(
+                    model,
+                    response.input_tokens or 0,
+                    response.output_tokens or 0,
+                )
+                record_llm_call(
+                    model=model,
+                    prompt="",  # content 已在 LLMResponse 中，cost 路径不消费
+                    response="",
+                    tokens_in=response.input_tokens or 0,
+                    tokens_out=response.output_tokens or 0,
+                    cost=cost,
+                )
+            except Exception:  # noqa: BLE001 - 指标/成本上报不影响主链
+                _logger.debug("CostTracker 上报失败（已忽略）", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# 成本估算：按 model 名匹配单价表（每 1M tokens 的 USD 价格）
+# ---------------------------------------------------------------------------
+# 单价来源于各模型官方定价（2026-08）；未列出的模型按 0 计入，避免高估。
+# 环境变量 LLM_PRICE_TABLE 可覆盖：格式 "model:in_price,out_price;..."
+_MODEL_PRICES: dict[str, tuple[float, float]] = {
+    "deepseek-ai/deepseek-v4-flash": (0.14, 0.28),
+    "deepseek-ai/deepseek-v3": (0.27, 1.10),
+    "qwen/qwen2.5-7b-instruct": (0.05, 0.10),
+    "qwen/qwen3-vl-8b-instruct": (0.07, 0.14),
+    "baai/bge-m3": (0.01, 0.0),
+    "baai/bge-reranker-v2-m3": (0.01, 0.0),
+}
+
+
+def _estimate_cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
+    """按 model 单价表估算单次调用的 USD 成本。
+
+    匹配策略：精确 -> 大小写不敏感 -> 前缀子串。未匹配返回 0.0。
+    环境变量 ``LLM_PRICE_TABLE`` 可在运行时覆盖（格式 ``model:in,out;...``）。
+    """
+    prices = _MODEL_PRICES
+
+    # 解析环境变量覆盖
+    import os
+
+    env_table = os.getenv("LLM_PRICE_TABLE", "").strip()
+    if env_table:
+        parsed: dict[str, tuple[float, float]] = {}
+        for entry in env_table.split(";"):
+            entry = entry.strip()
+            if not entry or ":" not in entry:
+                continue
+            name, rest = entry.split(":", 1)
+            parts = rest.split(",")
+            if len(parts) == 2:
+                try:
+                    parsed[name.strip().lower()] = (float(parts[0]), float(parts[1]))
+                except ValueError:
+                    pass
+        if parsed:
+            prices = {**_MODEL_PRICES, **parsed}
+
+    model_lower = model.lower()
+
+    # 精确匹配
+    if model_lower in prices:
+        in_price, out_price = prices[model_lower]
+        return (tokens_in / 1_000_000) * in_price + (tokens_out / 1_000_000) * out_price
+
+    # 前缀子串匹配（处理版本后缀差异）
+    for key, (in_price, out_price) in prices.items():
+        if key in model_lower:
+            return (tokens_in / 1_000_000) * in_price + (tokens_out / 1_000_000) * out_price
+
+    return 0.0
 
 
 class _RetryableError(Exception):
