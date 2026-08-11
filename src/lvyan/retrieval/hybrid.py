@@ -16,9 +16,13 @@ from lvyan.retrieval.case_rule import case_rule_search
 from lvyan.retrieval.dense import dense_search
 from lvyan.retrieval.exact_match import article_no_search
 from lvyan.retrieval.lexical import ScoredChunk, bm25_search, _load_article_chunks
+from lvyan.retrieval.reranker import rerank
 
 # RRF 超参
 _RRF_K = 60
+# RRF 融合后送入 rerank 的候选池倍数（rerank 需要比 top_k 更大的池子才有重排空间）
+_RERANK_POOL_MULTIPLIER = 3
+_RERANK_POOL_FLOOR = 30
 
 
 def _filter_chunk(chunk: Any, only_effective: bool, as_of: date | None) -> bool:
@@ -104,8 +108,9 @@ def hybrid_search(
     only_effective: bool = True,
     as_of: date | None = None,
     chunks: list[Any] | None = None,
+    with_rerank: bool = True,
 ) -> list[ScoredChunk]:
-    """四路混合检索 + RRF 融合。
+    """四路混合检索 + RRF 融合 + reranker 重排。
 
     Args:
         query: 用户查询
@@ -113,10 +118,12 @@ def hybrid_search(
         only_effective: True 时仅保留 status="effective" 的 chunk
         as_of: 给定日期时仅保留 effective_date <= as_of 的 chunk
         chunks: 候选 ArticleChunk；None 时从全库加载
+        with_rerank: True 时在 RRF 融合后调用 reranker（BGE-reranker / Qwen3-Reranker）
+            对更大的候选池重排；reranker 不可用且允许启发式降级时走 Jaccard 桩，
+            拒绝桩或 rerank 抛异常时自动回退到 RRF 排序。
 
     Returns:
-        list[ScoredChunk]：按 RRF 分数降序，最多 top_k 条。
-        每条 score 字段为 RRF 融合分数，chunk 字段为对应 ArticleChunk。
+        list[ScoredChunk]：按重排分数（或降级时的 RRF 分数）降序，最多 top_k 条。
     """
     # 加载 chunks 一次，传给各路避免重复加载
     if chunks is None:
@@ -160,11 +167,13 @@ def hybrid_search(
     if not fused:
         return []
 
-    # 排序并取 top_k
-    sorted_ids = sorted(fused.items(), key=lambda x: x[1], reverse=True)[:top_k]
+    # RRF 排序
+    sorted_ids = sorted(fused.items(), key=lambda x: x[1], reverse=True)
 
-    results: list[ScoredChunk] = []
-    for chunk_id, score in sorted_ids:
+    # 取比 top_k 更大的候选池供 rerank 重排
+    pool_size = max(top_k * _RERANK_POOL_MULTIPLIER, _RERANK_POOL_FLOOR)
+    pool_results: list[ScoredChunk] = []
+    for chunk_id, score in sorted_ids[:pool_size]:
         chunk = chunk_by_id.get(chunk_id)
         if chunk is None:
             # 兜底：在 filtered_chunks 中查找（理论上 chunk_by_id 应已覆盖）
@@ -179,9 +188,23 @@ def hybrid_search(
                         break
         if chunk is None:
             continue
-        results.append(ScoredChunk(chunk_id=chunk_id, score=round(score, 4), chunk=chunk))
+        pool_results.append(ScoredChunk(chunk_id=chunk_id, score=score, chunk=chunk))
 
-    return results
+    if not pool_results:
+        return []
+
+    if with_rerank:
+        try:
+            reranked = rerank(query, pool_results, top_k=top_k)
+            if reranked:
+                return reranked
+        except RuntimeError:
+            # 生产强制模式拒绝桩（ALLOW_HEURISTIC_RERANKER_FALLBACK=false），
+            # 或 reranker 内部其它运行时错误 → 降级 RRF 排序
+            pass
+
+    # with_rerank=False 或 rerank 失败：返回 RRF 排序
+    return pool_results[:top_k]
 
 
 __all__ = ["hybrid_search"]

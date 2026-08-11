@@ -1,15 +1,18 @@
 """Dense 向量召回（SubTask 8.2）。
 
 接入策略：
-    - 真实接入：``Qwen/Qwen3-Embedding-0.6B``（settings.embedding_model），
-      通过 sentence-transformers 或模型网关 HTTP API。
-    - 桩实现：当前环境无法访问 HuggingFace / 模型 API，使用 hash-based
-      伪向量（hashlib 把文本映射到 256 维向量），用余弦相似度计算。
-      非真实语义检索，但保证接口与流程可用。
+    - 真实接入：``settings.embedding_model``（默认 ``BAAI/bge-m3``），
+      通过模型网关 HTTP API（``/v1/embeddings`` 批量）或本地
+      sentence-transformers 计算向量。
+    - 降级：真实不可用时回退到 hash 伪向量（bigram 哈希投影），保证
+      查询与文档同处一个向量空间，绝不跨空间混算。
+    - 文档向量按 ``chunk_id`` 缓存到 ``_DOC_VEC_CACHE``，避免每次请求
+      对候选集重复 embed。
 
 公开接口：
     dense_search(query, top_k=20, chunks=None) -> list[ScoredChunk]
-    dense_search_bge_m3(query, top_k=20, chunks=None) -> list[ScoredChunk]  # 对照桩
+    dense_search_bge_m3(query, top_k=20, chunks=None) -> list[ScoredChunk]
+    embed_text(text) -> list[float]
 """
 
 from __future__ import annotations
@@ -37,8 +40,10 @@ _DENSE_DIM = 256  # 桩向量维度
 # 模块级缓存：记录真实 embedding 的可用性，避免反复网络探测。
 # - _REAL_EMBEDDING_PROBED: 是否已尝试真实接入（None=未尝试 / True=可用 / False=不可用）
 # - _ST_MODEL_CACHE: sentence-transformers 模型实例（真实接入可用时填充）
+# - _DOC_VEC_CACHE: chunk_id → 真实文档向量，避免每次请求对候选集重复 embed
 _REAL_EMBEDDING_PROBED: bool | None = None
 _ST_MODEL_CACHE: Any = None
+_DOC_VEC_CACHE: dict[str, list[float]] = {}
 _DENSE_CANDIDATE_FLOOR = 100
 _DENSE_CANDIDATE_MULTIPLIER = 10
 
@@ -181,6 +186,45 @@ def _try_real_embedding(text: str) -> list[float] | None:
     return None
 
 
+def _try_real_embedding_batch(texts: list[str]) -> list[list[float]] | None:
+    """批量真实 embedding；任一环节失败返回 None 由调用方降级。
+
+    优先调用模型网关（OpenAI 兼容 ``/v1/embeddings`` 支持 ``input`` 数组），
+    其次本地 sentence-transformers（``encode`` 接受列表）。
+    """
+    if _REAL_EMBEDDING_PROBED is not True or not texts:
+        return None
+
+    gateway = settings.model_gateway_url
+    if gateway:
+        try:
+            import httpx  # type: ignore[import-untyped]
+
+            headers: dict[str, str] = {}
+            if settings.model_gateway_api_key:
+                headers["Authorization"] = f"Bearer {settings.model_gateway_api_key}"
+
+            resp = httpx.post(
+                f"{gateway.rstrip('/')}/v1/embeddings",
+                json={"model": settings.embedding_model, "input": texts},
+                headers=headers,
+                timeout=max(10.0, 2.0 * len(texts)),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return [list(map(float, d["embedding"])) for d in data["data"]]
+        except Exception:  # noqa: BLE001 - optional embedding provider boundary
+            return None
+
+    if _ST_MODEL_CACHE is not None:
+        try:
+            embs = _ST_MODEL_CACHE.encode(texts, normalize_embeddings=True)
+            return [list(map(float, e)) for e in embs]
+        except Exception:  # noqa: BLE001 - optional local model boundary
+            return None
+    return None
+
+
 def embed_text(text: str) -> list[float]:
     """对文本计算 embedding（真实或桩）。
 
@@ -246,6 +290,102 @@ def _select_dense_candidates(
     return chunks[:candidate_limit]
 
 
+def _chunk_id_of(chunk: Any) -> str:
+    """统一从 dict / ArticleChunk 读取 chunk_id。"""
+    if isinstance(chunk, dict):
+        return chunk.get("chunk_id", "") or ""
+    return getattr(chunk, "chunk_id", "") or ""
+
+
+def _chunk_text_of(chunk: Any) -> str:
+    """统一从 dict / ArticleChunk 拼接标题 + 正文，作为 embedding 输入。"""
+    if isinstance(chunk, dict):
+        title = chunk.get("title", "") or ""
+        text = chunk.get("article_text", "") or ""
+    else:
+        title = getattr(chunk, "title", "") or ""
+        text = getattr(chunk, "article_text", "") or ""
+    return f"{title} {text}".strip() if title else text
+
+
+def _rank_by_real_embedding(
+    query_vec: list[float],
+    candidate_chunks: list[Any],
+    top_k: int,
+) -> list[ScoredChunk] | None:
+    """真实 embedding 路径：批量 embed 候选集（带缓存）并按余弦排序。
+
+    返回 None 表示批量 embedding 失败，调用方应降级到 hash 路径。
+    """
+    cached_vecs: dict[int, list[float]] = {}
+    to_embed_idx: list[int] = []
+    to_embed_text: list[str] = []
+    for i, chunk in enumerate(candidate_chunks):
+        cid = _chunk_id_of(chunk)
+        if cid and cid in _DOC_VEC_CACHE:
+            cached_vecs[i] = _DOC_VEC_CACHE[cid]
+        else:
+            to_embed_idx.append(i)
+            to_embed_text.append(_chunk_text_of(chunk))
+
+    if to_embed_text:
+        vecs = _try_real_embedding_batch(to_embed_text)
+        if vecs is None or len(vecs) != len(to_embed_text):
+            return None
+        for j, vec in enumerate(vecs):
+            i = to_embed_idx[j]
+            cached_vecs[i] = vec
+            cid = _chunk_id_of(candidate_chunks[i])
+            if cid:
+                _DOC_VEC_CACHE[cid] = vec
+
+    scored: list[tuple[int, float]] = []
+    for i, chunk in enumerate(candidate_chunks):
+        vec = cached_vecs.get(i)
+        if vec is None:
+            continue
+        sim = _cosine_similarity(query_vec, vec)
+        if sim > 0:
+            scored.append((i, sim))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    results: list[ScoredChunk] = []
+    for idx, sim in scored[:top_k]:
+        chunk = candidate_chunks[idx]
+        results.append(
+            ScoredChunk(chunk_id=_chunk_id_of(chunk), score=round(sim, 4), chunk=chunk)
+        )
+    return results
+
+
+def _rank_by_hash(
+    query: str,
+    candidate_chunks: list[Any],
+    top_k: int,
+) -> list[ScoredChunk]:
+    """Hash 桩路径：查询与文档同空间，避免跨空间混算。"""
+    query_vec = _hash_embed(query)
+    if not any(query_vec):
+        return []
+
+    scored: list[tuple[int, float]] = []
+    for idx, chunk in enumerate(candidate_chunks):
+        full = _chunk_text_of(chunk)
+        chunk_vec = _hash_embed(full)
+        sim = _cosine_similarity(query_vec, chunk_vec)
+        if sim > 0:
+            scored.append((idx, sim))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    results: list[ScoredChunk] = []
+    for idx, sim in scored[:top_k]:
+        chunk = candidate_chunks[idx]
+        results.append(
+            ScoredChunk(chunk_id=_chunk_id_of(chunk), score=round(sim, 4), chunk=chunk)
+        )
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Dense 检索主接口
 # ---------------------------------------------------------------------------
@@ -264,48 +404,29 @@ def dense_search(
     Returns:
         list[ScoredChunk]：按余弦相似度降序。
 
-    Hash 降级路径始终在同一向量空间计算查询与文档向量。全库调用会先用
-    BM25 预筛选有界候选集，避免在用户请求线程预计算全部法规向量。
+    优先走真实 embedding（``settings.embedding_model``）。真实可用时查询与
+    文档向量同处一个真实向量空间，文档向量按 ``chunk_id`` 缓存避免重复 embed。
+    真实探测失败、查询向量获取失败或批量 embed 失败时，自动降级到 hash 桩，
+    hash 桩内查询与文档同处 hash 空间，绝不跨空间混算。
     """
     if chunks is None:
         chunks = _load_article_chunks()
     if not chunks:
         return []
 
-    # 文档向量始终是 hash 向量；查询也必须使用同一向量空间，不能混入真实
-    # embedding，否则不同维度/分布的向量相似度没有语义意义。
-    query_vec = _hash_embed(query)
-    if not any(query_vec):
-        return []
-
     candidate_chunks = _select_dense_candidates(query, chunks, top_k)
 
-    scored: list[tuple[int, float]] = []
-    for idx, chunk in enumerate(candidate_chunks):
-        text = getattr(chunk, "article_text", "") or (
-            chunk.get("article_text", "") if isinstance(chunk, dict) else ""
-        )
-        title = getattr(chunk, "title", "") or (
-            chunk.get("title", "") if isinstance(chunk, dict) else ""
-        )
-        full = f"{title} {text}" if title else text
-        chunk_vec = _hash_embed(full)
+    if _probe_real_embedding():
+        query_vec = _try_real_embedding(query)
+        if query_vec is not None:
+            real_results = _rank_by_real_embedding(query_vec, candidate_chunks, top_k)
+            if real_results is not None:
+                return real_results
+            log("[Dense] 真实 embedding 批量失败，降级到 hash 桩")
+        else:
+            log("[Dense] 查询真实 embedding 不可用，降级到 hash 桩")
 
-        sim = _cosine_similarity(query_vec, chunk_vec)
-        if sim > 0:
-            scored.append((idx, sim))
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-    top = scored[:top_k]
-
-    results: list[ScoredChunk] = []
-    for idx, sim in top:
-        chunk = candidate_chunks[idx]
-        chunk_id = (
-            chunk.get("chunk_id", "") if isinstance(chunk, dict) else getattr(chunk, "chunk_id", "")
-        )
-        results.append(ScoredChunk(chunk_id=chunk_id, score=round(sim, 4), chunk=chunk))
-    return results
+    return _rank_by_hash(query, candidate_chunks, top_k)
 
 
 def dense_search_bge_m3(
