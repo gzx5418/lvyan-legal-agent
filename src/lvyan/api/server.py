@@ -1612,13 +1612,16 @@ def create_app(
         if ext in {".docx", ".xlsx", ".pptx"} and content.startswith(b"PK\x03\x04"):
             _enforce_zip_uncompressed_limit(content, _settings.zip_uncompressed_bytes_limit)
 
-        # P2-14：MIME 与扩展名一致性校验（容忍 application/octet-stream）
+        # P2-14 / P0-9：MIME 与扩展名一致性校验（容忍 application/octet-stream）。
+        # expected_mime 形如 "text/"（族前缀，以 / 结尾）或 "application/pdf"（精确）。
+        # 族前缀用于一类（如 text/*、image/*），精确值用于具体类型——不再用
+        # split("/")[0]+"/" 推导，否则会把 application/pdf 与 application/msword
+        # 视为同族而互相放行。
         expected_mime = _EXT_TO_MIME_PREFIX.get(ext, "")
         if (
             expected_mime
             and content_type != "application/octet-stream"
-            and not content_type.startswith(expected_mime.split("/")[0] + "/")
-            and content_type != expected_mime
+            and not content_type.startswith(expected_mime)
         ):
             raise HTTPException(
                 status_code=415,

@@ -414,18 +414,20 @@ def dense_search(
     if not chunks:
         return []
 
-    candidate_chunks = _select_dense_candidates(query, chunks, top_k)
-
+    # 真实 embedding 路径：语义向量有独立信号空间，直接对全量 chunks 计算，
+    # 不需要 BM25 预筛（BM25 已在 hybrid_search 作为独立路被调用一次）。
     if _probe_real_embedding():
         query_vec = _try_real_embedding(query)
         if query_vec is not None:
-            real_results = _rank_by_real_embedding(query_vec, candidate_chunks, top_k)
+            real_results = _rank_by_real_embedding(query_vec, chunks, top_k)
             if real_results is not None:
                 return real_results
             log("[Dense] 真实 embedding 批量失败，降级到 hash 桩")
         else:
             log("[Dense] 查询真实 embedding 不可用，降级到 hash 桩")
 
+    # Hash 降级路径：hash 向量只反映词面重叠，需 BM25 预筛有界候选
+    candidate_chunks = _select_dense_candidates(query, chunks, top_k)
     return _rank_by_hash(query, candidate_chunks, top_k)
 
 

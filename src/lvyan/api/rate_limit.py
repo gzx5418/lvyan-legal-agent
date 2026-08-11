@@ -62,6 +62,20 @@ def _get_backend_type() -> str:
     return raw if raw in {"memory", "redis"} else "memory"
 
 
+def _get_trusted_proxies() -> frozenset[str]:
+    """解析 TRUSTED_PROXIES 环境变量（逗号分隔的 IP 白名单）。
+
+    仅当请求来源 IP 在此白名单内时，才采信 X-Forwarded-For；否则一律使用
+    直连 IP，避免客户端伪造 XFF 头绕过限流。
+    """
+    raw = os.getenv("TRUSTED_PROXIES", "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset(
+        ip.strip() for ip in raw.split(",") if ip.strip()
+    )
+
+
 # 受限路径前缀 → 环境变量名
 _PATH_LIMITS: tuple[tuple[str, str, int], ...] = (
     ("/api/agent/run", "RATE_LIMIT_RUN_RPM", 10),
@@ -276,19 +290,51 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             _logger.info("速率限制已禁用（RATE_LIMIT_ENABLED=false）")
 
     def _get_client_key(self, request: Request) -> str:
-        """获取限流键：已认证用户用 user_id，否则用 IP。"""
-        # 尝试从请求 state 获取已认证的 user_id
-        user_id = getattr(request.state, "user_id", None) if hasattr(request, "state") else None
+        """获取限流键：已认证用户用 user_id，否则用 IP。
+
+        P0-5：从请求头解析已认证 user_id（捕获异常，限流层不抛错）并写入
+        ``request.state.user_id``，使后续路由依赖可复用，避免重复解析。
+        解析失败时退化为 IP 维度（后续路由层仍会做真正的认证拒绝）。
+        """
+        user_id = self._resolve_user_id(request)
         if user_id and user_id != "anonymous":
             return f"user:{user_id}"
 
-        # 匿名请求：使用可信代理解析后的 IP
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return f"ip:{forwarded.split(',')[0].strip()}"
-        if request.client:
-            return f"ip:{request.client.host}"
+        # 匿名请求：仅当来源是可信代理时才采信 X-Forwarded-For，否则用直连 IP，
+        # 防止客户端伪造 XFF 头绕过限流。
+        direct_ip = request.client.host if request.client else None
+        trusted_proxies = _get_trusted_proxies()
+        if direct_ip and direct_ip in trusted_proxies:
+            forwarded = request.headers.get("x-forwarded-for")
+            if forwarded:
+                client_ip = forwarded.split(",")[0].strip()
+                if client_ip:
+                    return f"ip:{client_ip}"
+        if direct_ip:
+            return f"ip:{direct_ip}"
         return "ip:unknown"
+
+    @staticmethod
+    def _resolve_user_id(request: Request) -> str | None:
+        """轻量解析 user_id 仅供限流维度使用（不抛异常）。
+
+        认证未启用时返回 None；JWT/trusted_proxy 模式会真正调用认证解析，
+        但任何异常都被吞掉——失败时退化为 IP 维度，真正的认证拒绝由后续
+        路由依赖 :func:`get_current_user_id` 完成。
+        """
+        try:
+            from lvyan.api.auth import get_current_user_id, is_auth_enabled
+
+            if not is_auth_enabled():
+                return None
+            x_user_id = request.headers.get("x-user-id")
+            authorization = request.headers.get("authorization")
+            uid = get_current_user_id(request, x_user_id, authorization)
+            if hasattr(request, "state"):
+                request.state.user_id = uid
+            return uid
+        except Exception:  # noqa: BLE001 - 限流层不抛认证错误
+            return None
 
     def _get_limit(self, path: str) -> int | None:
         for prefix, env_name, default in _PATH_LIMITS:

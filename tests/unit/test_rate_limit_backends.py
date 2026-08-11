@@ -77,37 +77,63 @@ class TestRedisBackendFallback:
 class TestMiddlewareKeyStrategy:
     """验证限流键的用户/IP 策略。"""
 
-    def test_authenticated_user_uses_user_id(self):
-        """已认证用户使用 user_id 作为限流键。"""
+    def test_authenticated_user_uses_user_id(self, monkeypatch):
+        """已认证用户（trusted_proxy 模式 + X-User-ID）使用 user_id 作为限流键。"""
         from lvyan.api.rate_limit import RateLimitMiddleware
         from unittest.mock import MagicMock
+        import importlib
+
+        # 启用认证 + trusted_proxy 模式，让 _resolve_user_id 解析 X-User-ID
+        monkeypatch.setenv("AUTH_ENABLED", "true")
+        monkeypatch.setenv("AUTH_MODE", "trusted_proxy")
+        from lvyan.api import auth as auth_mod
+
+        importlib.reload(auth_mod)
 
         middleware = RateLimitMiddleware.__new__(RateLimitMiddleware)
 
         request = MagicMock()
-        request.state.user_id = "user_123"
-        request.headers = {}
+        request.state.user_id = "anonymous"
+        request.headers = {"x-user-id": "user_123"}
         request.client = MagicMock()
         request.client.host = "192.168.1.1"
 
         key = middleware._get_client_key(request)
         assert key == "user:user_123"
 
-    def test_anonymous_uses_forwarded_ip(self):
-        """匿名用户使用 X-Forwarded-For IP。"""
+    def test_anonymous_uses_forwarded_ip_only_from_trusted_proxy(self, monkeypatch):
+        """匿名用户仅在来源是可信代理时才使用 X-Forwarded-For IP。"""
         from lvyan.api.rate_limit import RateLimitMiddleware
         from unittest.mock import MagicMock
+
+        monkeypatch.setenv("TRUSTED_PROXIES", "127.0.0.1")
 
         middleware = RateLimitMiddleware.__new__(RateLimitMiddleware)
 
         request = MagicMock()
-        request.state.user_id = "anonymous"
         request.headers = {"x-forwarded-for": "10.0.0.5, 192.168.1.1"}
         request.client = MagicMock()
         request.client.host = "127.0.0.1"
 
         key = middleware._get_client_key(request)
         assert key == "ip:10.0.0.5"
+
+    def test_anonymous_ignores_forwarded_ip_from_untrusted(self, monkeypatch):
+        """P0-4：非可信代理来源时忽略 X-Forwarded-For，使用直连 IP。"""
+        from lvyan.api.rate_limit import RateLimitMiddleware
+        from unittest.mock import MagicMock
+
+        monkeypatch.setenv("TRUSTED_PROXIES", "")
+
+        middleware = RateLimitMiddleware.__new__(RateLimitMiddleware)
+
+        request = MagicMock()
+        request.headers = {"x-forwarded-for": "10.0.0.5"}
+        request.client = MagicMock()
+        request.client.host = "127.0.0.1"
+
+        key = middleware._get_client_key(request)
+        assert key == "ip:127.0.0.1"
 
     def test_no_state_uses_client_ip(self):
         """无 state 属性时使用客户端直连 IP。"""
