@@ -140,6 +140,7 @@ class CaseMemory:
         # Windows 上 os.replace 在目标文件被占用时可能抛出 PermissionError，
         # 添加重试以提高并发场景下的可靠性
         import time
+
         for attempt in range(5):
             try:
                 os.replace(tmp, self._index_path)

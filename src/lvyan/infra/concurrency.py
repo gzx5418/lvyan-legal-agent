@@ -26,6 +26,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from collections.abc import Callable
 from typing import AsyncGenerator
 
 _logger = logging.getLogger("lvyan.runtime.concurrency")
@@ -158,7 +159,7 @@ class _LazySemaphoreProxy:
     允许 ``async with llm_semaphore:`` 直接使用，而无需调用 getter 函数。
     """
 
-    def __init__(self, factory: "type[object] | Any") -> None:
+    def __init__(self, factory: Callable[[], InstrumentedSemaphore]) -> None:
         self._factory = factory
         self._instance: InstrumentedSemaphore | None = None
 

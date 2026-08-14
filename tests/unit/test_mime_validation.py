@@ -71,6 +71,4 @@ def test_pdf_accepts_correct_content_type(client):
         data={"query": "测试"},
     )
     # 不应是 415（其他错误可接受，例如下游转换失败）
-    assert resp.status_code != 415, (
-        f".pdf + application/pdf 不应被 MIME 校验拒绝：{resp.text}"
-    )
+    assert resp.status_code != 415, f".pdf + application/pdf 不应被 MIME 校验拒绝：{resp.text}"

@@ -23,12 +23,8 @@ def _setup_metrics_app(monkeypatch, token: str = "secret-token-123") -> TestClie
     使端点在 token 校验通过后能正常返回 200 而非 NameError。
     """
     monkeypatch.setattr(metrics, "_PROM_AVAILABLE", True)
-    monkeypatch.setattr(
-        metrics, "generate_latest", lambda: b"# mock metrics\n", raising=False
-    )
-    monkeypatch.setattr(
-        metrics, "CONTENT_TYPE_LATEST", "text/plain; version=0.0.4", raising=False
-    )
+    monkeypatch.setattr(metrics, "generate_latest", lambda: b"# mock metrics\n", raising=False)
+    monkeypatch.setattr(metrics, "CONTENT_TYPE_LATEST", "text/plain; version=0.0.4", raising=False)
     monkeypatch.setenv("METRICS_ENABLED", "true")
     monkeypatch.setenv("METRICS_AUTH_TOKEN", token)
 

@@ -134,6 +134,7 @@ class _FakeHttpClient:
 def test_legacy_request_records_cost_to_tracker(monkeypatch):
     """同步兼容路径成功调用后，当前 cost thread 应累计 input/output tokens。"""
     monkeypatch.setattr("httpx.Client", _FakeHttpClient)
+    monkeypatch.setenv("MODEL_GATEWAY_URL", "https://gateway.test")
     tracing.set_cost_thread("thread-legacy")
 
     result = client_mod._legacy_request(
@@ -153,6 +154,7 @@ def test_legacy_request_records_cost_to_tracker(monkeypatch):
 def test_legacy_request_without_cost_thread_does_not_record(monkeypatch):
     """同步路径未设置 cost thread 时不应计入（避免归属错误）。"""
     monkeypatch.setattr("httpx.Client", _FakeHttpClient)
+    monkeypatch.setenv("MODEL_GATEWAY_URL", "https://gateway.test")
     tracing.set_cost_thread(None)
 
     result = client_mod._legacy_request(

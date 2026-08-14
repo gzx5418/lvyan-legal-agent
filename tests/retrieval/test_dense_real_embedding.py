@@ -161,9 +161,7 @@ def test_dense_hash_path_still_uses_bm25_prefilter_for_global_cache(monkeypatch)
 
     chunks = _make_chunks()
     # 用 monkeypatch.setitem 自动恢复原值，避免污染 lexical 模块全局命名空间
-    monkeypatch.setitem(
-        dense._load_article_chunks.__globals__, "_GLOBAL_CHUNKS_CACHE", chunks
-    )
+    monkeypatch.setitem(dense._load_article_chunks.__globals__, "_GLOBAL_CHUNKS_CACHE", chunks)
     dense.dense_search("经济补偿", chunks=chunks, top_k=2)
 
     assert bm25_calls["n"] >= 1, "hash 路径在全库场景应调用 BM25 预筛"

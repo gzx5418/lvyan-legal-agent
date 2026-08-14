@@ -352,9 +352,7 @@ def _rank_by_real_embedding(
     results: list[ScoredChunk] = []
     for idx, sim in scored[:top_k]:
         chunk = candidate_chunks[idx]
-        results.append(
-            ScoredChunk(chunk_id=_chunk_id_of(chunk), score=round(sim, 4), chunk=chunk)
-        )
+        results.append(ScoredChunk(chunk_id=_chunk_id_of(chunk), score=round(sim, 4), chunk=chunk))
     return results
 
 
@@ -380,9 +378,7 @@ def _rank_by_hash(
     results: list[ScoredChunk] = []
     for idx, sim in scored[:top_k]:
         chunk = candidate_chunks[idx]
-        results.append(
-            ScoredChunk(chunk_id=_chunk_id_of(chunk), score=round(sim, 4), chunk=chunk)
-        )
+        results.append(ScoredChunk(chunk_id=_chunk_id_of(chunk), score=round(sim, 4), chunk=chunk))
     return results
 
 

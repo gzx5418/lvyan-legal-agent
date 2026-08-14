@@ -92,4 +92,6 @@ async def test_setup_installs_checkpoint_rls_when_enforced(monkeypatch):
     await TenantAwareCheckpointer(inner).setup()
 
     assert inner.setup_called is True
-    assert any("CREATE POLICY" in query and "tenant_checkpoints" in query for query, _ in inner.conn.calls)
+    assert any(
+        "CREATE POLICY" in query and "tenant_checkpoints" in query for query, _ in inner.conn.calls
+    )

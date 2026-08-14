@@ -71,9 +71,7 @@ def _get_trusted_proxies() -> frozenset[str]:
     raw = os.getenv("TRUSTED_PROXIES", "").strip()
     if not raw:
         return frozenset()
-    return frozenset(
-        ip.strip() for ip in raw.split(",") if ip.strip()
-    )
+    return frozenset(ip.strip() for ip in raw.split(",") if ip.strip())
 
 
 # 受限路径前缀 → 环境变量名

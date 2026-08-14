@@ -47,8 +47,9 @@ def setup_logging(log_format: str | None = None, level: str = "INFO") -> None:
         structlog.configure(
             processors=[
                 *shared_processors,
-                structlog.stdlib.ProcessorFormatter.wrap_events_in_msg_field,
-                renderer,
+                # 必须作为最后一个 processor：把 structlog 事件交给下方的
+                # ProcessorFormatter 渲染。该公开接口兼容 structlog 24+。
+                structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
             ],
             wrapper_class=structlog.stdlib.BoundLogger,
             context_class=dict,
