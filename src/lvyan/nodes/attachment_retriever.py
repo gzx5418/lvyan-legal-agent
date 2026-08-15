@@ -87,7 +87,8 @@ def attachment_retriever(
     used = 0
     for ch in final_ranked:
         block = f"【{ch.document_name} · {ch.section}】\n{ch.content}"
-        if used + len(block) > max_context_chars:
+        # 预算口径与累计一致：非首个 block 后续拼接需加 "\n\n" 连接符 2 字符
+        if used + len(block) + (2 if used else 0) > max_context_chars:
             break
         parts.append(block)
         used += len(block) + 2

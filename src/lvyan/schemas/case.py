@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from .authority import Authority
 from .evidence import AuthorityConflict, CaseAuthority, EvidenceRequirement
 from .output import CitationAudit, ReasoningResult
+from .web import OnlineSource
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +136,8 @@ class CaseState(BaseModel):
     # --- 权威与证据 ---
     statutes: list[Authority] = []
     cases: list[CaseAuthority] = []
+    # 联网来源只用于供用户核对，不替代已验证的本地法条。
+    online_sources: list[OnlineSource] = []
     evidence_requirements: list[EvidenceRequirement] = []
     conflicts: list[AuthorityConflict] = []
 

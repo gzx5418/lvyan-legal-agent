@@ -241,8 +241,16 @@ def test_state_returns_200_with_messages_when_checkpoint_gone(monkeypatch):
 # ---------------------------------------------------------------------------
 # 三-1：AUTH_MODE + 身份冲突
 # ---------------------------------------------------------------------------
+class _Client:
+    def __init__(self, host: str = "203.0.113.9") -> None:
+        self.host = host
+
+
 class _Req:
-    pass
+    """带直连来源 IP 的最小 Request 替身。"""
+
+    def __init__(self, host: str = "203.0.113.9") -> None:
+        self.client = _Client(host)
 
 
 def test_auth_mode_jwt_rejects_x_user_id_only(monkeypatch):
@@ -290,10 +298,41 @@ def test_auth_mode_rejects_conflict_identity(monkeypatch):
 def test_auth_mode_trusted_proxy_accepts_x_user_id(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("AUTH_MODE", "trusted_proxy")
+    monkeypatch.setenv("TRUSTED_PROXIES", "10.0.0.1,203.0.113.9")
     from lvyan.api.auth import get_current_user_id
 
-    uid = get_current_user_id(_Req(), x_user_id="alice", authorization=None)
+    uid = get_current_user_id(_Req(host="203.0.113.9"), x_user_id="alice", authorization=None)
     assert uid == "alice"
+
+
+def test_auth_mode_trusted_proxy_rejects_untrusted_source(monkeypatch):
+    """X-User-ID 仅在直连来源位于 TRUSTED_PROXIES 白名单时可信。"""
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("AUTH_MODE", "trusted_proxy")
+    monkeypatch.setenv("TRUSTED_PROXIES", "10.0.0.1")
+    from fastapi import HTTPException
+
+    from lvyan.api.auth import get_current_user_id
+
+    # 非白名单直连来源伪造 X-User-ID → 401
+    with pytest.raises(HTTPException) as exc:
+        get_current_user_id(_Req(host="198.51.100.7"), x_user_id="alice", authorization=None)
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "untrusted_identity_source"
+
+
+def test_auth_mode_trusted_proxy_rejects_when_whitelist_unset(monkeypatch):
+    """TRUSTED_PROXIES 未配置（空白名单）时 fail-closed。"""
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("AUTH_MODE", "trusted_proxy")
+    monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
+    from fastapi import HTTPException
+
+    from lvyan.api.auth import get_current_user_id
+
+    with pytest.raises(HTTPException) as exc:
+        get_current_user_id(_Req(host="203.0.113.9"), x_user_id="alice", authorization=None)
+    assert exc.value.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -706,10 +745,11 @@ def test_production_accepts_auth_mode_trusted_proxy(monkeypatch):
     monkeypatch.setenv("RUNTIME_MODE", "production")
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("AUTH_MODE", "trusted_proxy")
+    monkeypatch.setenv("TRUSTED_PROXIES", "203.0.113.9")
 
     from lvyan.api.auth import get_current_user_id
 
-    uid = get_current_user_id(_Req(), x_user_id="alice", authorization=None)
+    uid = get_current_user_id(_Req(host="203.0.113.9"), x_user_id="alice", authorization=None)
     assert uid == "alice"
 
 

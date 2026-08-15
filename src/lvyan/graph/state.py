@@ -38,6 +38,7 @@ from lvyan.schemas.case import (
 )
 from lvyan.schemas.evidence import AuthorityConflict, CaseAuthority, EvidenceRequirement
 from lvyan.schemas.output import CitationAudit, ReasoningResult
+from lvyan.schemas.web import OnlineSource
 
 __all__ = ["GraphState"]
 
@@ -128,6 +129,18 @@ def merge_cases(old: list[CaseAuthority], new: list[CaseAuthority]) -> list[Case
         if new_score > old_score:
             merged[key] = item
     return [merged[k] for k in order]
+
+
+def merge_online_sources(old: list[OnlineSource], new: list[OnlineSource]) -> list[OnlineSource]:
+    """联网来源按 URL 去重，新检索结果覆盖旧元数据。"""
+    merged: dict[object, OnlineSource] = {}
+    order: list[object] = []
+    for item in [*old, *new]:
+        key = _get_attr(item, "url", None) or id(item)
+        if key not in merged:
+            order.append(key)
+        merged[key] = item
+    return [merged[key] for key in order]
 
 
 def merge_evidence_requirements(
@@ -226,6 +239,7 @@ class GraphState(TypedDict):
     # --- 权威与证据（键控合并；节点可返回完整列表） ---
     statutes: Annotated[list[Authority], merge_authorities]
     cases: Annotated[list[CaseAuthority], merge_cases]
+    online_sources: Annotated[list[OnlineSource], merge_online_sources]
     evidence_requirements: Annotated[list[EvidenceRequirement], merge_evidence_requirements]
     conflicts: Annotated[list[AuthorityConflict], merge_conflicts]
     missing_facts: Annotated[list[MissingFact], merge_missing_facts]

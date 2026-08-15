@@ -95,3 +95,54 @@ async def test_setup_installs_checkpoint_rls_when_enforced(monkeypatch):
     assert any(
         "CREATE POLICY" in query and "tenant_checkpoints" in query for query, _ in inner.conn.calls
     )
+
+
+class _NoConnSaver(_FakeSaver):
+    """没有任何可识别连接属性的 saver（模拟连接池/版本变更）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        del self.conn
+
+
+@pytest.mark.asyncio
+async def test_missing_conn_fails_closed_when_enforced(monkeypatch):
+    monkeypatch.setenv("RLS_ENFORCED", "true")
+    from lvyan.db.tenant_saver import TenantAwareCheckpointer
+
+    saver = TenantAwareCheckpointer(_NoConnSaver())
+    with pytest.raises(RuntimeError, match="fail-closed"):
+        await saver.aget_tuple(_config())
+
+
+@pytest.mark.asyncio
+async def test_tenant_context_cleared_after_operation(monkeypatch):
+    monkeypatch.setenv("RLS_ENFORCED", "true")
+    from lvyan.db.tenant_saver import TenantAwareCheckpointer
+
+    inner = _FakeSaver()
+    saver = TenantAwareCheckpointer(inner)
+    await saver.aget_tuple(_config())
+
+    # 操作结束后必须复位会话级上下文，防止残留租户串读
+    assert inner.conn.calls == [
+        ("SELECT set_config('app.user_id', %s, false)", ("user-a",)),
+        ("SELECT set_config('app.user_id', '', false)", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_alist_releases_lock_before_iteration(monkeypatch):
+    """alist 迭代期间锁必须已释放（同任务内再调用包装方法不得死锁）。"""
+    monkeypatch.setenv("RLS_ENFORCED", "true")
+    from lvyan.db.tenant_saver import TenantAwareCheckpointer
+
+    inner = _FakeSaver()
+    saver = TenantAwareCheckpointer(inner)
+
+    consumed = []
+    async for item in saver.alist(_config()):
+        consumed.append(item)
+        # 消费期间再次调用（锁必须可用，否则死锁）
+        await saver.aget(_config())
+    assert consumed == [{"config": _config()}]

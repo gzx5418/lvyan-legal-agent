@@ -25,8 +25,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
+import uuid
 import logging
 from collections import defaultdict
 from typing import Any, Protocol
@@ -227,7 +229,9 @@ class RedisBackend:
                 return False
             # 阶段 2：在限额内才添加新条目
             pipe2 = self._client.pipeline(transaction=True)
-            pipe2.zadd(rkey, {f"{now}": now})
+            # member 必须唯一：同一时刻的并发请求若共用时间戳字符串会互相覆盖
+            # （sorted set member 唯一），导致实际放行数超过限额。附加随机后缀保证唯一。
+            pipe2.zadd(rkey, {f"{now}:{uuid.uuid4().hex[:8]}": now})
             pipe2.expire(rkey, self._WINDOW_SECONDS + 5)
             pipe2.execute()
             return True
@@ -334,10 +338,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         except Exception:  # noqa: BLE001 - 限流层不抛认证错误
             return None
 
-    def _get_limit(self, path: str) -> int | None:
+    def _get_limit(self, path: str) -> tuple[str, int] | None:
+        """返回 (匹配前缀, 每分钟上限)。
+
+        限流键必须用匹配到的**前缀**而非完整路径：/api/agent/hitl/{run_id}
+        等动态路径若用完整 path 作键，每个 run_id 都是独立桶，限流形同虚设。
+        """
         for prefix, env_name, default in _PATH_LIMITS:
             if path.startswith(prefix):
-                return _get_int(env_name, default)
+                return prefix, _get_int(env_name, default)
         return None
 
     def _is_high_cost_path(self, path: str) -> bool:
@@ -355,12 +364,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if path in _EXEMPT_PATHS:
             return await call_next(request)
 
-        limit = self._get_limit(path)
-        if limit is None:
+        limit_match = self._get_limit(path)
+        if limit_match is None:
             return await call_next(request)
+        rate_prefix, limit = limit_match
 
-        # Redis 后端不可用时：高成本写路径返回 503，读取不受影响
-        if self._is_redis and not self._backend.is_healthy():
+        # Redis 后端不可用时：高成本写路径返回 503，读取不受影响。
+        # is_healthy 含同步网络 IO（ping/connect），放入线程池避免阻塞事件循环。
+        if self._is_redis and not await asyncio.to_thread(self._backend.is_healthy):
             if self._is_high_cost_path(path):
                 _logger.warning("Redis 不可用，拒绝高成本写请求: %s %s", request.method, path)
                 return JSONResponse(
@@ -369,10 +380,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": "30"},
                 )
 
-        client_key = self._get_client_key(request)
-        rate_key = f"{path}:{client_key}"
+        # _get_client_key 可能触发同步 JWKS HTTP 请求（jwt 模式）；
+        # is_allowed（Redis 后端）是同步网络调用。二者均放入线程池，
+        # 避免 Redis/JWKS 抖动时阻塞整个事件循环。
+        client_key = await asyncio.to_thread(self._get_client_key, request)
+        rate_key = f"{rate_prefix}:{client_key}"
 
-        if not self._backend.is_allowed(rate_key, limit):
+        if not await asyncio.to_thread(self._backend.is_allowed, rate_key, limit):
             _logger.warning(
                 "速率限制触发: %s %s (key=%s, limit=%d/min)",
                 request.method,

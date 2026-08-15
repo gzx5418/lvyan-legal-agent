@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -47,6 +48,8 @@ from lvyan.validators.output import (
 from lvyan.validators.privacy import redact_privacy
 
 __all__ = ["output_guardrail", "MAX_OUTPUT_ITERATIONS"]
+
+_logger = logging.getLogger("lvyan.nodes.output_guardrail")
 
 
 # 输出回退最大重试次数（建议 2）
@@ -273,17 +276,33 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
 
             elif action == "edit":
                 if not edited_output:
-                    raise ValueError("edit 操作缺少 edited_output")
-                final_output = str(edited_output)
-                pending_human_approval["status"] = "edited"
-                notes.append("用户已编辑输出，已替换 final_output")
+                    # HITL 是最靠近用户的环节：edit 缺少 edited_output 时与
+                    # 「无响应 fail-closed」同理，降级为按 reject 处理并保留
+                    # 原输出（final_output 中仍附原分析正文），不让整个 run 崩溃。
+                    _logger.warning("edit 操作缺少 edited_output，降级为 reject 处理")
+                    final_output = (
+                        final_output + "\n\n---\n⚠ 您已拒绝执行上述操作。Agent 不会自动执行。"
+                    )
+                    notes.append("edit 响应缺少 edited_output，已按拒绝处理，原分析正文已保留")
+                    pending_human_approval["status"] = "rejected"
+                else:
+                    final_output = str(edited_output)
+                    pending_human_approval["status"] = "edited"
+                    notes.append("用户已编辑输出，已替换 final_output")
 
             elif action == "approve":
                 pending_human_approval["status"] = "approved"
                 notes.append("用户已批准不可逆操作")
 
             else:
-                raise ValueError(f"未知 HITL action: {action}")
+                # 未知 action 与无响应同理 fail-closed：按 reject 处理而非崩溃，
+                # 未经明确批准的不可逆操作一律不执行。
+                _logger.warning("未知 HITL action=%r，降级为 reject 处理", action)
+                final_output = (
+                    final_output + "\n\n---\n⚠ 您已拒绝执行上述操作。Agent 不会自动执行。"
+                )
+                notes.append(f"未识别的人工确认响应（{action}），已按拒绝处理，原分析正文已保留")
+                pending_human_approval["status"] = "rejected"
 
         # P1-2 修复：仅在 HITL 未启用（status 仍为 pending）时追加确认提示；
         # 已批准/拒绝/编辑后不应再要求确认

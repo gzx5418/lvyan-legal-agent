@@ -13,6 +13,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from .web import OnlineSource
+
 
 class AnswerMeta(BaseModel):
     """输出顶部身份与适用范围信息（程序生成，不由模型自由修改）。"""
@@ -140,6 +142,7 @@ class LegalAnswerV1(BaseModel):
     risks: list[RiskItem] = []
     action_plan: list[ActionItem] = []
     citations: list[LegalCitation] = []
+    online_sources: list[OnlineSource] = []
     uncertainties: list[UncertaintyItem] = []
     disclaimer: str
 
@@ -157,4 +160,5 @@ __all__ = [
     "LegalCitation",
     "CitationLevel",
     "UncertaintyItem",
+    "OnlineSource",
 ]

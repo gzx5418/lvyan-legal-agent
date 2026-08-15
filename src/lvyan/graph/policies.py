@@ -1,14 +1,21 @@
 """策略守卫：迭代预算、成本预算与循环失控检测。
 
-在关键节点（如 ``parallel_retrieval`` 重检索前、``composer`` 输出前）调用
-``enforce_policies(state)``，若违反任何策略则抛出 :class:`PolicyViolationError`
-中断图执行，避免无界迭代 / 成本失控。
+接线说明（勿再回到"纸面防线"状态）：
+- ``parallel_retrieval``（retrieve_statutes.py）入口调用
+  :func:`enforce_retrieval_guards`（循环失控 + 成本预算），违反时该节点
+  降级返回空检索结果并记 warning，不中断 run。
+- 检索**迭代**预算不在 parallel_retrieval 检查：iteration 计数器由
+  ``routing.route_after_citation`` 独占控制，两处共享同一计数器会互相
+  侵蚀预算（critic 回退也消耗同一计数器），把合法重检索误判为超限。
+- :func:`enforce_policies` 保留为完整检查入口，供测试与未来接入
+  composer 输出前的场景使用。
 
 成本估算说明
 ------------
 P0-10 后：``check_cost_budget`` 优先读取 CostTracker 中该 thread 的真实累计
 成本（LLM 成功调用的 token 用量按单价表折算 USD）；无 thread_id 或尚无成本
-记录时回退到 ``iteration * 0.5`` 占位估算。
+记录时回退到 ``iteration * 0.5`` 占位估算（多数 run 的 iteration 为 0，
+该回退仅作兜底，实际约束依赖真实成本记录）。
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ __all__ = [
     "check_cost_budget",
     "detect_loop",
     "enforce_policies",
+    "enforce_retrieval_guards",
 ]
 
 
@@ -94,6 +102,26 @@ def detect_loop(state: Any) -> bool:
         if text:
             counter[text] += 1
     return any(count >= 3 for count in counter.values())
+
+
+def enforce_retrieval_guards(state: Any) -> None:
+    """检索入口守卫：循环失控 + 成本预算。
+
+    与 :func:`enforce_policies` 的区别：**不**检查检索迭代预算——iteration
+    计数器由 ``routing.route_after_citation`` 独占控制（critic 回退与
+    citation 重检索共享同一计数器），在检索入口重复检查会把合法的
+    重检索误判为超限。
+
+    违反时抛 :class:`PolicyViolationError`（``loop`` / ``cost_budget``），
+    调用方（parallel_retrieval）捕获后降级返回空结果，不中断 run。
+    """
+    if detect_loop(state):
+        raise PolicyViolationError("loop", "检测到检索循环失控：相同 query_text 重复 >= 3 次")
+    if not check_cost_budget(state):
+        raise PolicyViolationError(
+            "cost_budget",
+            f"估算成本超出预算 {settings.max_cost_budget_usd} USD",
+        )
 
 
 def enforce_policies(state: Any) -> None:

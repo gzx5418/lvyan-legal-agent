@@ -277,6 +277,24 @@ def load_corpus_manifest(manifests_dir: Path | None = None) -> dict[str, Any] | 
 # ---------------------------------------------------------------------------
 # P0-2：真实磁盘文件校验
 # ---------------------------------------------------------------------------
+def _manifest_int(manifest: dict[str, Any], key: str, default: int = 0) -> int | None:
+    """防御性解析 manifest 中的整数字段。
+
+    manifest 文件可能被半写入 / 手工编辑损坏（如 ``"chunks_count": "8w5k"``），
+    ``int()`` 抛 ValueError/TypeError 时不能让异常向上传播导致 /readyz 500，
+    而应记 warning 并返回 ``None``，由调用方按「校验不通过」处理。
+    """
+    try:
+        return int(manifest.get(key, default))
+    except (TypeError, ValueError):
+        _logger.warning(
+            "[manifest] 字段 %s 损坏（%r），按校验不通过处理",
+            key,
+            manifest.get(key),
+        )
+        return None
+
+
 def _verify_disk_indexes(
     manifest: dict[str, Any],
     manifests_dir: Path,
@@ -341,7 +359,8 @@ def _verify_disk_indexes(
     disk_chunks = article_data.get("chunks") if isinstance(article_data, dict) else None
     if not isinstance(disk_chunks, list):
         return "article_index_invalid"
-    if len(disk_chunks) != int(manifest.get("chunks_count", 0)):
+    expected_chunks_count = _manifest_int(manifest, "chunks_count")
+    if expected_chunks_count is None or len(disk_chunks) != expected_chunks_count:
         return "article_index_count_mismatch"
     try:
         disk_sig = _compute_chunk_signature(disk_chunks)
@@ -383,7 +402,18 @@ def _verify_disk_indexes(
         return "bm25_schema_mismatch"
     if str(bm25_data.get("signature") or "") != str(manifest.get("bm25_signature") or ""):
         return "bm25_signature_mismatch"
-    if int(bm25_data.get("n_docs", 0)) != int(manifest.get("bm25_n_docs", 0)):
+    expected_n_docs = _manifest_int(manifest, "bm25_n_docs")
+    if expected_n_docs is None:
+        return "bm25_doc_count_mismatch"
+    try:
+        actual_n_docs = int(bm25_data.get("n_docs", 0))
+    except (TypeError, ValueError):
+        _logger.warning(
+            "[manifest] bm25 索引 n_docs 字段损坏（%r），按校验不通过处理",
+            bm25_data.get("n_docs"),
+        )
+        return "bm25_doc_count_mismatch"
+    if actual_n_docs != expected_n_docs:
         return "bm25_doc_count_mismatch"
 
     return None
@@ -427,7 +457,10 @@ def _verify_uncached(lawtext_dir: Path, manifests_dir: Path) -> dict[str, Any]:
         return result
 
     # chunks_count > 0 校验（空索引通常是 submodule 未检出）
-    chunks_count = int(manifest.get("chunks_count", 0))
+    chunks_count = _manifest_int(manifest, "chunks_count")
+    if chunks_count is None:
+        result["reason"] = "manifest_corrupt"
+        return result
     if chunks_count == 0:
         result["reason"] = "empty_index"
         return result
@@ -440,7 +473,8 @@ def _verify_uncached(lawtext_dir: Path, manifests_dir: Path) -> dict[str, Any]:
         return result
 
     # bm25_n_docs 应等于 chunks_count
-    if int(manifest.get("bm25_n_docs", 0)) != chunks_count:
+    bm25_n_docs = _manifest_int(manifest, "bm25_n_docs")
+    if bm25_n_docs is None or bm25_n_docs != chunks_count:
         result["reason"] = "bm25_doc_count_mismatch"
         return result
 
@@ -625,6 +659,7 @@ def ensure_corpus_ready(
     reason = check["reason"]
     if (
         reason == "manifest_missing"
+        or reason == "manifest_corrupt"
         or reason == "lawtext_changed"
         or reason == "empty_index"
         or (reason and reason.startswith(("article_index_", "bm25_")))

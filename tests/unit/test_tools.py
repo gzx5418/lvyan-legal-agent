@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import json
-from datetime import date
 from pathlib import Path
 
 import pytest
@@ -168,26 +167,49 @@ def test_verify_statute_status_unknown_source():
 # 4. calculate_legal_deadline
 # ---------------------------------------------------------------------------
 def test_calculate_legal_deadline_labor_arbitration_one_year():
-    """劳动仲裁时效 1 年（365 天）。"""
+    """劳动仲裁时效 1 年：按日历年推算到期日（跨闰年为 366 天）。"""
     result = calculate_legal_deadline("2024-01-01", "labor_arbitration")
 
     assert isinstance(result, DeadlineResult)
     assert result.tool_name == "calculate_legal_deadline"
     assert result.success is True
-    assert result.deadline_days == 365
-    # 验算到期日（用 datetime 计算，避免闰年误判）
-    from datetime import timedelta
-
-    expected_date = (date.fromisoformat("2024-01-01") + timedelta(days=365)).isoformat()
-    assert result.deadline_date == expected_date
+    # 2024 为闰年：2024-01-01 + 1 个日历年 = 2025-01-01，实际经过 366 天
+    assert result.deadline_date == "2025-01-01"
+    assert result.deadline_days == 366
     assert isinstance(result.warning, str)
     assert "1 年" in result.warning
 
 
+def test_calculate_legal_deadline_leap_day_start():
+    """起算日为 2 月 29 日时，到期年无对应日落到 2 月最后一天。"""
+    result = calculate_legal_deadline("2024-02-29", "labor_arbitration")
+    assert result.success is True
+    assert result.deadline_date == "2025-02-28"
+
+
+def test_calculate_legal_deadline_max_protection_20_years():
+    """《民法典》第188条最长权利保护期为 20 年（非 4 年）。"""
+    result = calculate_legal_deadline("2024-01-01", "civil_litigation_long")
+    assert result.success is True
+    assert result.deadline_date == "2044-01-01"
+    assert "20 年" in result.warning
+
+
+def test_calculate_legal_deadline_insurance_claim():
+    """《保险法》第26条：非人寿 2 年、人寿 5 年。"""
+    non_life = calculate_legal_deadline("2024-01-01", "insurance_claim")
+    assert non_life.success is True
+    assert non_life.deadline_date == "2026-01-01"
+    life = calculate_legal_deadline("2024-01-01", "insurance_claim_life")
+    assert life.success is True
+    assert life.deadline_date == "2029-01-01"
+
+
 def test_calculate_legal_deadline_civil_litigation_three_years():
-    """民事诉讼时效 3 年（1095 天）。"""
+    """民事诉讼时效 3 年：按日历年推算（跨闰年 1096 天）。"""
     result = calculate_legal_deadline("2024-01-01", "civil_litigation")
-    assert result.deadline_days == 1095
+    assert result.deadline_date == "2027-01-01"
+    assert result.deadline_days == 1096
     assert result.success is True
 
 

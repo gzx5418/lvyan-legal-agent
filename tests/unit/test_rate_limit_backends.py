@@ -86,6 +86,8 @@ class TestMiddlewareKeyStrategy:
         # 启用认证 + trusted_proxy 模式，让 _resolve_user_id 解析 X-User-ID
         monkeypatch.setenv("AUTH_ENABLED", "true")
         monkeypatch.setenv("AUTH_MODE", "trusted_proxy")
+        # X-User-ID 仅在直连来源位于 TRUSTED_PROXIES 白名单时可信
+        monkeypatch.setenv("TRUSTED_PROXIES", "192.168.1.1")
         from lvyan.api import auth as auth_mod
 
         importlib.reload(auth_mod)

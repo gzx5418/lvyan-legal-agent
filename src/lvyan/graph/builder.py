@@ -66,6 +66,7 @@ checkpointer 策略
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -120,6 +121,8 @@ NODE_NAMES: tuple[str, ...] = (
     "output_guardrail",
     "legal_answer_finalizer",
 )
+
+_logger = logging.getLogger("lvyan.graph.builder")
 
 
 def _register_nodes(graph: StateGraph) -> None:
@@ -301,7 +304,7 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
                 f"psycopg / langgraph-checkpoint-postgres 未安装（{exc}），"
                 f"且当前为强制持久化模式，拒绝回退 MemorySaver"
             ) from exc
-        print(f"[lvyan.graph] psycopg 未安装（{exc}），回退到 MemorySaver")
+        _logger.warning(f"[lvyan.graph] psycopg 未安装（{exc}），回退到 MemorySaver")
         return build_graph()
 
     conn = None
@@ -327,7 +330,7 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
             raise PersistenceUnavailable(
                 f"PostgreSQL 不可达（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
             ) from exc
-        print(f"[lvyan.graph] PostgreSQL 不可达（{exc}），回退到 MemorySaver")
+        _logger.warning(f"[lvyan.graph] PostgreSQL 不可达（{exc}），回退到 MemorySaver")
         return build_graph()
 
     try:
@@ -342,7 +345,7 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
             raise PersistenceUnavailable(
                 f"PostgresSaver 初始化失败（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
             ) from exc
-        print(f"[lvyan.graph] PostgresSaver 初始化失败（{exc}），回退到 MemorySaver")
+        _logger.warning(f"[lvyan.graph] PostgresSaver 初始化失败（{exc}），回退到 MemorySaver")
         return build_graph()
 
 
@@ -376,7 +379,7 @@ async def build_graph_with_postgres_async(dsn: str | None = None) -> Any:
                 f"psycopg / langgraph-checkpoint-postgres 未安装（{exc}），"
                 f"且当前为强制持久化模式，拒绝回退 MemorySaver"
             ) from exc
-        print(f"[lvyan.graph] psycopg 未安装（{exc}），回退到 MemorySaver")
+        _logger.warning(f"[lvyan.graph] psycopg 未安装（{exc}），回退到 MemorySaver")
         return build_graph()
 
     conn = None
@@ -403,7 +406,7 @@ async def build_graph_with_postgres_async(dsn: str | None = None) -> Any:
             raise PersistenceUnavailable(
                 f"PostgreSQL 不可达（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
             ) from exc
-        print(f"[lvyan.graph] PostgreSQL 不可达（{exc}），回退到 MemorySaver")
+        _logger.warning(f"[lvyan.graph] PostgreSQL 不可达（{exc}），回退到 MemorySaver")
         return build_graph()
 
     try:
@@ -418,5 +421,5 @@ async def build_graph_with_postgres_async(dsn: str | None = None) -> Any:
             raise PersistenceUnavailable(
                 f"AsyncPostgresSaver 初始化失败（{exc}），且当前为强制持久化模式，拒绝回退 MemorySaver"
             ) from exc
-        print(f"[lvyan.graph] AsyncPostgresSaver 初始化失败（{exc}），回退到 MemorySaver")
+        _logger.warning(f"[lvyan.graph] AsyncPostgresSaver 初始化失败（{exc}），回退到 MemorySaver")
         return build_graph()

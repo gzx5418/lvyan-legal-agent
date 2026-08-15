@@ -89,6 +89,68 @@ def test_citation_verifier_missing_citation_when_statutes_present(monkeypatch):
 
     import datetime
 
+    # statute 带 article_number：缺条号的法条在 0 引用时会走数据侧元数据缺失
+    # warning 降级路径（不触发 fail-closed），此处测的是 fail-closed 主路径。
+    state = {
+        "run_id": "r1",
+        "thread_id": "t1",
+        "current_date": datetime.date(2026, 7, 26),
+        "user_goal": "咨询",
+        "complexity": "light",
+        "statutes": [
+            {
+                "source_id": "s1",
+                "title": "民法典",
+                "article_number": "第一百八十八条",
+                "status": "effective",
+            }
+        ],
+        "reasoning_result": None,
+        "iteration": 0,
+        "retrieval_queries": [],
+    }
+    result = cv_module.citation_verifier(state)
+    audit = result.get("citation_audit") or {}
+    assert audit.get("passed") is False
+
+
+def test_citation_verifier_zero_citation_missing_article_number_downgrades_to_warning(
+    monkeypatch,
+):
+    """法条缺 article_number 时 0 引用归因数据侧元数据缺失 → warning 而非 fail-closed。
+
+    composer 对无条号法条输出「《XX法》：摘录」（无「第X条」），引用正则必然
+    0 命中，重检索无法修复；该情形不应触发强制重检索 / 高风险。
+    """
+    from lvyan.nodes import citation_verifier as cv_module
+    from lvyan.validators.citation import CitationValidationReport
+    from lvyan.validators.authority_status import AuthorityStatusReport
+    from lvyan.validators.grounding import GroundingReport
+
+    monkeypatch.setattr(
+        cv_module,
+        "validate_citations",
+        lambda *a, **kw: CitationValidationReport(
+            total_citations=0, valid_citations=0, issues=[], passed=True
+        ),
+    )
+    monkeypatch.setattr(
+        cv_module,
+        "validate_authority_status",
+        lambda *a, **kw: AuthorityStatusReport(
+            total_authorities=1, effective_count=1, issues=[], passed=True
+        ),
+    )
+    monkeypatch.setattr(
+        cv_module,
+        "validate_grounding",
+        lambda *a, **kw: GroundingReport(
+            total_citations=0, grounded_citations=0, issues=[], passed=True
+        ),
+    )
+
+    import datetime
+
     state = {
         "run_id": "r1",
         "thread_id": "t1",
@@ -102,7 +164,9 @@ def test_citation_verifier_missing_citation_when_statutes_present(monkeypatch):
     }
     result = cv_module.citation_verifier(state)
     audit = result.get("citation_audit") or {}
-    assert audit.get("passed") is False
+    # 不触发 fail-closed：audit 通过，且不追加重检索查询
+    assert audit.get("passed") is True
+    assert not result.get("retrieval_queries")
 
 
 # ---------------------------------------------------------------------------

@@ -175,7 +175,10 @@ def _as_unix_timestamp(value: Any) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
-        return time.time()
+        # 解析失败不能伪装成"刚刚"（回退 time.time() 会破坏排序/展示），
+        # 回退 0.0 并记录告警，让失真的数据可被发现。
+        _logger.warning("时间戳解析失败，回退 0.0：原始值 %r", value)
+        return 0.0
 
 
 def _detect_checkpointer_kind_from_instance(checkpointer: Any) -> str:
@@ -473,20 +476,6 @@ def _get_cors_origins() -> list[str]:
     return origins
 
 
-def _read_text_preview(file_path: Path, max_chars: int = 500) -> str:
-    """读取文本文件前 N 字符作为预览；非文本或读取失败返回空串。"""
-    try:
-        for enc_name in ("utf-8", "gbk", "gb2312", "latin-1"):
-            try:
-                text = file_path.read_text(encoding=enc_name)
-                return text[:max_chars]
-            except UnicodeDecodeError:
-                continue
-    except Exception:  # noqa: BLE001
-        pass
-    return ""
-
-
 def _atomic_write_bytes(target: Path, data: bytes) -> None:
     """原子写入字节文件：先写临时文件再 ``os.replace`` 覆盖目标。"""
     tmp = target.with_suffix(target.suffix + ".tmp")
@@ -528,23 +517,6 @@ def _metadata_path_for_file_id(file_id: str) -> Path:
     if not _UPLOAD_FILE_ID_RE.fullmatch(file_id):
         raise HTTPException(status_code=422, detail="附件 file_id 格式非法")
     return _resolve_upload_path(str(_UPLOAD_DIR / f"{file_id}.json"))
-
-
-# P1-5：附件包装的闭合标签。选择一个正文里几乎不会出现的随机后缀，
-# 即便附件正文含 ``</untrusted_document>`` 也无法提前关闭包装边界。
-_UNTRUSTED_DOC_CLOSE = "</untrusted_document>"
-
-
-def _xml_attr_escape(value: str) -> str:
-    """转义字符串以安全嵌入 XML 属性值（双引号上下文）。"""
-    return (
-        value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-    )
-
-
-def _harden_attachment_content(content: str) -> str:
-    """中性化附件正文中可能出现的闭合标签，防止逃逸包装边界（P1-5）。"""
-    return content.replace(_UNTRUSTED_DOC_CLOSE, "&lt;/untrusted_document&gt;")
 
 
 def _enforce_zip_uncompressed_limit(content: bytes, limit: int) -> None:
@@ -768,9 +740,7 @@ def _lifespan(app: FastAPI) -> Any:
         yield
 
         # P3: lifespan 退出时执行停机序列
-        if not coordinator.is_shutting_down:
-            coordinator._shutting_down = True
-            await coordinator._shutdown_sequence()
+        await coordinator.begin_shutdown()
 
     return _impl(app)
 
@@ -868,32 +838,11 @@ def create_app(
     app.state.case_vault = case_vault
     app.state.case_vault_enabled = case_vault_enabled
 
-    app.add_middleware(
-        CORSMiddleware,
-        # P2-13：CORS 白名单；通过 CORS_ALLOWED_ORIGINS 环境变量覆盖。
-        # 默认 localhost 用于本地开发；未配置时回退到 ["*"] 仅本地开发可用。
-        allow_origins=_get_cors_origins(),
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Authorization", "X-User-ID"],
-    )
-
-    # P4：请求 ID 中间件（最外层，确保所有日志携带 request_id）
-    try:
-        from lvyan.observability.request_id import RequestIDMiddleware
-
-        app.add_middleware(RequestIDMiddleware)
-    except ImportError:
-        pass
-
-    # P4：HTTP 请求指标中间件（必须在 RateLimitMiddleware 之前添加，
-    # 确保被限流的 429 响应也被指标覆盖）
-    try:
-        from lvyan.observability.http_metrics import HTTPMetricsMiddleware
-
-        app.add_middleware(HTTPMetricsMiddleware)
-    except ImportError:
-        pass
+    # 中间件顺序说明：Starlette 的 add_middleware 是 insert(0)，**后添加的在最外层**。
+    # 目标洋葱顺序（外→内）：CORS → RequestID → HTTPMetrics → SecurityHeaders → RateLimit。
+    # - CORS 最外层：被限流的 429 响应也携带 CORS 头，跨域浏览器端能看到真实状态码；
+    # - HTTPMetrics 在 RateLimit 外层：429 响应也被指标覆盖；
+    # - RateLimit 最内层（紧贴路由）：限流判定前不做多余工作。
 
     # P1-4：基于滑动窗口的速率限制（防止未认证场景下的资源滥用）
     app.add_middleware(RateLimitMiddleware)
@@ -918,6 +867,34 @@ def create_app(
             # HTML 必须重新验证，避免它长期引用已经下线的静态资源版本。
             response.headers["Cache-Control"] = "no-cache"
         return response
+
+    # P4：HTTP 请求指标中间件（在 RateLimitMiddleware 之后添加 → 更外层，
+    # 确保被限流的 429 响应也被指标覆盖）
+    try:
+        from lvyan.observability.http_metrics import HTTPMetricsMiddleware
+
+        app.add_middleware(HTTPMetricsMiddleware)
+    except ImportError:
+        pass
+
+    # P4：请求 ID 中间件（在指标之后添加 → 更外层，所有日志携带 request_id）
+    try:
+        from lvyan.observability.request_id import RequestIDMiddleware
+
+        app.add_middleware(RequestIDMiddleware)
+    except ImportError:
+        pass
+
+    # P2-13：CORS 白名单；通过 CORS_ALLOWED_ORIGINS 环境变量覆盖。
+    # 最后添加 → 最外层，429/503 等中间件短路响应也带 CORS 头。
+    # 默认 localhost 用于本地开发；未配置时回退到 ["*"] 仅本地开发可用。
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_get_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "X-User-ID"],
+    )
 
     @app.get("/api/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -1119,7 +1096,8 @@ def create_app(
                         ),
                     )
 
-                # P1-4：单文件字符上限（仅用于预算校验，不截断正文 —— 正文由 chunker 切块）
+                # P1-4：单文件字符上限——超出预算时截断到 max_extracted_chars_per_file，
+                # 截断后的正文再交给 chunker 切块。
                 if len(md) > _settings.max_extracted_chars_per_file:
                     md = md[: _settings.max_extracted_chars_per_file]
                 total_chars += len(md)
@@ -1159,7 +1137,9 @@ def create_app(
         if req.thread_id:
             if metadata_store is not None:
                 try:
-                    durable_thread = metadata_store.get_thread(req.thread_id)
+                    durable_thread = await asyncio.to_thread(
+                        metadata_store.get_thread, req.thread_id
+                    )
                 except Exception as exc:  # noqa: BLE001
                     raise HTTPException(
                         status_code=503,
@@ -1170,7 +1150,7 @@ def create_app(
                         status_code=404,
                         detail="会话不存在",
                     )
-            existing_meta = dict(mem.list_threads()).get(req.thread_id)
+            existing_meta = dict(await asyncio.to_thread(mem.list_threads)).get(req.thread_id)
             if existing_meta is not None:
                 assert_thread_owner(existing_meta, user_id, req.thread_id)
             elif is_auth_enabled():
@@ -1278,7 +1258,7 @@ def create_app(
             if metadata_store is None:
                 raise HTTPException(status_code=404, detail="资源不存在")
             try:
-                durable_run = metadata_store.get_run(run_id)
+                durable_run = await asyncio.to_thread(metadata_store.get_run, run_id)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,
@@ -1368,15 +1348,18 @@ def create_app(
     ) -> dict[str, Any]:
         if metadata_store is not None:
             try:
-                meta = metadata_store.get_thread(thread_id)
-                messages = metadata_store.list_messages(thread_id, user_id)
+                # 同步 DB 查询放入线程池，避免 Postgres 延迟阻塞事件循环
+                meta = await asyncio.to_thread(metadata_store.get_thread, thread_id)
+                messages = await asyncio.to_thread(
+                    metadata_store.list_messages, thread_id, user_id
+                )
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,
                     detail="thread metadata 暂时不可用",
                 ) from exc
         else:
-            meta = dict(mem.list_threads()).get(thread_id)
+            meta = dict(await asyncio.to_thread(mem.list_threads)).get(thread_id)
             messages = []
         # P1-3：ownership 以可信元数据为准；meta 缺失才 404。
         assert_thread_owner(meta, user_id, thread_id)
@@ -1433,7 +1416,7 @@ def create_app(
         """删除指定会话：从 checkpointer 与索引中移除。"""
         if metadata_store is not None:
             try:
-                meta = metadata_store.get_thread(thread_id)
+                meta = await asyncio.to_thread(metadata_store.get_thread, thread_id)
                 assert_thread_owner(meta, user_id, thread_id)
                 if manager.has_active_thread_runs(thread_id):
                     raise HTTPException(
@@ -1492,7 +1475,7 @@ def create_app(
                     detail=f"thread {thread_id} 无记录",
                 )
         else:
-            meta = dict(mem.list_threads()).get(thread_id)
+            meta = dict(await asyncio.to_thread(mem.list_threads)).get(thread_id)
             assert_thread_owner(meta, user_id, thread_id)
             if manager.has_active_thread_runs(thread_id):
                 raise HTTPException(
@@ -1838,7 +1821,7 @@ def create_app(
         # 1. 获取 run 记录
         if metadata_store is not None:
             try:
-                run = metadata_store.get_run(run_id)
+                run = await asyncio.to_thread(metadata_store.get_run, run_id)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(status_code=503, detail="run metadata 暂时不可用") from exc
         else:

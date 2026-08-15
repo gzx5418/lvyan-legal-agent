@@ -25,6 +25,12 @@ _logger = logging.getLogger("lvyan.observability.http_metrics")
 # UUID 和数字 ID 归一化（降低 Prometheus 标签基数）
 _UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _ID_PATTERN = re.compile(r"/\d+(?=/|$)")
+# 本项目 run_id 格式为 run-<32位hex>、thread_id 为 thread-<hex12>，
+# 出现在路径中如 /api/agent/stream/run-abc123...，需归一化避免高基数
+_RUN_ID_PATTERN = re.compile(r"run-[0-9a-f]{8,}")
+_THREAD_ID_PATTERN = re.compile(r"thread-[0-9a-f]{8,}")
+# 无前缀的长 hex 段（≥16 位）同样视为可归一化的标识符
+_LONG_HEX_PATTERN = re.compile(r"\b[0-9a-f]{16,}\b")
 
 # 不收集指标的路径
 _SKIP_PATHS = frozenset({"/livez", "/readyz", "/metrics", "/openapi.json"})
@@ -34,6 +40,9 @@ def _normalize_path(path: str) -> str:
     """归一化路径以降低标签基数。"""
     path = _UUID_PATTERN.sub(":id", path)
     path = _ID_PATTERN.sub("/:id", path)
+    path = _RUN_ID_PATTERN.sub("run-:id", path)
+    path = _THREAD_ID_PATTERN.sub("thread-:id", path)
+    path = _LONG_HEX_PATTERN.sub(":hex", path)
     return path
 
 

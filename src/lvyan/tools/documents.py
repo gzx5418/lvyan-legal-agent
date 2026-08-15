@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -84,7 +84,8 @@ class DocumentExtractResult(ToolResult):
     doc_type: DocType = "unknown"
     text: str = ""  # excerpt 前 5000 字
     full_text_length: int = 0
-    extracted_at: datetime = Field(default_factory=datetime.now)
+    # UTC 时间戳（与 base.py 的 UTC 约定一致，避免 naive 本地时间）
+    extracted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     injection_detection: InjectionDetectionResult | None = None
     # success / error 由基类提供
 

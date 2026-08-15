@@ -184,6 +184,20 @@ class SafeIndexStore:
         if not path.is_file():
             return None
 
+        # 读取前预检文件大小：文件头（magic 4B + version 1B + header_len 4B）
+        # + header 上限 + payload 上限之外的文件直接拒绝，避免先全量读入
+        # 数百 MB 甚至更大的损坏/恶意文件后再做大小检查。
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            _logger.warning("索引文件状态读取失败: %s", path.name)
+            return None
+        if file_size > len(_MAGIC) + 1 + 4 + _MAX_HEADER_BYTES + _MAX_PAYLOAD_BYTES:
+            _logger.warning(
+                "索引文件大小超限: %s (%d bytes)", path.name, file_size
+            )
+            return None
+
         try:
             with open(path, "rb") as f:
                 # 读取 magic

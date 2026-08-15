@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import calendar
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Literal
 
@@ -22,38 +24,95 @@ from lvyan.tools.base import ToolResult
 # 常量与规则表
 # ---------------------------------------------------------------------------
 
-# 期限类型 -> 天数映射（中国大陆常见诉讼时效与法定期限）
-_DEADLINE_RULES: dict[str, int] = {
-    "labor_arbitration": 365,  # 劳动仲裁时效 1 年
-    "civil_litigation": 1095,  # 民事诉讼时效 3 年
-    "civil_litigation_short": 365,  # 特殊短期诉讼时效 1 年（身体伤害等）
-    "civil_litigation_long": 1460,  # 最长诉讼时效 4 年（部分情形）
-    "administrative_reconsideration": 60,  # 行政复议 60 日
-    "administrative_litigation": 180,  # 行政诉讼 6 个月
-    "appeal_judgment": 15,  # 不服一审判决上诉期 15 日
-    "appeal_ruling": 10,  # 不服一审裁定上诉期 10 日
-    "appeal_administrative_judgment": 15,  # 行政诉讼上诉期 15 日
-    "contract_quality_objection": 730,  # 质量异议最长 2 年
-    "consumer_complaint": 1095,  # 消费者投诉时效参照民事诉讼 3 年
-    "insurance_claim": 1460,  # 保险理赔时效参照 4 年（部分险种）
-}
-"""期限类型 -> 天数映射表。"""
 
-# 期限类型的中文说明（用于 warning 文本）
-_DEADLINE_LABELS: dict[str, str] = {
-    "labor_arbitration": "劳动仲裁时效（1 年）",
-    "civil_litigation": "民事诉讼时效（3 年）",
-    "civil_litigation_short": "民事诉讼短期时效（1 年）",
-    "civil_litigation_long": "民事诉讼最长时效（4 年）",
-    "administrative_reconsideration": "行政复议申请期限（60 日）",
-    "administrative_litigation": "行政诉讼起诉期限（6 个月）",
-    "appeal_judgment": "不服一审判决上诉期（15 日）",
-    "appeal_ruling": "不服一审裁定上诉期（10 日）",
-    "appeal_administrative_judgment": "行政诉讼上诉期（15 日）",
-    "contract_quality_objection": "质量异议期（最长 2 年）",
-    "consumer_complaint": "消费者投诉时效（3 年）",
-    "insurance_claim": "保险理赔时效（4 年）",
+@dataclass(frozen=True)
+class DeadlineRule:
+    """期限规则：法定期间按「年/月/日」为单位，到期日用日历推算。
+
+    ``nominal_days`` 仅为近似展示值（如 3 年 ≈ 1095 天）；实际到期日按
+    日历年/月平移计算（期间计算参照《民法典》第 200-205 条），跨闰年时
+    与 nominal_days 可能相差 1 天。
+    """
+
+    unit: Literal["years", "months", "days"]
+    value: int
+    label: str
+    basis: str  # 法律依据
+
+    @property
+    def nominal_days(self) -> int:
+        if self.unit == "days":
+            return self.value
+        if self.unit == "months":
+            return self.value * 30
+        return self.value * 365
+
+
+# 期限类型 -> 规则映射（中国大陆常见诉讼时效与法定期限）
+_DEADLINE_RULES: dict[str, DeadlineRule] = {
+    "labor_arbitration": DeadlineRule(
+        "years", 1, "劳动仲裁时效（1 年）", "《劳动争议调解仲裁法》第27条"
+    ),
+    "civil_litigation": DeadlineRule(
+        "years", 3, "民事诉讼时效（3 年）", "《民法典》第188条"
+    ),
+    "civil_litigation_short": DeadlineRule(
+        "years", 1, "民事诉讼短期时效（1 年）", "《民法典》第188条（特别法另有短期规定的从其规定）"
+    ),
+    "civil_litigation_long": DeadlineRule(
+        "years", 20, "民事诉讼最长权利保护期（20 年）", "《民法典》第188条第2款：自权利受到损害之日起超过二十年的，法院不予保护"
+    ),
+    "administrative_reconsideration": DeadlineRule(
+        "days", 60, "行政复议申请期限（60 日）", "《行政复议法》"
+    ),
+    "administrative_litigation": DeadlineRule(
+        "months", 6, "行政诉讼起诉期限（6 个月）", "《行政诉讼法》第46条"
+    ),
+    "appeal_judgment": DeadlineRule(
+        "days", 15, "不服一审判决上诉期（15 日）", "《民事诉讼法》第171条"
+    ),
+    "appeal_ruling": DeadlineRule(
+        "days", 10, "不服一审裁定上诉期（10 日）", "《民事诉讼法》第172条"
+    ),
+    "appeal_administrative_judgment": DeadlineRule(
+        "days", 15, "行政诉讼上诉期（15 日）", "《行政诉讼法》"
+    ),
+    "contract_quality_objection": DeadlineRule(
+        "years", 2, "质量异议期（最长 2 年）", "《民法典》第621条"
+    ),
+    "consumer_complaint": DeadlineRule(
+        "years", 3, "消费者投诉时效（3 年）", "参照《民法典》第188条"
+    ),
+    "insurance_claim": DeadlineRule(
+        "years", 2, "保险理赔时效（非人寿保险 2 年）", "《保险法》第26条：非人寿保险自知道保险事故发生之日起二年"
+    ),
+    "insurance_claim_life": DeadlineRule(
+        "years", 5, "保险理赔时效（人寿保险 5 年）", "《保险法》第26条：人寿保险自知道保险事故发生之日起五年"
+    ),
 }
+"""期限类型 -> 规则表。"""
+
+# 兼容旧引用：期限类型 -> 中文说明
+_DEADLINE_LABELS: dict[str, str] = {k: r.label for k, r in _DEADLINE_RULES.items()}
+
+
+def _shift_by_rule(start: date, rule: DeadlineRule) -> date:
+    """按日历年/月/日平移计算到期日。
+
+    年/月单位的期间到期日为对应日（如 2023-03-15 + 3 年 = 2026-03-15）；
+    起算日为 2 月 29 日而到期年无对应日时，落到到期年 2 月最后一天。
+    """
+    if rule.unit == "days":
+        return start + timedelta(days=rule.value)
+    if rule.unit == "months":
+        total = start.month - 1 + rule.value
+        year = start.year + total // 12
+        month = total % 12 + 1
+    else:  # years
+        year = start.year + rule.value
+        month = start.month
+    day = min(start.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
 
 # 案类型 -> 证据清单（每项为 (name, purpose, status) 三元组）
 _EVIDENCE_CHECKLIST: dict[str, list[tuple[str, str, str]]] = {
@@ -130,6 +189,46 @@ _EVIDENCE_CHECKLIST: dict[str, list[tuple[str, str, str]]] = {
         ("因果关系证据", "证明行为与损害的因果关系", "required"),
         ("侵权人身份信息", "起诉立案必要", "required"),
         ("过错程度证据", "证明侵权人过错", "recommended"),
+    ],
+    # 图状态中的案由名称为“侵权纠纷”，保留“侵权”以兼容 MCP 旧调用。
+    "侵权纠纷": [
+        ("侵权行为证据（视频/照片/证人）", "证明侵权事实", "required"),
+        ("损害结果证据（医疗/财务）", "证明损害结果", "required"),
+        ("因果关系证据", "证明行为与损害的因果关系", "required"),
+        ("侵权人身份信息", "起诉立案必要", "required"),
+        ("过错程度证据", "证明侵权人过错", "recommended"),
+    ],
+    "个人信息权益纠纷": [
+        (
+            "公开或泄露内容的原始证据（网页链接、截图、群聊/邮件、录屏）",
+            "证明个人健康信息被公开、泄露或向无关人员提供的事实与范围",
+            "required",
+        ),
+        (
+            "证据形成时间与传播范围材料（页面时间、访问记录、转发记录、证人）",
+            "证明处理发生的时间、对象、次数及影响范围",
+            "required",
+        ),
+        (
+            "健康信息及其来源材料（病历、体检报告、请假或提交记录）",
+            "证明被处理内容属于本人健康等敏感个人信息，以及信息来源",
+            "required",
+        ),
+        (
+            "未同意或授权范围有限的材料（隐私告知、同意书、制度、沟通记录）",
+            "证明不存在有效同意，或公开行为超出告知和授权范围",
+            "required",
+        ),
+        (
+            "公司或处理者身份及其答复（劳动关系材料、主体信息、投诉/函件回执）",
+            "锁定责任主体并证明已要求停止、删除、更正或说明处理依据",
+            "recommended",
+        ),
+        (
+            "损害后果材料（就医记录、误工或费用凭证、名誉/生活受扰的留痕）",
+            "支持停止侵害、赔礼道歉或损害赔偿等具体请求",
+            "recommended",
+        ),
     ],
 }
 """案类型 -> 证据清单映射。"""
@@ -237,8 +336,8 @@ def calculate_legal_deadline(
             deadline_type=deadline_type,
         )
 
-    days = _DEADLINE_RULES.get(deadline_type)
-    if days is None:
+    rule = _DEADLINE_RULES.get(deadline_type)
+    if rule is None:
         return DeadlineResult(
             tool_name="calculate_legal_deadline",
             success=False,
@@ -248,20 +347,21 @@ def calculate_legal_deadline(
             deadline_type=deadline_type,
         )
 
-    deadline = start + timedelta(days=days)
+    deadline = _shift_by_rule(start, rule)
+    days = (deadline - start).days
     today = date.today()
     remaining = (deadline - today).days
     expires_soon = 0 <= remaining <= 7
 
-    label = _DEADLINE_LABELS.get(deadline_type, deadline_type)
+    label = rule.label
     if remaining < 0:
-        warning = f"⚠️ {label} 已于 {deadline.isoformat()} 经过（已超期 {-remaining} 天），可能丧失胜诉权。"
+        warning = f"⚠️ {label} 已于 {deadline.isoformat()} 经过（已超期 {-remaining} 天），可能丧失胜诉权。依据：{rule.basis}。"
     elif expires_soon:
         warning = (
-            f"⚠️ {label} 将于 {deadline.isoformat()} 到期（仅剩 {remaining} 天），请尽快主张权利。"
+            f"⚠️ {label} 将于 {deadline.isoformat()} 到期（仅剩 {remaining} 天），请尽快主张权利。依据：{rule.basis}。"
         )
     else:
-        warning = f"{label} 截止日 {deadline.isoformat()}（剩余 {remaining} 天）。"
+        warning = f"{label} 截止日 {deadline.isoformat()}（剩余 {remaining} 天）。依据：{rule.basis}。"
 
     return DeadlineResult(
         tool_name="calculate_legal_deadline",
@@ -286,7 +386,9 @@ def calculate_claim_amount(
     Args:
         claim_type: 赔偿类型，见下方规则实现。
         principal: 主张本金（如商品价款、欠薪本金）。
-        months: 工作年限（经济补偿 N 中的 N），用于经济补偿类计算。
+        months: 经济补偿月数 N（注意：是折算后的补偿月数，不是实际工作月数；
+            每满 1 年计 1 个月，满 6 个月不满 1 年计 1 个月，不满 6 个月计
+            0.5 个月，见《劳动合同法》第47条），用于经济补偿类计算。
         wage: 月工资，用于经济补偿类计算。
 
     Returns:
@@ -482,19 +584,19 @@ def build_case_timeline(events: list[dict]) -> TimelineResult:
             continue
         # 仅对关键事件计算时效提醒
         if item.is_key_date:
-            for days, label in [
-                (365, "劳动仲裁时效 1 年"),
-                (1095, "民事诉讼时效 3 年"),
+            for rule_key, warn_label in [
+                ("labor_arbitration", "劳动仲裁时效 1 年"),
+                ("civil_litigation", "民事诉讼时效 3 年"),
             ]:
-                deadline = ev_date + timedelta(days=days)
+                deadline = _shift_by_rule(ev_date, _DEADLINE_RULES[rule_key])
                 remaining = (deadline - today).days
                 if remaining < 0:
                     warnings.append(
-                        f"{item.date}（{item.description}）：{label} 已于 {deadline.isoformat()} 经过"
+                        f"{item.date}（{item.description}）：{warn_label} 已于 {deadline.isoformat()} 经过"
                     )
                 elif remaining <= 30:
                     warnings.append(
-                        f"{item.date}（{item.description}）：{label} 将于 {deadline.isoformat()} 到期（剩 {remaining} 天）"
+                        f"{item.date}（{item.description}）：{warn_label} 将于 {deadline.isoformat()} 到期（剩 {remaining} 天）"
                     )
 
     earliest = items[0].date if items else None
@@ -632,10 +734,22 @@ def _calc_overtime_holiday(
 def _calc_consumer_triple(
     principal: float, months: int, wage: float | None
 ) -> tuple[float, dict[str, float], str, str | None]:
-    """消费者三倍赔偿 = 商品价款 × 3。"""
-    amount = principal * 3
-    breakdown = {"principal": principal, "multiplier": 3.0, "amount": amount}
-    formula = f"商品价款 × 3 = {principal} × 3 = {amount}"
+    """消费者三倍赔偿 = 商品价款 × 3，不足 500 元按 500 元计。"""
+    raw = principal * 3
+    amount = max(raw, 500.0)
+    breakdown = {
+        "principal": principal,
+        "multiplier": 3.0,
+        "raw_amount": raw,
+        "statutory_minimum": 500.0,
+        "amount": amount,
+    }
+    if raw < 500.0:
+        formula = (
+            f"max(商品价款 × 3, 500) = max({principal} × 3, 500) = {amount}（不足 500 元按 500 元计）"
+        )
+    else:
+        formula = f"商品价款 × 3 = {principal} × 3 = {amount}"
     notes = (
         "依据《消费者权益保护法》第55条，经营者欺诈赔偿 = 商品价款 × 3，不足 500 元按 500 元计。"
     )
@@ -645,10 +759,22 @@ def _calc_consumer_triple(
 def _calc_consumer_tenfold(
     principal: float, months: int, wage: float | None
 ) -> tuple[float, dict[str, float], str, str | None]:
-    """食品安全十倍赔偿 = 商品价款 × 10。"""
-    amount = principal * 10
-    breakdown = {"principal": principal, "multiplier": 10.0, "amount": amount}
-    formula = f"商品价款 × 10 = {principal} × 10 = {amount}"
+    """食品安全十倍赔偿 = 商品价款 × 10，不足 1000 元按 1000 元计。"""
+    raw = principal * 10
+    amount = max(raw, 1000.0)
+    breakdown = {
+        "principal": principal,
+        "multiplier": 10.0,
+        "raw_amount": raw,
+        "statutory_minimum": 1000.0,
+        "amount": amount,
+    }
+    if raw < 1000.0:
+        formula = (
+            f"max(商品价款 × 10, 1000) = max({principal} × 10, 1000) = {amount}（不足 1000 元按 1000 元计）"
+        )
+    else:
+        formula = f"商品价款 × 10 = {principal} × 10 = {amount}"
     notes = "依据《食品安全法》第148条，生产不符合食品安全标准的食品赔偿 = 价款 × 10，不足 1000 元按 1000 元计。"
     return amount, breakdown, formula, notes
 

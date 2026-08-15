@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any
 
 from lvyan.config import settings
@@ -21,6 +22,20 @@ from lvyan.retrieval.lexical import ScoredChunk, _bm25_tokenize, log
 # 下次又把 CrossEncoder 当 httpx client 调 .post()。
 _HTTP_CLIENT: Any = None
 _CROSS_ENCODER: Any = None
+# 懒初始化锁：多线程首次并发 rerank 时避免重复创建 httpx.Client
+_HTTP_CLIENT_LOCK = threading.Lock()
+
+
+def _get_http_client() -> Any:
+    """获取（必要时懒初始化）模型网关 httpx client，双检锁防竞态。"""
+    global _HTTP_CLIENT
+    if _HTTP_CLIENT is None:
+        with _HTTP_CLIENT_LOCK:
+            if _HTTP_CLIENT is None:
+                import httpx  # type: ignore[import-untyped]
+
+                _HTTP_CLIENT = httpx.Client(timeout=15.0)
+    return _HTTP_CLIENT
 
 
 def _jaccard_similarity(a: set[str], b: set[str]) -> float:
@@ -44,22 +59,18 @@ def _try_real_rerank_score(query: str, candidate_texts: list[str]) -> list[float
 
     返回 None 时由调用方降级到 Jaccard 桩。
     """
-    global _HTTP_CLIENT, _CROSS_ENCODER
+    global _CROSS_ENCODER
     gateway = settings.model_gateway_url
 
     # 1) 模型网关 HTTP API
     if gateway:
         try:
-            import httpx  # type: ignore[import-untyped]
-
-            if _HTTP_CLIENT is None:
-                _HTTP_CLIENT = httpx.Client(timeout=15.0)
-
+            client = _get_http_client()
             headers: dict[str, str] = {}
             if settings.model_gateway_api_key:
                 headers["Authorization"] = f"Bearer {settings.model_gateway_api_key}"
 
-            resp = _HTTP_CLIENT.post(
+            resp = client.post(
                 f"{gateway.rstrip('/')}/v1/rerank",
                 json={
                     "model": settings.reranker_model,

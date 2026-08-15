@@ -21,8 +21,8 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 # .env 文件加载（轻量实现，不引入 python-dotenv）
 # ---------------------------------------------------------------------------
-def _load_dotenv() -> None:
-    """从 AGENT/.env 加载环境变量（不覆盖已有值）。
+def _load_dotenv_from(env_path: Path) -> None:
+    """从指定 .env 文件加载环境变量（不覆盖已有值）。
 
     支持格式::
 
@@ -35,7 +35,6 @@ def _load_dotenv() -> None:
     忽略注释行（# 开头）和空行。值两侧的引号会被去除。
     引号内的 ``#`` 不视为注释。
     """
-    env_path = AGENT_DIR / ".env"
     if not env_path.is_file():
         return
     for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -70,11 +69,37 @@ def _load_dotenv() -> None:
 # config.py 位于 AGENT/src/lvyan/config.py
 _PKG_DIR = Path(__file__).resolve().parent  # AGENT/src/lvyan
 _SRC_DIR = _PKG_DIR.parent  # AGENT/src
+_DEFAULT_AGENT_DIR = _SRC_DIR.parent  # 本地开发默认 AGENT 根目录
+
+# .env 引导加载：必须在**任何**模块级路径常量（AGENT_DIR/KNOWLEDGE_DIR/
+# LAWTEXT_DIR 等）求值之前执行，否则写在 .env 里的路径配置会被静默忽略、
+# 而同文件里的 DATABASE_URL 却在 _build_settings() 阶段生效——一半生效
+# 一半不生效，容器部署时极难排查。
+# AGENT_DIR 已由真实环境变量提供时，加载该目录下的 .env；
+# 未提供时尝试加载 __file__ 推导的默认目录下的 .env（.env 中定义的
+# AGENT_DIR 随之生效）。
+_bootstrap_dir = (
+    Path(os.getenv("AGENT_DIR", "")).resolve()
+    if os.getenv("AGENT_DIR")
+    else _DEFAULT_AGENT_DIR
+)
+_load_dotenv_from(_bootstrap_dir / ".env")
+
 # 环境变量优先：容器部署时包安装到 site-packages，__file__ 推导的路径无效，
 # 必须通过 AGENT_DIR 环境变量显式指定工作根目录（如 /app）。
 # 本地开发不设此变量时走 __file__ 推导，行为不变。
 _agent_dir_env = os.getenv("AGENT_DIR")
 AGENT_DIR = Path(_agent_dir_env).resolve() if _agent_dir_env else _SRC_DIR.parent  # AGENT/
+
+
+def _load_dotenv() -> None:
+    """从 AGENT/.env 加载环境变量（幂等；不覆盖已有值）。
+
+    模块导入时已完成引导加载（见上方 _bootstrap_dir 逻辑），此处保留
+    供 _build_settings() 兜底：引导阶段 AGENT_DIR 尚未确定、或调用方在
+    import 之后才设置 AGENT_DIR 的场景。
+    """
+    _load_dotenv_from(AGENT_DIR / ".env")
 
 
 def _resolve_knowledge_dir() -> Path:

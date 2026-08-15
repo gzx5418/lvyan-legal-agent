@@ -374,22 +374,50 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
             CitationIssue,
         )
 
-        existing_issues: list[Any] = list(_get(citation_report, "issues", []) or [])
-        existing_issues.append(
-            CitationIssue(
-                citation_id="missing_all",
-                issue_type="not_found",
-                expected="至少一条法规引用",
-                actual="0 引用",
-                severity="error",
+        # 例外：composer 对缺少 article_number 的法条输出「《XX法》：摘录」
+        # （无「第X条」），引用正则必然 0 命中，重检索也无法修复。此情形归因
+        # 于数据侧元数据缺失 → 降级为 warning，不触发强制重检索 / 高风险。
+        no_article_statutes = [s for s in statutes if not _get(s, "article_number", None)]
+        if no_article_statutes:
+            _logger.warning(
+                "statutes 中 %d 条缺少 article_number，0 引用归因于数据侧元数据缺失，"
+                "降级为 warning 处理",
+                len(no_article_statutes),
             )
-        )
-        citation_report = CitationValidationReport(
-            total_citations=total_citations_in_report,
-            valid_citations=int(_get(citation_report, "valid_citations", 0) or 0),
-            issues=existing_issues,
-            passed=False,
-        )
+            existing_issues: list[Any] = list(_get(citation_report, "issues", []) or [])
+            existing_issues.append(
+                CitationIssue(
+                    citation_id="missing_article_metadata",
+                    issue_type="missing_article_number",
+                    expected="法条含条文号",
+                    actual=f"{len(no_article_statutes)} 条法条缺少 article_number 元数据",
+                    severity="warning",
+                )
+            )
+            citation_report = CitationValidationReport(
+                total_citations=total_citations_in_report,
+                valid_citations=int(_get(citation_report, "valid_citations", 0) or 0),
+                issues=existing_issues,
+                # warning 不改变通过状态（原报告 0 引用时无 error）
+                passed=bool(_get(citation_report, "passed", True)),
+            )
+        else:
+            existing_issues = list(_get(citation_report, "issues", []) or [])
+            existing_issues.append(
+                CitationIssue(
+                    citation_id="missing_all",
+                    issue_type="not_found",
+                    expected="至少一条法规引用",
+                    actual="0 引用",
+                    severity="error",
+                )
+            )
+            citation_report = CitationValidationReport(
+                total_citations=total_citations_in_report,
+                valid_citations=int(_get(citation_report, "valid_citations", 0) or 0),
+                issues=existing_issues,
+                passed=False,
+            )
 
     # --- 2. 汇总为 CitationAudit ---
     details = _build_citation_details(

@@ -119,11 +119,12 @@ def case_difference_compare(state: CaseState) -> dict[str, Any]:
       （字段 ``case_differences``）。
 
     返回更新字典：
-        - ``reasoning_result``: 仅当 ``state.reasoning_result`` 存在时
-          回写其 ``case_differences``；否则返回 ``case_differences`` 作为
-          顶层字段（由调用方按需合并）。
+        - ``reasoning_result``: 仅当 ``state.reasoning_result`` 为 dict 时
+          回写其 ``case_differences`` 键（dict 可安全写入）；
+        - ``case_differences``: 其余情况（含 reasoning_result 为 pydantic 模型
+          或 None）作为顶层字段返回，由调用方按需合并。
     """
-    # 当前使用关键词匹配做差异抽取；可接入 LLM 做语义级增强
+    # 当前使用关键词匹配做差异抽取；可接入 LLM 做语义级差异增强
     cases = _get(state, "cases", []) or []
     current_case_type = _get(state, "case_type", None)
 
@@ -144,16 +145,12 @@ def case_difference_compare(state: CaseState) -> dict[str, Any]:
         for case in cases
     ]
 
-    # 写入 reasoning_result.case_differences（若已存在）；否则作为顶层字段返回
+    # ReasoningResult（pydantic）未声明 case_differences 字段：向其 setattr
+    # 必抛 ValueError，且即使强制写入也不会随 model_dump 序列化。
+    # 因此仅对 dict 型 reasoning_result 回写，其余一律返回顶层字段。
     reasoning_result = _get(state, "reasoning_result", None)
-    if reasoning_result is not None:
-        try:
-            if isinstance(reasoning_result, dict):
-                reasoning_result["case_differences"] = differences
-            else:
-                setattr(reasoning_result, "case_differences", differences)
-            return {"reasoning_result": reasoning_result}
-        except Exception:  # noqa: BLE001  回写失败则降级为顶层字段
-            pass
+    if isinstance(reasoning_result, dict):
+        reasoning_result["case_differences"] = differences
+        return {"reasoning_result": reasoning_result}
 
     return {"case_differences": differences}

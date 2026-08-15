@@ -312,6 +312,7 @@ def build_legal_answer(state: CaseState) -> LegalAnswerV1:
         risks=_build_risks(state),
         action_plan=_build_action_plan(state),
         citations=[_authority_to_citation(a) for a in state.statutes],
+        online_sources=list(state.online_sources),
         uncertainties=[
             UncertaintyItem(
                 description=mf.question,

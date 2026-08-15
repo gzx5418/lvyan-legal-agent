@@ -128,6 +128,7 @@ const els = {
   settingsReduceMotion: $('settings-reduce-motion'),
   settingsResponseStyle: $('settings-response-style'),
   settingsDocFormat: $('settings-doc-format'),
+  settingsOnlineSearch: $('settings-online-search'),
   settingsHealthDot: $('settings-health-dot'),
   settingsHealthTitle: $('settings-health-title'),
   settingsHealthDetail: $('settings-health-detail'),
@@ -228,6 +229,7 @@ function init() {
   });
   els.settingsResponseStyle.addEventListener('change', saveServerPreferences);
   els.settingsDocFormat.addEventListener('change', saveServerPreferences);
+  els.settingsOnlineSearch.addEventListener('change', saveServerPreferences);
   els.settingsRefreshHealth.addEventListener('click', refreshSettingsHealth);
   els.settingsClearLocal.addEventListener('click', clearLocalHistoryCache);
   els.workspaceBtn.addEventListener('click', openWorkspace);
@@ -321,9 +323,13 @@ function handleGlobalShortcut(e) {
 // 设置页（浏览器本地偏好，不传递或展示服务端敏感配置）
 // =========================================================================
 function setActiveMode(mode) {
-  state.mode = 'auto';
+  // 未显式传 mode 时回退默认 'auto'；仅高亮与目标模式匹配的按钮
+  // （按 data-mode 或按钮文本匹配），无匹配时不给任何按钮加 active。
+  const target = mode || 'auto';
+  state.mode = target;
   document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.classList.add('active');
+    const btnMode = btn.dataset.mode || btn.textContent.trim();
+    btn.classList.toggle('active', btnMode === target);
   });
 }
 
@@ -395,6 +401,7 @@ async function loadServerPreferences() {
     const pref = await resp.json();
     els.settingsResponseStyle.value = pref.response_style || 'brief';
     els.settingsDocFormat.value = pref.preferred_doc_format || 'md';
+    els.settingsOnlineSearch.checked = pref.online_search_enabled === true;
   } catch (error) {
     showToast(`无法读取服务端偏好：${error.message}`, 'warning');
   }
@@ -408,6 +415,7 @@ async function saveServerPreferences() {
       body: JSON.stringify({
         response_style: els.settingsResponseStyle.value,
         preferred_doc_format: els.settingsDocFormat.value,
+        online_search_enabled: els.settingsOnlineSearch.checked,
       }),
     });
     if (!resp.ok) throw new Error(await responseError(resp, '保存偏好失败'));
@@ -1323,7 +1331,10 @@ function appendDocumentDownload(docFile) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'doc-download-btn';
-  btn.innerHTML = '⬇ 下载文书 ' + (docFile.filename || '') + (sizeKb ? ' (' + sizeKb + ')' : '');
+  // XSS 防护：filename 来自服务端事件（含用户可影响的案件标题），
+  // 必须用 textContent 组装，禁止 innerHTML 拼接。
+  const btnLabel = () => '⬇ 下载文书 ' + (docFile.filename || '') + (sizeKb ? ' (' + sizeKb + ')' : '');
+  btn.textContent = btnLabel();
   // P1-5：改用 fetch 下载，可携带认证头（JWT），而非裸 <a href>（后者无法附加 Authorization）
   btn.addEventListener('click', async function () {
     btn.disabled = true;
@@ -1334,7 +1345,7 @@ function appendDocumentDownload(docFile) {
       showToast('下载失败：' + (err && err.message ? err.message : String(err)), 'error');
     } finally {
       btn.disabled = false;
-      btn.textContent = '⬇ 下载文书 ' + (docFile.filename || '') + (sizeKb ? ' (' + sizeKb + ')' : '');
+      btn.textContent = btnLabel();
     }
   });
   wrapper.appendChild(btn);
@@ -1450,7 +1461,8 @@ function renderMarkdown(text) {
 
   // 无序列表
   html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>');
-  html = html.replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>');
+  // 连续的 li 合并到同一个 ul 中包裹，避免每个 li 各自成一层 ul
+  html = html.replace(/((?:<li>[\s\S]*?<\/li>\s*)+)/g, '<ul>$1</ul>');
 
   // 有序列表
   html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');

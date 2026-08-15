@@ -7,8 +7,8 @@
   3. edit    → ``status == "edited"``，``final_output`` 被替换为 ``edited_output``；
   4. 结构化 dict 响应 ``{"action": "reject"}`` 不会被错误当成 approve；
   5. 旧式字符串响应 ``"approve"`` / ``"reject"`` 仍兼容；
-  6. 未知 action 抛 ``ValueError``；
-  7. edit 缺少 ``edited_output`` 抛 ``ValueError``。
+  6. 未知 action 降级为 reject 处理（不再抛 ValueError，避免击穿 HITL 环节）；
+  7. edit 缺少 ``edited_output`` 降级为 reject 处理（保留原输出）。
 
 通过 monkeypatch ``lvyan.config.settings.hitl_enabled=True`` 与
 ``langgraph.types.interrupt`` 模拟中断返回值。
@@ -173,25 +173,36 @@ def test_hitl_edit_dict_replaces_output(hitl_enabled, patch_interrupt):
     assert "用户编辑后的版本" in result["final_output"]
 
 
-def test_hitl_edit_missing_edited_output_raises(hitl_enabled, patch_interrupt):
-    """edit 缺少 edited_output → 抛 ValueError。"""
+def test_hitl_edit_missing_edited_output_degrades_to_reject(hitl_enabled, patch_interrupt):
+    """edit 缺少 edited_output → 降级为 reject 处理（保留原输出，不抛异常）。
+
+    HITL 是最靠近用户的环节，异常会让整个 run 崩溃；与「无响应 fail-closed
+    视为 reject」的稳健风格一致，此处同样按 reject 降级。
+    """
     state = _make_state()
     patch_interrupt({"action": "edit"})
 
-    with pytest.raises(ValueError, match="edit 操作缺少 edited_output"):
-        output_guardrail(state)
+    result = output_guardrail(state)
+
+    assert result["pending_human_approval"]["status"] == "rejected"
+    # 原分析正文保留在 final_output 中
+    assert "咨询发送律师函" in result["final_output"]
+    assert "已按拒绝处理" in result["final_output"]
 
 
 # ---------------------------------------------------------------------------
-# 4. 未知 action 抛 ValueError
+# 4. 未知 action 降级为 reject 处理（不抛异常）
 # ---------------------------------------------------------------------------
-def test_hitl_unknown_action_raises(hitl_enabled, patch_interrupt):
-    """未知 action → 抛 ValueError。"""
+def test_hitl_unknown_action_degrades_to_reject(hitl_enabled, patch_interrupt):
+    """未知 action → 降级为 reject 处理（不抛 ValueError，避免击穿 HITL 环节）。"""
     state = _make_state()
     patch_interrupt({"action": "maybe"})
 
-    with pytest.raises(ValueError, match="未知 HITL action"):
-        output_guardrail(state)
+    result = output_guardrail(state)
+
+    assert result["pending_human_approval"]["status"] == "rejected"
+    assert "咨询发送律师函" in result["final_output"]
+    assert "已按拒绝处理" in result["final_output"]
 
 
 # ---------------------------------------------------------------------------

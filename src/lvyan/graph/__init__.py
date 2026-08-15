@@ -24,6 +24,7 @@ from .policies import (
     check_retrieval_budget,
     detect_loop,
     enforce_policies,
+    enforce_retrieval_guards,
 )
 from .routing import (
     route_after_citation,
@@ -52,4 +53,5 @@ __all__ = [
     "check_cost_budget",
     "detect_loop",
     "enforce_policies",
+    "enforce_retrieval_guards",
 ]

@@ -24,6 +24,7 @@ from lvyan.tools import (
     get_statute_article,
     render_docx,
     search_cases,
+    search_official_web,
     search_procedure_rules,
     search_statutes,
     verify_statute_status,
@@ -65,9 +66,22 @@ def _uploaded_raw_path(file_id: str) -> Path:
     return raw
 
 
-def extract_uploaded_document(file_id: str) -> dict[str, Any]:
-    """按上传 ID 解析文档，拒绝 MCP 调用方提交任意本地路径。"""
+def extract_uploaded_document(file_id: str, expected_user: str | None = None) -> dict[str, Any]:
+    """按上传 ID 解析文档，拒绝 MCP 调用方提交任意本地路径。
+
+    归属校验：上传元数据记录了 ``user_id``，调用方必须以 ``expected_user``
+    声明身份且与文件属主一致，否则拒绝（PermissionError）。默认
+    ``expected_user=None`` 视为匿名调用方，只能读取匿名（未启用认证时）
+    上传的文件——启用多租户认证后，他人上传的文件 fail-closed。
+
+    注意：MCP stdio 传输本身不携带身份，``expected_user`` 由可信的 MCP
+    客户端转发注入；部署时应确保 MCP 传输经过认证层，防止调用方伪造。
+    """
     meta = _uploaded_metadata(file_id)
+    owner = str(meta.get("user_id") or "anonymous")
+    caller = str(expected_user) if expected_user else "anonymous"
+    if owner != caller:
+        raise PermissionError("无权访问该上传文件（文件属主与调用方不一致）")
     markdown_ref = str(meta.get("markdown_path", ""))
     if markdown_ref.startswith("vault://"):
         try:
@@ -115,6 +129,12 @@ def _registry() -> dict[str, Callable[..., dict[str, Any]]]:
             search_procedure_rules(query, as_of=as_of, top_k=top_k)
         ),
         "search_cases": lambda query, top_k=10: _dump(search_cases(query, top_k=top_k)),
+        "search_official_web": lambda query, top_k=5: {
+            "success": True,
+            "results": [
+                item.model_dump(mode="json") for item in search_official_web(query, top_k=top_k)
+            ],
+        },
         "get_case_detail": lambda case_id: _dump(get_case_detail(case_id)),
         "extract_document": extract_uploaded_document,
         "analyze_contract_clause": lambda clause_text, clause_type=None: _dump(

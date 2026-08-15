@@ -18,7 +18,7 @@ import re
 
 from lvyan.schemas import CaseState, MissingFact
 
-__all__ = ["jurisdiction_triage"]
+__all__ = ["is_personal_information_dispute", "jurisdiction_triage"]
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +49,18 @@ _CASE_TYPE_KEYWORDS: dict[str, list[str]] = {
     "婚姻家庭": ["离婚", "抚养", "继承", "赡养", "扶养"],
     "知识产权": ["专利", "商标", "著作权", "侵权"],
 }
+
+# 健康信息属于敏感个人信息；其被公开、泄露或滥用时，应优先沿个人信息
+# 权益/隐私侵权路径分析，而非落入医疗损害或知识产权的泛化模板。
+_PERSONAL_INFORMATION_KEYWORDS: tuple[str, ...] = (
+    "健康信息",
+    "个人信息",
+    "个人隐私",
+    "隐私信息",
+    "信息泄露",
+    "泄露隐私",
+    "未经同意公开",
+)
 
 # 紧急期限关键词
 _URGENCY_KEYWORDS: tuple[str, ...] = (
@@ -98,6 +110,12 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+def is_personal_information_dispute(*texts: str) -> bool:
+    """判断上下文是否指向个人信息、隐私或健康信息被不当处理。"""
+    combined = "\n".join(str(text or "") for text in texts)
+    return any(keyword in combined for keyword in _PERSONAL_INFORMATION_KEYWORDS)
+
+
 def _detect_case_type(user_goal: str, conversation_summary: str = "") -> str | None:
     """根据当前问题匹配案由；必要时继承同一会话的上下文。
 
@@ -106,6 +124,8 @@ def _detect_case_type(user_goal: str, conversation_summary: str = "") -> str | N
     """
     if not user_goal:
         return None
+    if is_personal_information_dispute(user_goal):
+        return "侵权纠纷"
     for case_type, keywords in _CASE_TYPE_KEYWORDS.items():
         for kw in keywords:
             if kw in user_goal:
@@ -119,6 +139,8 @@ def _detect_case_type(user_goal: str, conversation_summary: str = "") -> str | N
             flags=re.DOTALL,
         )
         for message in reversed(user_messages):
+            if is_personal_information_dispute(message):
+                return "侵权纠纷"
             for case_type, keywords in _CASE_TYPE_KEYWORDS.items():
                 if any(kw in message for kw in keywords):
                     return case_type

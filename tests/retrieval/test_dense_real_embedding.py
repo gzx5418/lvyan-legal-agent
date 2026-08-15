@@ -43,10 +43,10 @@ def test_dense_search_uses_real_embedding_when_available(monkeypatch):
     """真实 embedding 可用时，查询与文档都走真实向量空间。"""
     monkeypatch.setattr(dense, "_probe_real_embedding", lambda: True)
 
-    def fake_query_embedding(text: str):
+    def fake_query_embedding(text: str, model=None):
         return [1.0, 0.0, 0.0]
 
-    def fake_batch_embedding(texts):
+    def fake_batch_embedding(texts, model=None):
         return [
             [1.0, 0.0, 0.0],
             [0.0, 1.0, 0.0],
@@ -70,11 +70,11 @@ def test_dense_search_falls_back_to_hash_when_real_unavailable(monkeypatch):
     """真实 embedding 不可用时降级到 hash 路径，保持既有安全约束。"""
     monkeypatch.setattr(dense, "_probe_real_embedding", lambda: False)
 
-    def forbid_real(text: str):
+    def forbid_real(text: str, model=None):
         raise AssertionError("降级路径不应调用真实 embedding")
 
     monkeypatch.setattr(dense, "_try_real_embedding", forbid_real)
-    monkeypatch.setattr(dense, "_try_real_embedding_batch", lambda texts: None)
+    monkeypatch.setattr(dense, "_try_real_embedding_batch", lambda texts, model=None: None)
 
     results = dense.dense_search("劳动合同经济补偿", chunks=_make_chunks(), top_k=2)
 
@@ -85,11 +85,11 @@ def test_dense_search_falls_back_to_hash_when_real_unavailable(monkeypatch):
 def test_dense_search_caches_document_vectors(monkeypatch):
     """同一 chunk 的文档向量应被缓存，第二次检索不再调用 batch embedding。"""
     monkeypatch.setattr(dense, "_probe_real_embedding", lambda: True)
-    monkeypatch.setattr(dense, "_try_real_embedding", lambda text: [1.0, 0.0, 0.0])
+    monkeypatch.setattr(dense, "_try_real_embedding", lambda text, model=None: [1.0, 0.0, 0.0])
 
     call_count = {"n": 0}
 
-    def counting_batch(texts):
+    def counting_batch(texts, model=None):
         call_count["n"] += 1
         return [[1.0, 0.0, 0.0] for _ in texts]
 
@@ -107,11 +107,11 @@ def test_dense_search_caches_document_vectors(monkeypatch):
 def test_dense_search_skips_batch_when_query_embedding_unavailable(monkeypatch):
     """查询向量获取失败时降级到 hash，避免查询与文档跨空间。"""
     monkeypatch.setattr(dense, "_probe_real_embedding", lambda: True)
-    monkeypatch.setattr(dense, "_try_real_embedding", lambda text: None)
+    monkeypatch.setattr(dense, "_try_real_embedding", lambda text, model=None: None)
 
     batch_called = {"n": 0}
 
-    def tracking_batch(texts):
+    def tracking_batch(texts, model=None):
         batch_called["n"] += 1
         return [[1.0, 0.0] for _ in texts]
 
@@ -130,9 +130,9 @@ def test_dense_real_path_skips_bm25_prefilter(monkeypatch):
     作为独立路被调用一次。dense 在真实路径重复调用会让 BM25 被计算两次。
     """
     monkeypatch.setattr(dense, "_probe_real_embedding", lambda: True)
-    monkeypatch.setattr(dense, "_try_real_embedding", lambda text: [1.0, 0.0, 0.0])
+    monkeypatch.setattr(dense, "_try_real_embedding", lambda text, model=None: [1.0, 0.0, 0.0])
     monkeypatch.setattr(
-        dense, "_try_real_embedding_batch", lambda texts: [[1.0, 0.0, 0.0] for _ in texts]
+        dense, "_try_real_embedding_batch", lambda texts, model=None: [[1.0, 0.0, 0.0] for _ in texts]
     )
 
     def forbid_bm25(*args, **kwargs):
@@ -149,7 +149,7 @@ def test_dense_real_path_skips_bm25_prefilter(monkeypatch):
 def test_dense_hash_path_still_uses_bm25_prefilter_for_global_cache(monkeypatch):
     """P0-3 回归保护：hash 路径在全库场景仍可用 BM25 预筛（有界候选）。"""
     monkeypatch.setattr(dense, "_probe_real_embedding", lambda: False)
-    monkeypatch.setattr(dense, "_try_real_embedding_batch", lambda texts: None)
+    monkeypatch.setattr(dense, "_try_real_embedding_batch", lambda texts, model=None: None)
 
     bm25_calls = {"n": 0}
 

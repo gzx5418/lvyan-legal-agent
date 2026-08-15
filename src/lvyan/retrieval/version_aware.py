@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from datetime import date, datetime
 from typing import Any
 
@@ -148,6 +150,22 @@ def _passes_version_filter(
 # ---------------------------------------------------------------------------
 _metadata_cache: dict[str, LawMetadata] | None = None
 _groups_cache: list[VersionGroup] | None = None
+# 缓存构建时间戳：配合 TTL 判断缓存是否过期（见 _metadata_cache_ttl）
+_metadata_cache_ts: float | None = None
+# 缓存 TTL（秒）：法库更新后旧缓存里的 status 会过期，超时后重扫。
+# 默认 300 秒；可用环境变量 VERSION_METADATA_CACHE_TTL 覆盖（<=0 表示每次重扫）。
+_METADATA_CACHE_TTL_DEFAULT = 300.0
+
+
+def _metadata_cache_ttl() -> float:
+    """读取元数据缓存 TTL（秒）；环境变量 VERSION_METADATA_CACHE_TTL 优先。"""
+    raw = os.getenv("VERSION_METADATA_CACHE_TTL")
+    if raw is None:
+        return _METADATA_CACHE_TTL_DEFAULT
+    try:
+        return float(raw)
+    except ValueError:
+        return _METADATA_CACHE_TTL_DEFAULT
 
 
 def _load_metadata_map() -> dict[str, LawMetadata]:
@@ -155,11 +173,18 @@ def _load_metadata_map() -> dict[str, LawMetadata]:
 
     同时构建 ``VersionGroup`` 列表，把 ``superseded`` 标记写回各 ``LawMetadata``
     （``build_version_groups`` 原地修改 versions），供 :func:`verify_statute_status`
-    判断「是否被取代」使用。结果全局缓存，仅扫描一次。
+    判断「是否被取代」使用。结果全局缓存，带 TTL：法库更新（submodule 升级 /
+    挂载卷覆盖）后缓存自动过期重扫，避免长期使用旧的 status 元数据。
     """
-    global _metadata_cache, _groups_cache
+    global _metadata_cache, _groups_cache, _metadata_cache_ts
     if _metadata_cache is not None:
-        return _metadata_cache
+        if _metadata_cache_ts is None:
+            # 缓存由外部注入（如测试 monkeypatch）且无构建时间戳：直接信任，
+            # 不触发 TTL 重扫
+            return _metadata_cache
+        if time.time() - _metadata_cache_ts <= _metadata_cache_ttl():
+            return _metadata_cache
+        # TTL 过期：丢弃旧缓存重扫，法库更新后的 status 变化才能生效
 
     metas = scan_all_laws()
     _metadata_cache = {m.source_id: m for m in metas}
@@ -167,14 +192,16 @@ def _load_metadata_map() -> dict[str, LawMetadata]:
         _groups_cache = build_version_groups(metas)
     except Exception:  # noqa: BLE001 - metadata cache is best-effort
         _groups_cache = []
+    _metadata_cache_ts = time.time()
     return _metadata_cache
 
 
 def _reset_metadata_cache() -> None:
     """重置元数据缓存（仅测试使用）。"""
-    global _metadata_cache, _groups_cache
+    global _metadata_cache, _groups_cache, _metadata_cache_ts
     _metadata_cache = None
     _groups_cache = None
+    _metadata_cache_ts = None
 
 
 # ---------------------------------------------------------------------------
@@ -200,9 +227,11 @@ def search_statutes(
         top_k: 返回结果数上限。
 
     Returns:
-        list[Authority]：按 RRF 融合分数降序，最多 ``top_k`` 条。每条
-        ``Authority`` 的 ``lexical_score`` 填入融合分数，``dense_score`` /
-        ``rerank_score`` 暂置 ``0.0``（因当前 ``hybrid_search`` 已融合四路分数）。
+        list[Authority]：按分数降序，最多 ``top_k`` 条。每条 ``Authority``
+        的 ``lexical_score`` 填入 ``hybrid_search`` 返回的分数：默认
+        ``with_rerank=True`` 时是 rerank 分数（rerank 失败降级时才是 RRF
+        融合分数）；``dense_score`` / ``rerank_score`` 暂置 ``0.0``（各路
+        分数已融合，单独分数不再可分）。
 
     性能：
         复用 :func:`hybrid_search` 的全局 chunks / BM25 索引缓存，单次 < 10s。
@@ -212,8 +241,9 @@ def search_statutes(
 
     as_of_date = _parse_as_of(as_of)
 
-    # 多取一倍用于过滤后仍有足够结果；下限 20 防止 top_k 过小时召回不足
-    fetch_k = max(top_k * 2, 20)
+    # 多取数倍用于过滤：only_effective / as_of 过滤会剔除大量候选，2 倍常不够
+    # top_k 条；下限 20 防止 top_k 过小时召回不足
+    fetch_k = max(top_k * 5, 20)
     scored_chunks: list[ScoredChunk] = hybrid_search(
         query=query,
         top_k=fetch_k,
@@ -248,8 +278,9 @@ def search_statutes(
             official_source=_chunk_attr(chunk, "official_source", None),
             content_hash=_chunk_attr(chunk, "content_hash", None),
             retrieved_at=datetime.now(),
-            # hybrid_search 的 score 是 RRF 融合分数，统一填到 lexical_score；
-            # dense / reranker 路已融合进 RRF，单独分数不再可分，置 0.0
+            # hybrid_search 的 score：with_rerank=True（默认）且 rerank 成功时
+            # 是 rerank 分数，rerank 降级时是 RRF 融合分数，统一填到 lexical_score；
+            # dense / reranker 路已融合，单独分数不再可分，置 0.0
             lexical_score=float(sc.score) if sc.score is not None else 0.0,
             dense_score=0.0,
             rerank_score=0.0,
@@ -291,14 +322,17 @@ def verify_statute_status(
         StatuteVerification：含 ``current_status`` / ``effective_date`` /
         ``expiry_date`` / ``is_effective_as_of`` / ``superseded_by`` 等。
 
-    有效性判定规则：
+    有效性判定规则（P0-5 修复后，按时间窗口而非当前 status 判断）：
       - ``as_of`` 给定：``effective_date <= as_of`` 且（``expiry_date`` 为
-        ``None`` 或 ``expiry_date > as_of``）且 ``status == "effective"``
+        ``None`` 或 ``expiry_date > as_of``）；``status == "repealed"`` 且
+        无 ``expiry_date`` 时保守视为已失效。**不要求当前
+        ``status == "effective"``**（现行元数据描述的是当下状态，历史
+        时间点需按时间窗口召回已废止的旧法）。
       - ``as_of`` 为 ``None``：``status == "effective"`` 且未被取代
         （``superseded == False``）
 
-    说明：当前 ``LawMetadata`` 未从 front matter 解析 ``expiry_date`` 字段，
-    故 ``expiry_date`` 统一返回 ``None``，待后续补全解析逻辑。
+    说明：``LawMetadata`` 已从 front matter 解析 ``expiry_date``（P0-1）；
+    未提供时 ``expiry_date`` 返回 ``None``（与旧逻辑兼容）。
     """
     checked_at = datetime.now()
 

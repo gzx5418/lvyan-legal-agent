@@ -54,6 +54,7 @@ from lvyan.tools.statutes import (
     verify_statute_status,
     search_procedure_rules,
 )
+from lvyan.tools.web_search import search_official_web
 
 __all__ = [
     # 基类
@@ -92,4 +93,6 @@ __all__ = [
     # 导出工具
     "ExportResult",
     "render_docx",
+    # 联网官方来源：显式调用或用户开启偏好时才访问网络。
+    "search_official_web",
 ]

@@ -13,9 +13,12 @@
 
 from __future__ import annotations
 
+from lvyan.nodes.composer import composer
+from lvyan.nodes.evidence_analyzer import evidence_analyzer
 from lvyan.nodes.fact_extractor import fact_extractor
 from lvyan.nodes.planner import missing_fact_assessor, planner
 from lvyan.nodes.triage import jurisdiction_triage
+from lvyan.tools.calculators import generate_evidence_checklist
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +79,70 @@ def test_follow_up_uses_most_recent_user_topic_after_topic_switch():
         }
     )
     assert result["case_type"] == "合同纠纷"
+
+
+def test_health_information_follow_up_has_privacy_specific_materials(monkeypatch):
+    """材料追问应继承健康信息公开案情，输出可执行的个人信息证据清单。"""
+    monkeypatch.setattr("lvyan.nodes.triage._try_llm_triage", lambda *args: None)
+    monkeypatch.setattr("lvyan.nodes.planner._try_llm_plan", lambda *args: None)
+    monkeypatch.setattr(
+        "lvyan.nodes.evidence_analyzer._llm_refine_evidence",
+        lambda requirements, facts: requirements,
+    )
+    history = (
+        "【用户】公司未经同意公开我的健康信息，是否违法？\n\n"
+        "【助手】需核实公开范围、处理目的和是否取得有效同意。"
+    )
+    follow_up = {"user_goal": "我需要准备哪些材料", "conversation_summary": history}
+
+    triage = jurisdiction_triage(follow_up)
+    assert triage["case_type"] == "侵权纠纷"
+
+    plan = planner({**follow_up, "case_type": triage["case_type"], "facts": []})
+    assert plan["retrieval_queries"][0].query_text == "中华人民共和国个人信息保护法"
+
+    evidence = evidence_analyzer({**follow_up, "case_type": triage["case_type"], "facts": []})
+    materials = " ".join(
+        requirement.evidence_types[0] for requirement in evidence["evidence_requirements"]
+    )
+    assert "公开或泄露内容的原始证据" in materials
+    assert "未同意或授权范围有限" in materials
+    assert "健康信息及其来源材料" in materials
+
+    output = composer(
+        {
+            **follow_up,
+            "case_type": triage["case_type"],
+            "complexity": "light",
+            "risk_level": "low",
+            "evidence_requirements": evidence["evidence_requirements"],
+            "statutes": [],
+            "missing_facts": [],
+        }
+    )["final_output"]
+    assert "需要准备的材料" in output
+    assert "公开或泄露内容的原始证据" in output
+    assert "健康信息通常属于敏感个人信息" in output
+
+
+def test_health_information_case_does_not_ask_for_traffic_injury_facts(monkeypatch):
+    monkeypatch.setattr("lvyan.nodes.fact_extractor._try_llm_extract_facts", lambda *args: None)
+    result = fact_extractor(
+        {
+            "user_goal": "公司未经同意公开我的健康信息，是否违法？",
+            "case_type": "侵权纠纷",
+            "conversation_summary": "",
+            "facts": [],
+        }
+    )
+    questions = " ".join(item.question for item in result["missing_facts"])
+    assert "是否报警或就医" not in questions
+    assert "健康信息被公开给了哪些人、通过什么渠道、持续多久" in questions
+
+
+def test_evidence_checklist_supports_runtime_infringement_case_type():
+    """运行时“侵权纠纷”案由不得因模板键名不一致而返回空材料。"""
+    assert generate_evidence_checklist("侵权纠纷").success is True
 
 
 def test_work_injury_missing_facts_focus_on_commute_and_responsibility():
@@ -192,9 +259,9 @@ def test_missing_fact_assessor_also_detects_blocking():
 
     # 再调用 missing_fact_assessor，应返回 {}（不重复追加）
     result = missing_fact_assessor(state)
-    assert result == {} or "missing_facts" not in result, (
-        "missing_fact_assessor 不应重复追加 missing_facts"
-    )
+    assert (
+        result == {} or "missing_facts" not in result
+    ), "missing_fact_assessor 不应重复追加 missing_facts"
 
 
 # ---------------------------------------------------------------------------

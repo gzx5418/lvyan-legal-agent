@@ -12,10 +12,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections import defaultdict
 from typing import Any
 
+from lvyan.nodes.triage import is_personal_information_dispute
 from lvyan.retrieval.version_aware import verify_statute_status as _verify_status
 from lvyan.schemas import Authority, AuthorityConflict, CaseState, EvidenceRequirement
 from lvyan.tools.calculators import generate_evidence_checklist
@@ -54,6 +56,28 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
 def _short_id() -> str:
     """生成 8 位短 id（uuid4 hex 前缀）。"""
     return uuid.uuid4().hex[:8]
+
+
+def _stable_requirement_id(fact_to_prove: str, evidence_types: list[str]) -> str:
+    """由待证事实 + 证据类型派生确定性 requirement_id。
+
+    键控合并 reducer（merge_evidence_requirements）按 requirement_id 去重，
+    其设计前提是节点重复执行时产出相同 ID；若用随机 uuid，重检索回路
+    （reretrieve → evidence_analyzer 再次执行）会让新旧 ID 永不匹配，
+    状态列表每轮翻倍，置信度计算被重复条目带偏。
+    """
+    digest = hashlib.sha1(
+        f"{fact_to_prove}::{'|'.join(sorted(evidence_types))}".encode("utf-8")
+    ).hexdigest()[:12]
+    return f"req-{digest}"
+
+
+def _stable_conflict_id(conflict_type: str, authority_ids: list[str]) -> str:
+    """由冲突类型 + 涉及法条集合派生确定性 conflict_id（同上，重检索去重）。"""
+    digest = hashlib.sha1(
+        f"{conflict_type}::{'|'.join(sorted(authority_ids))}".encode("utf-8")
+    ).hexdigest()[:12]
+    return f"conflict-{digest}"
 
 
 def _authority_score(auth: Authority) -> float:
@@ -154,8 +178,17 @@ def evidence_analyzer(state: CaseState) -> dict[str, Any]:
     if obtained_evidence:
         facts_for_checklist.append({"obtained_evidence": obtained_evidence})
 
+    conversation_summary = str(_get(state, "conversation_summary", "") or "")
+    user_goal = str(_get(state, "user_goal", "") or "")
+    checklist_case_type = (
+        "个人信息权益纠纷"
+        if case_type == "侵权纠纷"
+        and is_personal_information_dispute(user_goal, conversation_summary)
+        else case_type
+    )
+
     try:
-        checklist = generate_evidence_checklist(case_type, facts_for_checklist)
+        checklist = generate_evidence_checklist(checklist_case_type, facts_for_checklist)
     except Exception:  # noqa: BLE001  清单生成失败时返回空列表
         return {"evidence_requirements": []}
 
@@ -176,7 +209,7 @@ def evidence_analyzer(state: CaseState) -> dict[str, Any]:
         evidence_types = [name] if name else []
         requirements.append(
             EvidenceRequirement(
-                requirement_id=_short_id(),
+                requirement_id=_stable_requirement_id(fact_to_prove, evidence_types),
                 fact_to_prove=fact_to_prove,
                 evidence_types=evidence_types,
                 current_status=current_status,  # type: ignore[arg-type]
@@ -349,7 +382,7 @@ def _detect_version_conflicts(
 
         conflicts.append(
             AuthorityConflict(
-                conflict_id=_short_id(),
+                conflict_id=_stable_conflict_id("version", authority_ids),
                 authority_ids=authority_ids,
                 conflict_type="version",  # type: ignore[arg-type]
                 description=(
@@ -395,7 +428,7 @@ def _detect_hierarchy_conflicts(
             authority_ids.append(aid)
         conflicts.append(
             AuthorityConflict(
-                conflict_id=_short_id(),
+                conflict_id=_stable_conflict_id("hierarchy", authority_ids),
                 authority_ids=authority_ids,
                 conflict_type="hierarchy",  # type: ignore[arg-type]
                 description=(
@@ -442,9 +475,12 @@ def authority_resolver(state: CaseState) -> dict[str, Any]:
     # verify_statute_status 依赖全库扫描，对每条 Authority 调用代价较高；
     # 此处仅做轻量标记：保留原 status，对能查到元数据的条目回写 status。
     # 不剔除无效条目（保留以供引用审计）。
+    # 回写通过 model_copy / dict 拷贝生成新对象，避免原地修改共享状态。
+    verified: list[Any] = []
     for auth in deduped:
         source_id = str(_get(auth, "source_id", "") or "")
         if not source_id:
+            verified.append(auth)
             continue
         try:
             verification = _verify_status(source_id)
@@ -453,21 +489,27 @@ def authority_resolver(state: CaseState) -> dict[str, Any]:
                 # 回写 status（兼容 Authority 对象与 dict）
                 try:
                     if isinstance(auth, dict):
-                        auth["status"] = current_status  # type: ignore[index]
+                        updated = dict(auth)
+                        updated["status"] = current_status  # type: ignore[index]
+                        verified.append(updated)
+                    elif hasattr(auth, "model_copy"):
+                        verified.append(auth.model_copy(update={"status": current_status}))
                     else:
-                        auth.status = current_status  # type: ignore[attr-defined]
+                        verified.append(auth)
                 except Exception:  # noqa: BLE001  回写失败不阻塞
-                    pass
+                    verified.append(auth)
+            else:
+                verified.append(auth)
         except Exception:  # noqa: BLE001  查询失败保留原 status
-            continue
+            verified.append(auth)
 
     # --- 冲突检测 ---
-    version_conflicts = _detect_version_conflicts(deduped)
-    hierarchy_conflicts = _detect_hierarchy_conflicts(deduped)
+    version_conflicts = _detect_version_conflicts(verified)
+    hierarchy_conflicts = _detect_hierarchy_conflicts(verified)
     conflicts = version_conflicts + hierarchy_conflicts
 
     # --- 效力层级排序 ---
-    sorted_statutes = _sort_by_authority_level(deduped)
+    sorted_statutes = _sort_by_authority_level(verified)
     sorted_statutes = _llm_rank_authorities(sorted_statutes, str(_get(state, "user_goal", "")))
 
     return {

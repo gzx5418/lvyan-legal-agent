@@ -15,7 +15,7 @@ from typing import Any
 from lvyan.retrieval.lexical import ScoredChunk, _load_article_chunks
 
 # 《XX法》第Y条 — Y 支持中文数字与阿拉伯数字
-_ARTICLE_NO_RE = re.compile(r"《([^》]+)》第([一二三四五六七八九十百千零0-9]+)条")
+_ARTICLE_NO_RE = re.compile(r"《([^》]+)》第([一二三四五六七八九十百千零〇0-9]+)条")
 
 # 中文数字 → 阿拉伯数字 用于归一化比对
 _CN_DIGIT = {
@@ -64,7 +64,9 @@ def _cn_to_int(text: str) -> int | None:
             result += current * 1000
             current = 0
     result += current
-    return result if result > 0 or text == "零" else None
+    # 「零」与「〇」是同一数字（0）的两种写法，需一致处理：
+    # 单独一个 0 值数字（第〇条/第零条）应返回 0 而非 None
+    return result if result > 0 or text in ("零", "〇") else None
 
 
 def _normalize_article_number(raw: str) -> str:
@@ -94,27 +96,37 @@ def extract_article_refs(query: str) -> list[tuple[str, str, str]]:
     return refs
 
 
-def _match_law_title(query_name: str, chunk_title: str) -> bool:
-    """法律名匹配：query_name（如「民法典」）是否命中 chunk 的 title。
+# 常见法律标题前缀与修正/修订标注
+_TITLE_PREFIXES = ("中华人民共和国", "全国人民代表大会", "全国人大常委会")
+_TITLE_SUFFIX_RE = re.compile(r"[（(][^（）()]{0,20}(修正|修订|修正本| amended)[^（）()]*[)）]$")
 
-    chunk title 通常是「中华人民共和国民法典」这种带「中华人民共和国」前缀，
-    也可能简写为「民法典」，因此做宽松的子串包含判定。
+
+def _normalize_law_title(title: str) -> str:
+    """归一化法律标题：去前缀（如「中华人民共和国」）、去尾部修正/修订标注。"""
+    t = title.strip()
+    t = _TITLE_SUFFIX_RE.sub("", t).strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _TITLE_PREFIXES:
+            if t.startswith(prefix):
+                t = t[len(prefix) :].strip()
+                changed = True
+    return t
+
+
+def _match_law_title(query_name: str, chunk_title: str) -> bool:
+    """法律名匹配：query_name（如「民法典」）是否与 chunk 的 title 指同一部法律。
+
+    两侧归一化（去「中华人民共和国」等前缀、去修正标注）后要求**全等**。
+    不能用子串包含判定：「合同法」是「劳动合同法」的后缀、也是
+    「商标法实施条例」的子串，包含判定会把《合同法》第107条错误地
+    匹配到《劳动合同法》第107条并以 score=1.0 进入融合结果。
+    非精确命名（如「民诉法」等简称）交给 BM25/混合检索路线召回。
     """
     if not query_name or not chunk_title:
         return False
-    qn = query_name.strip()
-    ct = chunk_title.strip()
-    if qn in ct:
-        return True
-    # 兼容「民法典」匹配「中华人民共和国民法典」
-    # 反向也兼容（chunk_title 简写时）
-    if ct in qn:
-        return True
-    # 兼容「民法典」匹配「中华人民共和国民法典」（去掉国名前缀）
-    for prefix in ("中华人民共和国", "全国人民代表大会", "全国人大常委会"):
-        if ct.startswith(prefix) and qn in ct[len(prefix) :]:
-            return True
-    return False
+    return _normalize_law_title(query_name) == _normalize_law_title(chunk_title)
 
 
 def article_no_search(

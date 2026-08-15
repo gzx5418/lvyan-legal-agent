@@ -28,7 +28,9 @@ from pathlib import Path
 from typing import Any
 
 from lvyan.config import AGENT_DIR
+from lvyan.nodes.triage import is_personal_information_dispute
 from lvyan.schemas import CaseState
+from lvyan.schemas.web import is_official_source_url
 
 _logger = logging.getLogger("lvyan.nodes.composer")
 
@@ -124,13 +126,45 @@ def _format_statute_full(auth: Any) -> str:
     text = str(_get(auth, "article_text", "") or "")
     source_id = str(_get(auth, "source_id", "") or "")
     status = _status_label(_get(auth, "status", "unknown"))
-    source = f"{title} {_format_article_number(_get(auth, 'article_number', None))}".strip()
+    source = f"{title} {article}".strip()
     lines = [
         f"- 《{title}》{article}",
         f"  条文全文：{text}",
         f"  来源：{source}（source_id={source_id}）",
         f"  有效性：{status}",
     ]
+    return "\n".join(lines)
+
+
+def _format_online_sources(sources: list[Any]) -> str:
+    """生成与已校验法条严格分离的联网来源列表。"""
+    if not sources:
+        return ""
+
+    def _markdown_text(value: Any) -> str:
+        return (
+            str(value or "")
+            .replace("\\", "\\\\")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+            .replace("(", "\\(")
+            .replace(")", "\\)")
+        )
+
+    lines = ["## 联网权威来源（供核对）"]
+    for source in sources[:5]:
+        title = _markdown_text(_get(source, "title", "官方来源")).replace("\n", " ")
+        url = str(_get(source, "url", "") or "")
+        snippet = _markdown_text(_get(source, "snippet", "")).replace("\n", " ")
+        source_name = _markdown_text(_get(source, "source_name", "官方来源"))
+        if not title or not is_official_source_url(url):
+            continue
+        lines.append(f"- [{title}]({url})（{source_name}）")
+        if snippet:
+            lines.append(f"  - {snippet}")
+    if len(lines) == 1:
+        return ""
+    lines.append("\n联网资料仅供核对，不替代上列已校验的法律依据。")
     return "\n".join(lines)
 
 
@@ -342,6 +376,7 @@ def _light_conclusion(
     case_type: str,
     missing_facts: list[Any],
     user_goal: str = "",
+    conversation_summary: str = "",
 ) -> str:
     """形成可直接回答用户的问题，而非仅复述法律关系名称。"""
     if case_type == "工伤认定":
@@ -367,6 +402,12 @@ def _light_conclusion(
             "应先固定劳动合同、工资记录、考勤及解除通知等证据。"
         )
     if case_type == "侵权纠纷":
+        if is_personal_information_dispute(user_goal, conversation_summary):
+            return (
+                "健康信息通常属于敏感个人信息。公司如无合法处理依据，或者未取得有效同意而"
+                "向无关人员公开、传播该信息，可能侵犯个人信息权益和隐私；是否构成违法，"
+                "还要核实公开范围、处理目的、信息来源以及是否存在法定例外。"
+            )
         return (
             "造成他人人身或财产损害且行为、过错、损害和因果关系能够证明的，通常应承担相应侵权责任。"
         )
@@ -401,6 +442,7 @@ def _light_action_advice(
     missing_facts: list[Any],
     risk_level: str,
     user_goal: str = "",
+    conversation_summary: str = "",
 ) -> list[str]:
     """按案由提供少量可执行建议，避免轻量答复出现通用诉讼话术。"""
     if case_type == "工伤认定":
@@ -427,6 +469,12 @@ def _light_action_advice(
             "协商不成的，在仲裁时效内向有管辖权的劳动人事争议仲裁委员会申请仲裁。",
         ]
     if case_type == "侵权纠纷":
+        if is_personal_information_dispute(user_goal, conversation_summary):
+            return [
+                "立即保存公开页面、群聊、邮件、录屏、链接和发布时间；不要只保留转发后的图片。",
+                "向公司书面要求停止公开、删除或更正信息，并要求说明处理目的、范围和依据，保留送达及答复记录。",
+                "协商不成时，可向个人信息保护职责部门投诉，或依法主张停止侵害、赔礼道歉和赔偿。",
+            ]
         return [
             "立即固定现场、行为过程、损害结果和身份信息，必要时报警或就医。",
             "整理费用票据、鉴定材料及收入损失证明，书面提出赔偿请求。",
@@ -469,11 +517,14 @@ def _compose_light(state: Any) -> str:
     statutes = _get(state, "statutes", []) or []
     missing_facts = _get(state, "missing_facts", []) or []
     evidence_requirements = _get(state, "evidence_requirements", []) or []
+    conversation_summary = str(_get(state, "conversation_summary", "") or "")
     risk_level = str(_get(state, "risk_level", "low") or "low")
     case_type = str(_get(state, "case_type", "") or "")
     intents = _detect_light_intents(user_goal)
     intent = intents[0]
-    conclusion = _light_conclusion(reasoning_result, case_type, missing_facts, user_goal)
+    conclusion = _light_conclusion(
+        reasoning_result, case_type, missing_facts, user_goal, conversation_summary
+    )
 
     statute_lines: list[str] = []
     for auth in statutes[:3]:
@@ -482,7 +533,7 @@ def _compose_light(state: Any) -> str:
         statute_lines.append("- （暂未检索到适用法条，建议补充查询）")
 
     actions = _light_action_advice(
-        case_type, reasoning_result, missing_facts, risk_level, user_goal
+        case_type, reasoning_result, missing_facts, risk_level, user_goal, conversation_summary
     )
     materials = _format_light_evidence_requirements(evidence_requirements)
     if not materials:
@@ -1046,7 +1097,12 @@ def composer(state: CaseState) -> dict[str, Any]:
     if risk_level == "high" and "高风险声明" not in output:
         output = output + _HIGH_RISK_DISCLAIMER
 
-    # 4. 结构化输出：构建 LegalAnswerV1 并校验（与 final_output 并行）
+    # 4. 联网结果独立展示，绝不混入已校验的法条引用。
+    online_section = _format_online_sources(_get(state, "online_sources", []) or [])
+    if online_section:
+        output = output.rstrip() + "\n\n" + online_section
+
+    # 5. 结构化输出：构建 LegalAnswerV1 并校验（与 final_output 并行）
     # P0-2：document 模式不构建 legal_answer，避免结构化分析页覆盖文书输出。
     #    document 模式的 Markdown 包含文书正文 + DOCX 信息，LegalAnswerV1
     #    无法承载，应让前端继续展示 Markdown。

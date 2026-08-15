@@ -17,6 +17,8 @@ async def _unused_runner(*_args, **_kwargs):
 def client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("AUTH_MODE", "trusted_proxy")
+    # TestClient 的直连来源 host 固定为 "testclient"，需加入可信代理白名单
+    monkeypatch.setenv("TRUSTED_PROXIES", "testclient")
     app = create_app(
         runner=_unused_runner,
         memory=object(),

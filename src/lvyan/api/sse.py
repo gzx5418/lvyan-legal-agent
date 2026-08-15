@@ -23,6 +23,8 @@ import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Awaitable
 
+from fastapi import HTTPException
+
 from lvyan.memory.run_metadata import (
     RunMetadataStore,
     RunMetadataUnavailable,
@@ -83,6 +85,11 @@ class RunManager:
                 ctx.non_recoverable = True
             return False
 
+    # 同步 DB 操作的异步包装：事件循环内禁止直接调用同步 Postgres 客户端，
+    # Postgres 延迟时会卡住所有并发请求（含 /livez 健康检查）。
+    async def _aupdate_metadata(self, run_id: str, **values: Any) -> bool:
+        return await asyncio.to_thread(self._update_metadata, run_id, **values)
+
     async def _fail_run(
         self,
         ctx: RunContext,
@@ -106,7 +113,7 @@ class RunManager:
         ctx.status = "failed"
         ctx.error = msg
         ctx.completed_at = time.time()
-        persisted = self._update_metadata(
+        persisted = await self._aupdate_metadata(
             ctx.run_id,
             status="failed",
             error=msg,
@@ -122,6 +129,11 @@ class RunManager:
                     "message": msg,
                 }
             )
+        # 关闭 SSE 流：error 事件不是哨兵，若不 put(None)，非浏览器客户端
+        # （curl/第三方集成）会在 await queue.get() 上永久阻塞，服务端为每个
+        # 失败 run 维持一个悬挂连接。_drive/_resume_drive 的 finally 排除了
+        # failed 状态，关闭责任在此。
+        await ctx.queue.put(None)
 
     async def _cancel_context(
         self,
@@ -143,13 +155,13 @@ class RunManager:
         ctx.status = "cancelled"
         ctx.error = message
         ctx.completed_at = time.time()
-        persisted = self._update_metadata(
+        persisted = await self._aupdate_metadata(
             ctx.run_id,
             status="cancelled",
             error=message,
             completed_at=datetime.now(timezone.utc),
         )
-        self._append_message(ctx, "assistant", message)
+        await self._aappend_message(ctx, "assistant", message)
         await ctx.publish({"event": "cancelled", "message": message})
         await ctx.queue.put(None)
         if not persisted:
@@ -195,6 +207,9 @@ class RunManager:
             )
             return False
 
+    async def _amark_thread_output(self, thread_id: str) -> bool:
+        return await asyncio.to_thread(self._mark_thread_output, thread_id)
+
     def _append_message(
         self,
         ctx: RunContext,
@@ -222,6 +237,15 @@ class RunManager:
             )
             ctx.non_recoverable = True
             return False
+
+    async def _aappend_message(
+        self,
+        ctx: RunContext,
+        role: str,
+        content: str,
+        attachments: list[str] | None = None,
+    ) -> bool:
+        return await asyncio.to_thread(self._append_message, ctx, role, content, attachments)
 
     def _start_task(self, ctx: RunContext, awaitable: Awaitable[None]) -> None:
         task = asyncio.create_task(awaitable)
@@ -325,7 +349,8 @@ class RunManager:
 
             coordinator = get_shutdown_coordinator()
             if coordinator.is_shutting_down and not coordinator.reset_after_normal_lifespan_exit():
-                raise RuntimeError("服务正在关闭，无法接受新的 Agent 运行")
+                # 停机拒绝不应表现为未预期的 500，直接抛 503 让客户端得到明确语义
+                raise HTTPException(status_code=503, detail="服务正在停机，请稍后重试")
         except ImportError:
             pass
 
@@ -395,7 +420,7 @@ class RunManager:
         P1-4：启动独立 cancel watcher 任务，不依赖 graph 事件产生即可取消。
         """
         ctx.status = "running"
-        if not self._update_metadata(ctx.run_id, status="running"):
+        if not await self._aupdate_metadata(ctx.run_id, status="running"):
             await ctx.publish(
                 {
                     "event": "warning",
@@ -437,7 +462,7 @@ class RunManager:
             ctx.final_output = output or ""
             ctx.status = "completed"
             ctx.completed_at = time.time()
-            run_persisted = self._update_metadata(
+            run_persisted = await self._aupdate_metadata(
                 ctx.run_id,
                 status="completed",
                 final_output=ctx.final_output,
@@ -445,8 +470,8 @@ class RunManager:
                 document_file=ctx.document_file,
                 completed_at=datetime.now(timezone.utc),
             )
-            thread_marked = self._mark_thread_output(ctx.thread_id)
-            message_persisted = self._append_message(
+            thread_marked = await self._amark_thread_output(ctx.thread_id)
+            message_persisted = await self._aappend_message(
                 ctx,
                 "assistant",
                 ctx.final_output,
@@ -462,7 +487,7 @@ class RunManager:
             await ctx.publish(_build_final_output_event(ctx))
         except Exception as exc:  # noqa: BLE001 入口层需宽口径捕获
             await self._fail_run(ctx, code="run_exception", message=str(exc))
-            self._append_message(ctx, "assistant", f"运行错误：{ctx.error}")
+            await self._aappend_message(ctx, "assistant", f"运行错误：{ctx.error}")
             _logger.exception("Agent run %s failed", ctx.run_id)
         except asyncio.CancelledError:
             # P1-5：统一取消收尾，确保 DB 写入 completed_at
@@ -550,7 +575,9 @@ class RunManager:
             if request.action == "edit" and request.edited_output:
                 resume_payload["edited_output"] = request.edited_output
 
-            claim_status, _claim = self._claim_hitl(run_id, current_user_id)
+            claim_status, _claim = await asyncio.to_thread(
+                self._claim_hitl, run_id, current_user_id
+            )
             if claim_status == "forbidden":
                 return ("forbidden", f"run {run_id} 不属于当前用户")
             if claim_status in ("conflict",):
@@ -600,6 +627,11 @@ class RunManager:
           4. 找不到则返回 not_found。
         未注入 metadata store 时仅保留本地开发兼容路径。
         """
+        # P0-2：claimed/ctx 必须在 try 之前初始化。若 try 块早期
+        # （如 _get_graph / get_run，即 DB 故障场景）抛错，except 里的
+        # 回滚逻辑会因变量未绑定抛 UnboundLocalError，把可控错误变成 500。
+        claimed = False
+        ctx: RunContext | None = None
         try:
             from langgraph.types import Command
 
@@ -628,7 +660,6 @@ class RunManager:
                 # 本地开发兼容路径；生产实例必须注入 PostgreSQL metadata store。
                 thread_candidates = _get_case_memory().list_threads()
 
-            claimed = False  # P0-2：追踪 claim 是否成功
             for thread_id, meta in thread_candidates:
                 config = {
                     "configurable": {
@@ -668,7 +699,9 @@ class RunManager:
                 if request.action == "edit" and request.edited_output:
                     resume_payload["edited_output"] = request.edited_output
 
-                claim_status, _claim = self._claim_hitl(run_id, current_user_id)
+                claim_status, _claim = await asyncio.to_thread(
+                self._claim_hitl, run_id, current_user_id
+            )
                 if claim_status == "forbidden":
                     self._runs.pop(run_id, None)
                     return ("forbidden", f"run {run_id} 不属于当前用户")
@@ -762,7 +795,7 @@ class RunManager:
             ctx.final_output = final_output or ""
             ctx.status = "completed"
             ctx.completed_at = time.time()
-            run_persisted = self._update_metadata(
+            run_persisted = await self._aupdate_metadata(
                 ctx.run_id,
                 status="completed",
                 final_output=ctx.final_output,
@@ -770,8 +803,8 @@ class RunManager:
                 document_file=ctx.document_file,
                 completed_at=datetime.now(timezone.utc),
             )
-            thread_marked = self._mark_thread_output(ctx.thread_id)
-            message_persisted = self._append_message(
+            thread_marked = await self._amark_thread_output(ctx.thread_id)
+            message_persisted = await self._aappend_message(
                 ctx,
                 "assistant",
                 ctx.final_output,
@@ -795,7 +828,7 @@ class RunManager:
             await ctx.publish(_build_final_output_event(ctx))
         except Exception as exc:  # noqa: BLE001
             await self._fail_run(ctx, code="hitl_resume_exception", message=str(exc))
-            self._append_message(ctx, "assistant", f"运行错误：{ctx.error}")
+            await self._aappend_message(ctx, "assistant", f"运行错误：{ctx.error}")
             _logger.exception("HITL 恢复执行失败 run %s", ctx.run_id)
         except asyncio.CancelledError:
             # P1-5：统一取消收尾，确保 DB 写入 completed_at
@@ -1096,19 +1129,6 @@ def _get_case_memory() -> Any:
     from lvyan.runtime import get_case_memory
 
     return get_case_memory()
-
-
-def _check_interrupt(graph: Any, config: dict[str, Any]) -> dict[str, Any] | None:
-    """检查图是否有待处理的 LangGraph interrupt（向后兼容包装）。
-
-    保留旧二态语义（pending → dict / 否则 None），供不关心持久化故障的调用方使用。
-    安全敏感路径（runner / HITL 恢复）应改用 :func:`_check_interrupt_status`，
-    以区分「无中断」与「checkpoint 不可读」（P0-2 fail-closed）。
-    """
-    result = _check_interrupt_status(graph, config)
-    if result.status == "pending":
-        return result.payload
-    return None
 
 
 class InterruptCheckResult:

@@ -158,7 +158,10 @@ def hybrid_search(
 
     # article_no / case_rule：线性扫描，传 filtered_chunks 减少遍历量
     article_no_results = article_no_search(query=query, chunks=filtered_chunks)
-    case_rule_results = case_rule_search(query=query, chunks=filtered_chunks)
+    # case_rule 召回结果无内部上限：查询含「离婚」等案由词时会返回整部民法典
+    # 1260 条，整段进 RRF 会稀释排序。此处截断到前 100 条（与 dense.py 的
+    # ``[:candidate_limit]`` 截断同思路）。
+    case_rule_results = case_rule_search(query=query, chunks=filtered_chunks)[:100]
 
     routes = [bm25_results, dense_results, article_no_results, case_rule_results]
 

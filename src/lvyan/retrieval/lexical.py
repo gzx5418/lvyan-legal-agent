@@ -224,6 +224,12 @@ def _load_synonym_map() -> dict[str, list[str]]:
 # 模块级加载（仅一次）
 SYNONYM_MAP: dict[str, list[str]] = _load_synonym_map()
 
+# 预构建的已知术语集合（领域词典 + 同义词表），供 _extend_known_subtokens 使用。
+# 模块级常量避免每次分词调用都重建 set（全库 BM25 构建时该函数被高频调用）。
+_KNOWN_SUBTOKENS: frozenset[str] = frozenset(_DOMAIN_TERMS).union(
+    variant for variants in SYNONYM_MAP.values() for variant in variants
+)
+
 
 # ---------------------------------------------------------------------------
 # ScoredChunk：四路检索通用结果载体
@@ -317,7 +323,7 @@ def _load_article_chunks() -> list[Any]:
                     return chunks
         except IndexVersionMismatchError:
             log("[BM25] LVIX article index schema 版本不匹配，重建 ...")
-        except (OSError, Exception) as exc:  # noqa: BLE001 boundary-exception: 索引加载降级
+        except Exception as exc:  # noqa: BLE001 boundary-exception: 索引加载降级
             log(f"[BM25] LVIX article index 读取失败 ({exc})，尝试 JSON ...")
 
     # 2) 回退到 JSON 缓存 —— 同样仅在 manifest 一致时信任
@@ -546,6 +552,18 @@ def _build_bm25_index(chunks: list[Any]) -> dict[str, Any]:
     }
 
 
+def _atomic_write_json(path: Path, obj: Any) -> None:
+    """原子写 JSON 文件：先写临时文件再 ``os.replace`` 切换（参考 manifest._atomic_write_text）。
+
+    避免 BM25 索引落盘过程中进程被杀 / 断电留下半写入的损坏 JSON；
+    ``os.replace`` 在 Windows 上也是原子切换语义。
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
 def _serialize_bm25_index(index: dict[str, Any]) -> dict[str, Any]:
     """把内存中的 BM25 索引转为可 JSON 序列化的结构。"""
     return {
@@ -616,7 +634,7 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
                     log("[BM25] LVIX 缓存签名不匹配，重建索引 ...")
         except IndexVersionMismatchError:
             log("[BM25] LVIX bm25 index schema 版本不匹配，重建 ...")
-        except (OSError, Exception) as exc:  # noqa: BLE001 boundary-exception: 索引加载降级
+        except Exception as exc:  # noqa: BLE001 boundary-exception: 索引加载降级
             log(f"[BM25] LVIX bm25 index 读取失败 ({exc})，尝试 JSON ...")
 
     # 2) 回退到 JSON 缓存（兼容旧版本）
@@ -650,7 +668,7 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
                 return _GLOBAL_BM25_INDEX
             else:
                 log("[BM25] JSON 缓存签名不匹配，重建索引 ...")
-        except (OSError, json.JSONDecodeError) as exc:
+        except Exception as exc:  # noqa: BLE001 boundary-exception: 结构损坏（ValueError/TypeError/IndexError 等）统一降级重建
             log(f"[BM25] JSON 缓存读取失败 ({exc})，重建索引 ...")
 
     # 3) 现场构建并落盘（LVIX + JSON）
@@ -673,9 +691,8 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
             log(f"[BM25] 已写入 LVIX 索引 -> {_BM25_INDEX_LVIX}")
         except Exception as exc:  # noqa: BLE001 boundary-exception: 缓存写入可选
             log(f"[BM25] LVIX 落盘失败（忽略）：{exc}")
-        # JSON（兼容备份）
-        with open(_BM25_INDEX_FILE, "w", encoding="utf-8") as f:
-            json.dump(serialized, f, ensure_ascii=False)
+        # JSON（兼容备份，原子写避免半写入损坏）
+        _atomic_write_json(_BM25_INDEX_FILE, serialized)
         log(f"[BM25] 已写入 JSON 索引 -> {_BM25_INDEX_FILE}")
     except OSError as exc:
         log(f"[BM25] 索引落盘失败（仅内存）：{exc}")
@@ -690,47 +707,6 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
 _BM25_K1 = 1.5
 _BM25_B = 0.75
 _TITLE_MATCH_BOOST = 1.2  # 标题命中查询词时加分（非硬过滤）
-
-
-def _bm25_score(
-    query_tokens: list[str],
-    index: dict[str, Any],
-    doc_idx: int,
-) -> float:
-    """对单个文档计算 BM25 分数（query_tokens 已分词）。"""
-    score = 0.0
-    doc_len = index["doc_lengths"][doc_idx]
-    avgdl = index["avgdl"] or 1.0
-    idf_table = index["idf"]
-    inverted = index["inverted"]
-
-    # 去重 query tokens 避免重复计分
-    seen_tokens = set()
-    for tok in query_tokens:
-        if tok in seen_tokens:
-            continue
-        seen_tokens.add(tok)
-        idf = idf_table.get(tok)
-        if idf is None:
-            continue
-        postings = inverted.get(tok)
-        if not postings:
-            continue
-        # postings 是 list of (doc_idx, tf)；用二分或线性查 doc_idx
-        # 由于构建时按 doc_idx 递增写入，可用线性扫描或简单查表
-        tf = 0
-        for di, t in postings:
-            if di == doc_idx:
-                tf = t
-                break
-            elif di > doc_idx:
-                break  # 已超过目标，提前结束
-        if tf <= 0:
-            continue
-        # BM25 公式
-        denom = tf + _BM25_K1 * (1.0 - _BM25_B + _BM25_B * (doc_len / avgdl))
-        score += idf * (tf * (_BM25_K1 + 1.0)) / denom
-    return score
 
 
 def _bm25_score_bulk(
@@ -793,10 +769,10 @@ def bm25_search(
     if not chunks:
         return []
 
-    # 显式传 chunks（小规模）→ 现场构建；为 None（全局）→ 用磁盘缓存
-    if chunks is _GLOBAL_CHUNKS_CACHE and _GLOBAL_BM25_INDEX is not None:
-        index = _GLOBAL_BM25_INDEX
-    elif chunks is _GLOBAL_CHUNKS_CACHE:
+    # 显式传 chunks（小规模）→ 现场构建；为 None（全局）→ 用磁盘缓存。
+    # _load_or_build_global_bm25_index 开头已有 _GLOBAL_BM25_INDEX 早退，
+    # 无需在此重复判断。
+    if chunks is _GLOBAL_CHUNKS_CACHE:
         index = _load_or_build_global_bm25_index(chunks)
     else:
         # 显式传入的小集合：直接现场构建（不污染全局缓存）
@@ -945,9 +921,7 @@ def _extend_known_subtokens(segment: str, out: list[str]) -> None:
     使用滑动方式在未匹配片段中捞回已知词。优先匹配更长（4→3→2 字）的已知词，
     避免把"劳动者"切成"劳动"。
     """
-    known: set[str] = set(_DOMAIN_TERMS)
-    for variants in SYNONYM_MAP.values():
-        known.update(variants)
+    known = _KNOWN_SUBTOKENS
     k = 0
     L_seg = len(segment)
     while k < L_seg:

@@ -8,6 +8,7 @@ from lvyan.schemas.case import CaseState, Fact, MissingFact
 from lvyan.schemas.authority import Authority
 from lvyan.schemas.evidence import EvidenceRequirement
 from lvyan.schemas.output import ReasoningResult
+from lvyan.schemas.web import OnlineSource
 
 from lvyan.nodes.answer_builder import build_legal_answer
 
@@ -82,6 +83,22 @@ def test_statutes_become_citations():
     assert c.article_number == "第七百零三条"
     assert c.level == "law"
     assert c.status == "effective"
+
+
+def test_online_sources_stay_separate_from_statute_citations():
+    state = _make_state(
+        online_sources=[
+            OnlineSource(
+                title="国家法律法规数据库",
+                url="https://flk.npc.gov.cn/detail2.html",
+                snippet="可供核对的官方检索结果",
+                source_name="国家法律法规数据库",
+            )
+        ]
+    )
+    answer = build_legal_answer(state)
+    assert len(answer.online_sources) == 1
+    assert answer.citations == []
 
 
 def test_reasoning_result_maps_to_issues():

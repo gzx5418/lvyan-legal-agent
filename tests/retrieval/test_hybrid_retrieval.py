@@ -150,6 +150,18 @@ def test_article_no_search_civil_code():
     assert all(sc.score == 1.0 for sc in matched), "精确匹配 score 应为 1.0"
 
 
+def test_article_no_search_no_cross_law_substring_mismatch():
+    """回归：「合同法」不得因子串关系误匹配《劳动合同法》同名条号。"""
+    from lvyan.retrieval.exact_match import _match_law_title
+
+    assert not _match_law_title("合同法", "中华人民共和国劳动合同法")
+    assert not _match_law_title("商标法", "中华人民共和国商标法实施条例")
+    # 正确的全等匹配仍应命中
+    assert _match_law_title("民法典", "中华人民共和国民法典")
+    assert _match_law_title("中华人民共和国民法典", "民法典")
+    assert _match_law_title("民法典", "中华人民共和国民法典（2020修正）")
+
+
 def test_article_no_search_no_match():
     """查询不含「《XX法》第Y条」模式时应返回空列表。"""
     chunks = _load_civil_code_chunks()

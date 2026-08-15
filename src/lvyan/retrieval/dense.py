@@ -40,12 +40,25 @@ _DENSE_DIM = 256  # 桩向量维度
 # 模块级缓存：记录真实 embedding 的可用性，避免反复网络探测。
 # - _REAL_EMBEDDING_PROBED: 是否已尝试真实接入（None=未尝试 / True=可用 / False=不可用）
 # - _ST_MODEL_CACHE: sentence-transformers 模型实例（真实接入可用时填充）
-# - _DOC_VEC_CACHE: chunk_id → 真实文档向量，避免每次请求对候选集重复 embed
+# - _DOC_VEC_CACHE: "model:chunk_id" → 真实文档向量（键含模型名避免跨模型污染），
+#   避免每次请求对候选集重复 embed；容量有界，超限按插入序淘汰最旧
 _REAL_EMBEDDING_PROBED: bool | None = None
 _ST_MODEL_CACHE: Any = None
 _DOC_VEC_CACHE: dict[str, list[float]] = {}
 _DENSE_CANDIDATE_FLOOR = 100
 _DENSE_CANDIDATE_MULTIPLIER = 10
+
+# 真实 embedding 批量护栏：
+# - 单批最多 64 条文本，防止一次请求构造数百 MB 的 HTTP payload
+# - 每批超时固定上限 30 秒（旧公式 max(10, 2*len(texts)) 对大批量会算出
+#   小时级超时，形同挂死）
+_REAL_EMBED_BATCH_SIZE = 64
+_REAL_EMBED_BATCH_TIMEOUT = 30.0
+# 参与真实 embedding 精排的候选数上限：超过时先按 BM25 预筛取前 N 条，
+# 防止对全库 8.5w chunks 逐条 embed
+_REAL_RANK_CANDIDATE_LIMIT = 2000
+# 文档向量缓存容量上限（条），超限按插入序淘汰最旧的（dict 保序即可）
+_DOC_VEC_CACHE_MAX_ENTRIES = 50_000
 
 
 # ---------------------------------------------------------------------------
@@ -151,11 +164,15 @@ def _probe_real_embedding() -> bool:
         return False
 
 
-def _try_real_embedding(text: str) -> list[float] | None:
-    """尝试用已探测的真实模型计算向量；不可用时返回 None。"""
+def _try_real_embedding(text: str, model: str | None = None) -> list[float] | None:
+    """尝试用已探测的真实模型计算向量；不可用时返回 None。
+
+    ``model`` 为 None 时读 ``settings.embedding_model``（默认行为不变）。
+    """
     if _REAL_EMBEDDING_PROBED is not True:
         return None
 
+    model = model or settings.embedding_model
     gateway = settings.model_gateway_url
     if gateway:
         try:
@@ -167,7 +184,7 @@ def _try_real_embedding(text: str) -> list[float] | None:
 
             resp = httpx.post(
                 f"{gateway.rstrip('/')}/v1/embeddings",
-                json={"model": settings.embedding_model, "input": text},
+                json={"model": model, "input": text},
                 headers=headers,
                 timeout=10.0,
             )
@@ -186,15 +203,23 @@ def _try_real_embedding(text: str) -> list[float] | None:
     return None
 
 
-def _try_real_embedding_batch(texts: list[str]) -> list[list[float]] | None:
+def _try_real_embedding_batch(
+    texts: list[str],
+    model: str | None = None,
+) -> list[list[float]] | None:
     """批量真实 embedding；任一环节失败返回 None 由调用方降级。
 
     优先调用模型网关（OpenAI 兼容 ``/v1/embeddings`` 支持 ``input`` 数组），
     其次本地 sentence-transformers（``encode`` 接受列表）。
+
+    护栏：按 ``_REAL_EMBED_BATCH_SIZE``（64 条/批）分批提交，每批超时固定
+    ``_REAL_EMBED_BATCH_TIMEOUT``（30 秒）上限，防止对大批量构造数百 MB 的
+    单次 HTTP payload、或按条数线性放大的小时级超时。
     """
     if _REAL_EMBEDDING_PROBED is not True or not texts:
         return None
 
+    model = model or settings.embedding_model
     gateway = settings.model_gateway_url
     if gateway:
         try:
@@ -204,15 +229,22 @@ def _try_real_embedding_batch(texts: list[str]) -> list[list[float]] | None:
             if settings.model_gateway_api_key:
                 headers["Authorization"] = f"Bearer {settings.model_gateway_api_key}"
 
-            resp = httpx.post(
-                f"{gateway.rstrip('/')}/v1/embeddings",
-                json={"model": settings.embedding_model, "input": texts},
-                headers=headers,
-                timeout=max(10.0, 2.0 * len(texts)),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return [list(map(float, d["embedding"])) for d in data["data"]]
+            embeddings: list[list[float]] = []
+            for start in range(0, len(texts), _REAL_EMBED_BATCH_SIZE):
+                batch = texts[start : start + _REAL_EMBED_BATCH_SIZE]
+                resp = httpx.post(
+                    f"{gateway.rstrip('/')}/v1/embeddings",
+                    json={"model": model, "input": batch},
+                    headers=headers,
+                    timeout=_REAL_EMBED_BATCH_TIMEOUT,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                batch_vecs = [list(map(float, d["embedding"])) for d in data["data"]]
+                if len(batch_vecs) != len(batch):
+                    return None
+                embeddings.extend(batch_vecs)
+            return embeddings
         except Exception:  # noqa: BLE001 - optional embedding provider boundary
             return None
 
@@ -308,28 +340,68 @@ def _chunk_text_of(chunk: Any) -> str:
     return f"{title} {text}".strip() if title else text
 
 
+def _doc_vec_cache_key(model: str, chunk_id: str) -> str:
+    """文档向量缓存键：``model:chunk_id``。键含模型名，避免跨模型污染缓存。"""
+    return f"{model}:{chunk_id}"
+
+
+def _select_real_rank_candidates(query: str, chunks: list[Any]) -> list[Any]:
+    """真实 embedding 精排候选上限护栏。
+
+    候选数超过 ``_REAL_RANK_CANDIDATE_LIMIT``（2000）时，先按 BM25 预筛取
+    前 2000 条再进入 embed，防止对全库 8.5w chunks 发起批量 embed；
+    BM25 无命中时退化为取前 2000 条。小集合原样返回（不触发 BM25 预筛）。
+    """
+    if len(chunks) <= _REAL_RANK_CANDIDATE_LIMIT:
+        return chunks
+
+    log(
+        f"[Dense] 真实精排候选 {len(chunks)} 条超上限 {_REAL_RANK_CANDIDATE_LIMIT}，"
+        "按 BM25 预筛截断后再 embed"
+    )
+    lexical_candidates = bm25_search(query=query, chunks=chunks, top_k=_REAL_RANK_CANDIDATE_LIMIT)
+    candidates: list[Any] = []
+    seen_ids: set[str] = set()
+    for item in lexical_candidates:
+        chunk = item.chunk
+        chunk_id = _chunk_id_of(chunk)
+        if chunk_id and chunk_id not in seen_ids:
+            candidates.append(chunk)
+            seen_ids.add(chunk_id)
+    if not candidates:
+        # BM25 无命中：保留有界降级路径，不全库 embed
+        return chunks[:_REAL_RANK_CANDIDATE_LIMIT]
+    return candidates
+
+
 def _rank_by_real_embedding(
     query_vec: list[float],
     candidate_chunks: list[Any],
     top_k: int,
+    model: str | None = None,
 ) -> list[ScoredChunk] | None:
     """真实 embedding 路径：批量 embed 候选集（带缓存）并按余弦排序。
 
+    ``model`` 为 None 时读 ``settings.embedding_model``；文档向量缓存键为
+    ``model:chunk_id`` 且容量有界（超限按插入序淘汰最旧）。
+
     返回 None 表示批量 embedding 失败，调用方应降级到 hash 路径。
     """
+    model = model or settings.embedding_model
     cached_vecs: dict[int, list[float]] = {}
     to_embed_idx: list[int] = []
     to_embed_text: list[str] = []
     for i, chunk in enumerate(candidate_chunks):
         cid = _chunk_id_of(chunk)
-        if cid and cid in _DOC_VEC_CACHE:
-            cached_vecs[i] = _DOC_VEC_CACHE[cid]
+        cache_key = _doc_vec_cache_key(model, cid) if cid else ""
+        if cache_key and cache_key in _DOC_VEC_CACHE:
+            cached_vecs[i] = _DOC_VEC_CACHE[cache_key]
         else:
             to_embed_idx.append(i)
             to_embed_text.append(_chunk_text_of(chunk))
 
     if to_embed_text:
-        vecs = _try_real_embedding_batch(to_embed_text)
+        vecs = _try_real_embedding_batch(to_embed_text, model=model)
         if vecs is None or len(vecs) != len(to_embed_text):
             return None
         for j, vec in enumerate(vecs):
@@ -337,7 +409,10 @@ def _rank_by_real_embedding(
             cached_vecs[i] = vec
             cid = _chunk_id_of(candidate_chunks[i])
             if cid:
-                _DOC_VEC_CACHE[cid] = vec
+                _DOC_VEC_CACHE[_doc_vec_cache_key(model, cid)] = vec
+        # 容量上限：超限按插入序淘汰最旧的（dict 保序）
+        while len(_DOC_VEC_CACHE) > _DOC_VEC_CACHE_MAX_ENTRIES:
+            _DOC_VEC_CACHE.pop(next(iter(_DOC_VEC_CACHE)))
 
     scored: list[tuple[int, float]] = []
     for i, chunk in enumerate(candidate_chunks):
@@ -389,6 +464,7 @@ def dense_search(
     query: str,
     top_k: int = 20,
     chunks: list[Any] | None = None,
+    model: str | None = None,
 ) -> list[ScoredChunk]:
     """Dense 向量召回。
 
@@ -396,13 +472,16 @@ def dense_search(
         query: 用户查询字符串
         top_k: 返回前 K 条
         chunks: 候选 ArticleChunk；None 时从全库加载
+        model: 指定 embedding 模型名；None 时读 ``settings.embedding_model``。
+            显式传参代替临时改写全局 settings（多线程下会竞态）。
 
     Returns:
         list[ScoredChunk]：按余弦相似度降序。
 
-    优先走真实 embedding（``settings.embedding_model``）。真实可用时查询与
-    文档向量同处一个真实向量空间，文档向量按 ``chunk_id`` 缓存避免重复 embed。
-    真实探测失败、查询向量获取失败或批量 embed 失败时，自动降级到 hash 桩，
+    优先走真实 embedding（``model`` 或 ``settings.embedding_model``）。真实可用
+    时查询与文档向量同处一个真实向量空间，文档向量按 ``model:chunk_id`` 缓存
+    避免重复 embed，参与精排的候选数有上限（超限时 BM25 预筛截断）。真实探测
+    失败、查询向量获取失败或批量 embed 失败时，自动降级到 hash 桩，
     hash 桩内查询与文档同处 hash 空间，绝不跨空间混算。
     """
     if chunks is None:
@@ -410,12 +489,16 @@ def dense_search(
     if not chunks:
         return []
 
-    # 真实 embedding 路径：语义向量有独立信号空间，直接对全量 chunks 计算，
-    # 不需要 BM25 预筛（BM25 已在 hybrid_search 作为独立路被调用一次）。
+    # 真实 embedding 路径：语义向量有独立信号空间，不需要 BM25 预筛
+    # （BM25 已在 hybrid_search 作为独立路被调用一次）；但候选数超上限时
+    # 仍需 BM25 预筛截断，防止对全库 8.5w chunks 发起批量 embed。
     if _probe_real_embedding():
-        query_vec = _try_real_embedding(query)
+        query_vec = _try_real_embedding(query, model=model)
         if query_vec is not None:
-            real_results = _rank_by_real_embedding(query_vec, chunks, top_k)
+            real_candidates = _select_real_rank_candidates(query, chunks)
+            real_results = _rank_by_real_embedding(
+                query_vec, real_candidates, top_k, model=model
+            )
             if real_results is not None:
                 return real_results
             log("[Dense] 真实 embedding 批量失败，降级到 hash 桩")
@@ -434,15 +517,10 @@ def dense_search_bge_m3(
 ) -> list[ScoredChunk]:
     """BGE-M3 对照接入桩（与 :func:`dense_search` 同口径，仅切换模型）。
 
-    通过 settings.embedding_model 配置切换到 BGE-M3；当前复用 dense_search 通道。
+    通过 ``model`` 参数显式传递模型名到 embed 调用路径；不再临时改写全局
+    ``settings.embedding_model``（多线程下会竞态污染其他请求）。
     """
-    # 临时切换 embedding_model 到 BGE-M3
-    original = settings.embedding_model
-    try:
-        settings.embedding_model = "BAAI/bge-m3"
-        return dense_search(query=query, top_k=top_k, chunks=chunks)
-    finally:
-        settings.embedding_model = original
+    return dense_search(query=query, top_k=top_k, chunks=chunks, model="BAAI/bge-m3")
 
 
 __all__ = [

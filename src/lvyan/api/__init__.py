@@ -9,7 +9,6 @@ from .models import (
     HITLRequest,
     HITLResponse,
     HealthResponse,
-    NodeTrace,
 )
 from .run_context import RunContext
 from .server import app, create_app
@@ -22,7 +21,6 @@ __all__ = [
     "HITLRequest",
     "HITLResponse",
     "HealthResponse",
-    "NodeTrace",
     "RunContext",
     "RunManager",
     "app",

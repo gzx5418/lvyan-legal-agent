@@ -215,8 +215,14 @@ def _try_llm_critic(
     reasoning_result: Any,
     statutes: list[Any],
     facts: list[Any],
-) -> tuple[list[str], list[str]]:
-    """LLM 对抗评审；法条仅传入已检索候选，输出不具有新增来源权限。"""
+) -> tuple[list[str], list[str], bool | None]:
+    """LLM 对抗评审；法条仅传入已检索候选，输出不具有新增来源权限。
+
+    Returns:
+        ``(issues, suggestions, passed)``；``passed`` 为 LLM 明确给出的
+        bool 型 ``passed`` 字段（未给出 / 非法类型 / LLM 不可用时为 ``None``，
+        由调用方回退「无问题即通过」规则）。
+    """
     from lvyan.llm import chat_json, llm_available
     from lvyan.llm.prompt_registry import get_prompt
     from lvyan.observability.metrics import record_llm_fallback
@@ -224,7 +230,7 @@ def _try_llm_critic(
     if reasoning_result is None or not llm_available():
         if reasoning_result is not None:
             record_llm_fallback("critic", "unavailable")
-        return [], []
+        return [], [], None
     if hasattr(reasoning_result, "model_dump"):
         reasoning_payload = reasoning_result.model_dump(mode="json")
     else:
@@ -258,18 +264,21 @@ def _try_llm_critic(
         )
     except Exception:  # noqa: BLE001 boundary-exception: LLM 降级边界
         record_llm_fallback("critic", "error")
-        return [], []
+        return [], [], None
     if not isinstance(payload, dict):
         record_llm_fallback("critic", "invalid_json")
-        return [], []
+        return [], [], None
     raw_issues = payload.get("issues", [])
     raw_suggestions = payload.get("suggestions", [])
     if not isinstance(raw_issues, list) or not isinstance(raw_suggestions, list):
         record_llm_fallback("critic", "invalid_schema")
-        return [], []
+        return [], [], None
     issues = [str(item).strip()[:500] for item in raw_issues[:6] if str(item).strip()]
     suggestions = [str(item).strip()[:500] for item in raw_suggestions[:6] if str(item).strip()]
-    return issues, suggestions
+    # 提示词要求输出 passed；仅在为 bool 时采用，否则回退确定性规则
+    llm_passed = payload.get("passed")
+    llm_passed = llm_passed if isinstance(llm_passed, bool) else None
+    return issues, suggestions, llm_passed
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +305,8 @@ def critic(state: CaseState) -> dict[str, Any]:
 
     issues: list[str] = []
     suggestions: list[str] = []
+    # LLM 明确给出的 bool 型 passed（None 表示未给出，回退确定性规则）
+    llm_passed: bool | None = None
 
     # 若无 reasoning_result，直接不通过
     if reasoning_result is None:
@@ -309,7 +320,9 @@ def critic(state: CaseState) -> dict[str, Any]:
             suggestions.append(suggestion)
 
         # LLM 只补充对抗性问题；确定性规则的结论不会被 LLM 覆盖或删除。
-        llm_issues, llm_suggestions = _try_llm_critic(reasoning_result, statutes, facts)
+        llm_issues, llm_suggestions, llm_passed = _try_llm_critic(
+            reasoning_result, statutes, facts
+        )
         for llm_issue in llm_issues:
             if llm_issue not in issues:
                 issues.append(llm_issue)
@@ -330,7 +343,8 @@ def critic(state: CaseState) -> dict[str, Any]:
             suggestions.append(suggestion)
 
     # --- 决定是否通过 ---
-    passed = len(issues) == 0
+    # 优先采用 LLM 明确给出的 bool 型 passed；未给出时回退「无问题即通过」规则
+    passed = bool(llm_passed) if isinstance(llm_passed, bool) else len(issues) == 0
 
     if passed:
         # 通过：清空 feedback

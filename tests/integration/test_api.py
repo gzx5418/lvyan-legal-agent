@@ -213,6 +213,8 @@ def test_cross_user_active_thread_is_indistinguishable_from_missing(monkeypatch)
     """跨租户请求不能泄露会话 owner、存在性或是否仍在运行。"""
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("AUTH_MODE", "trusted_proxy")
+    # TestClient 的直连来源 host 固定为 "testclient"，需加入可信代理白名单
+    monkeypatch.setenv("TRUSTED_PROXIES", "testclient")
 
     async def slow_runner(*_args, **_kwargs):
         await asyncio.sleep(60)

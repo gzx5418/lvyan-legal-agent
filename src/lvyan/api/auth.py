@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from fastapi import Header, HTTPException, Request
@@ -44,6 +45,35 @@ __all__ = [
 ]
 
 ANONYMOUS_USER = "anonymous"
+
+# PyJWKClient 进程级缓存（按 JWKS URL 键）。
+# PyJWKClient 内部自带 JWKS 缓存（默认 300s TTL），每次认证新建实例会丢弃
+# 缓存、导致每个请求都向 IdP 全量拉取 JWKS；IdP 限流/抖动会被放大为服务不可用。
+_JWK_CLIENTS: dict[str, Any] = {}
+_JWK_CLIENTS_LOCK = threading.Lock()
+
+
+def _get_trusted_proxies() -> frozenset[str]:
+    """解析 TRUSTED_PROXIES（逗号分隔 IP 白名单，与限流模块共用约定）。"""
+    import os
+
+    raw = os.getenv("TRUSTED_PROXIES", "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset(ip.strip() for ip in raw.split(",") if ip.strip())
+
+
+def _is_from_trusted_proxy(request: Request) -> bool:
+    """请求直连来源是否在 TRUSTED_PROXIES 白名单内。
+
+    trusted_proxy 模式下 X-User-ID 的可信度完全取决于请求确实经过可信
+    网关；若不校验来源，任何能直连服务端口的客户端伪造
+    ``X-User-ID: victim`` 即可冒充任意用户。
+    """
+    direct_ip = request.client.host if request.client else None
+    if not direct_ip:
+        return False
+    return direct_ip in _get_trusted_proxies()
 
 
 def is_auth_enabled() -> bool:
@@ -207,8 +237,14 @@ def _fetch_signing_key(token: str, jwks_url: str, algorithms: list[str]) -> Any:
     except ImportError as exc:
         raise RuntimeError("PyJWT 缺少 PyJWKClient（请升级到 PyJWT>=2.6）") from exc
 
-    jwk_client = PyJWKClient(jwks_url)
-    return jwk_client.get_signing_key_from_jwt(token).key
+    client = _JWK_CLIENTS.get(jwks_url)
+    if client is None:
+        with _JWK_CLIENTS_LOCK:
+            client = _JWK_CLIENTS.get(jwks_url)
+            if client is None:
+                client = PyJWKClient(jwks_url)
+                _JWK_CLIENTS[jwks_url] = client
+    return client.get_signing_key_from_jwt(token).key
 
 
 def get_current_user_id(
@@ -267,6 +303,19 @@ def get_current_user_id(
             raise HTTPException(
                 status_code=401,
                 detail="missing_trusted_identity",
+            )
+        # 仅当直连来源在 TRUSTED_PROXIES 白名单内才采信 X-User-ID；
+        # 否则任何能直连服务端口的客户端都可伪造他人身份。
+        # 白名单未配置视为不可信（fail-closed）。
+        if not _is_from_trusted_proxy(request):
+            _logger.warning(
+                "trusted_proxy 模式拒绝非白名单来源的 X-User-ID 请求（client=%s，"
+                "请检查 TRUSTED_PROXIES 配置）",
+                request.client.host if request.client else "unknown",
+            )
+            raise HTTPException(
+                status_code=401,
+                detail="untrusted_identity_source",
             )
         return x_user_id.strip()
 

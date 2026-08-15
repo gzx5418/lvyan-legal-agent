@@ -18,6 +18,7 @@ from datetime import date, datetime, timezone
 
 from lvyan.nodes.composer import composer
 from lvyan.schemas import Authority, ReasoningResult
+from lvyan.schemas.web import OnlineSource
 
 
 # ---------------------------------------------------------------------------
@@ -427,3 +428,18 @@ def test_composer_light_advice_max_three():
     advice_section = output.split("## 下一步")[1].split("## 法律依据")[0]
     numbered = re.findall(r"^\d+\.", advice_section, re.MULTILINE)
     assert len(numbered) <= 3
+
+
+def test_composer_keeps_online_sources_separate_from_legal_basis():
+    state = _make_base_state()
+    state["online_sources"] = [
+        OnlineSource(
+            title="国家法律法规数据库",
+            url="https://flk.npc.gov.cn/detail2.html",
+            snippet="供用户核对的官方检索结果",
+            source_name="国家法律法规数据库",
+        )
+    ]
+    output = composer(state)["final_output"]
+    assert "## 联网权威来源（供核对）" in output
+    assert "联网资料仅供核对，不替代上列已校验的法律依据。" in output

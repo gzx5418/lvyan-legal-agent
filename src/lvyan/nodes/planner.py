@@ -18,7 +18,7 @@ from lvyan.schemas import CaseState, MissingFact, PlanStep, RetrievalQuery
 
 # 复用 triage 的案由识别与 fact_extractor 的缺失事实评估
 from lvyan.nodes.fact_extractor import _assess_missing_facts, _get, _short_id
-from lvyan.nodes.triage import _detect_case_type
+from lvyan.nodes.triage import _detect_case_type, is_personal_information_dispute
 
 __all__ = ["missing_fact_assessor", "planner"]
 
@@ -372,6 +372,9 @@ def planner(state: CaseState) -> dict[str, Any]:
     facts = _get(state, "facts", []) or []
     attachment_context = _get(state, "relevant_attachment_context", "") or ""
     conversation_summary = _get(state, "conversation_summary", "") or ""
+    is_privacy_case = case_type == "侵权纠纷" and is_personal_information_dispute(
+        user_goal, conversation_summary
+    )
 
     # --- 优先 LLM 计划生成 ---
     llm_result = _try_llm_plan(
@@ -387,13 +390,21 @@ def planner(state: CaseState) -> dict[str, Any]:
 
     # --- 降级：规则+模板 ---
     queries: list[RetrievalQuery] = []
-    main_query_text = _extract_keywords(user_goal) or user_goal[:20]
+    main_query_text = (
+        "中华人民共和国个人信息保护法"
+        if is_privacy_case
+        else (_extract_keywords(user_goal) or user_goal[:20])
+    )
     queries.append(RetrievalQuery(query_id=_short_id(), query_text=main_query_text, route="hybrid"))
 
     if case_type:
-        law_keywords = _CASE_TYPE_LAW_KEYWORDS.get(case_type, [])
+        law_keywords = (
+            ["个人信息保护法", "敏感个人信息", "公开"]
+            if is_privacy_case
+            else _CASE_TYPE_LAW_KEYWORDS.get(case_type, [])
+        )
         action_keywords = _extract_action_keywords(user_goal)
-        law_parts = [case_type]
+        law_parts = ["个人信息权益纠纷" if is_privacy_case else case_type]
         if law_keywords:
             # 保留同一案由的核心法源与法定要件，避免只检索法规标题而漏掉
             # 例如通勤工伤中的“非本人主要责任”。
@@ -404,7 +415,9 @@ def planner(state: CaseState) -> dict[str, Any]:
         )
         queries.append(
             RetrievalQuery(
-                query_id=_short_id(), query_text=f"{case_type} 裁判规则", route="case_rule"
+                query_id=_short_id(),
+                query_text=f"{'个人信息权益纠纷' if is_privacy_case else case_type} 裁判规则",
+                route="case_rule",
             )
         )
 

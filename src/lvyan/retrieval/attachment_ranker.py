@@ -49,7 +49,8 @@ def rank_chunks(
         for term in set(toks):
             df[term] = df.get(term, 0) + 1
 
-    q_terms = _tokenize(query)
+    # 查询分词后保序去重：重复词（如「押金 押金」）不应重复计分放大权重
+    q_terms = list(dict.fromkeys(_tokenize(query)))
     scores = [0.0] * n_docs
     for i, toks in enumerate(tokenized):
         tf: dict[str, int] = {}

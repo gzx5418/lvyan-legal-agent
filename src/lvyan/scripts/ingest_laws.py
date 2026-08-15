@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import socket
 import sys
@@ -331,17 +332,23 @@ def build_article_index(lawtext_dir: Path | None = None) -> list[ArticleChunk]:
 
 
 def save_index_json(chunks: list[ArticleChunk], output_path: Path) -> None:
-    """序列化 chunks 为 JSON 文件（用于离线测试和降级，暂不依赖 OpenSearch）。"""
+    """序列化 chunks 为 JSON 文件（用于离线测试和降级，暂不依赖 OpenSearch）。
+
+    原子写：先写临时文件再 ``os.replace`` 切换，避免半写入的损坏索引
+    （lexical._load_article_chunks 从此处落盘的缓存加载）。
+    """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
         "chunks": [chunk.model_dump(mode="json") for chunk in chunks],
     }
-    output_path.write_text(
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    tmp_path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    os.replace(tmp_path, output_path)
 
 
 def _save_article_index_lvix(chunks: list[ArticleChunk], lvix_path: Path) -> None:

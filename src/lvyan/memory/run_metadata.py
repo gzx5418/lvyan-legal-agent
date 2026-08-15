@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Literal, Protocol
 
 from lvyan.config import AGENT_DIR, settings
@@ -110,27 +111,32 @@ class PostgresRunMetadataStore:
         self.dsn = _to_dsn(resolved)
         self._schema_ready = False
         self._pool: Any = None
+        # 池初始化锁：防止多线程首调并发创建两个池（旧池连接泄漏）
+        self._pool_lock = threading.Lock()
 
     def _get_pool(self) -> Any:
         """获取或初始化连接池。"""
+        # 双重检查：锁外快速路径，锁内再确认，保证只创建一个池
         if self._pool is None:
-            try:
-                from psycopg_pool import ConnectionPool
-                from psycopg.rows import dict_row
+            with self._pool_lock:
+                if self._pool is None:
+                    try:
+                        from psycopg_pool import ConnectionPool
+                        from psycopg.rows import dict_row
 
-                self._pool = ConnectionPool(
-                    self.dsn,
-                    min_size=1,
-                    max_size=10,
-                    kwargs={
-                        "autocommit": True,
-                        "row_factory": dict_row,
-                    },
-                    open=True,
-                    timeout=3.0,
-                )
-            except ImportError:
-                _logger.info("psycopg_pool 未安装，回退到每次创建新连接")
+                        self._pool = ConnectionPool(
+                            self.dsn,
+                            min_size=1,
+                            max_size=10,
+                            kwargs={
+                                "autocommit": True,
+                                "row_factory": dict_row,
+                            },
+                            open=True,
+                            timeout=3.0,
+                        )
+                    except ImportError:
+                        _logger.info("psycopg_pool 未安装，回退到每次创建新连接")
         return self._pool
 
     def _connect(self):
@@ -532,7 +538,9 @@ class PostgresRunMetadataStore:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1 FROM agent_runs LIMIT 1")
                 cur.fetchone()
-                cur.execute("UPDATE agent_runs SET status = status WHERE FALSE")
+                # 真实的写权限探测：UPDATE 会走写路径（触发 RLS/约束检查），
+                # WHERE 用恒假主键条件保证不实际改动任何行
+                cur.execute("UPDATE agent_runs SET status = status WHERE run_id = ''")
         return True
 
     def request_cancel(

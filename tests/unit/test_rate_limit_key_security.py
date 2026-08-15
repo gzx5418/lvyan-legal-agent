@@ -85,13 +85,13 @@ def test_client_ip_trusted_when_from_trusted_proxy(monkeypatch):
 
 def test_user_id_takes_priority_over_ip(monkeypatch):
     """P0-5：已认证 user_id（通过 trusted_proxy 注入）应优先按 user 维度限流。"""
-    mw = _build_middleware(monkeypatch, trusted_proxies="", auth_enabled=True)
+    mw = _build_middleware(monkeypatch, trusted_proxies="203.0.113.1", auth_enabled=True)
     req = _make_request(
         client_host="203.0.113.1",
         x_forwarded_for=None,
         user_id=None,
     )
-    # 注入 X-User-ID 头（trusted_proxy 模式从该头读取）
+    # 注入 X-User-ID 头（trusted_proxy 模式从该头读取，来源须在白名单内）
     req.scope["headers"].append((b"x-user-id", b"user-abc"))
     key = mw._get_client_key(req)
     assert key == "user:user-abc", "认证用户应按 user_id 限流"
@@ -105,3 +105,16 @@ def test_anonymous_user_id_not_used(monkeypatch):
     )
     key = mw._get_client_key(req)
     assert key == "ip:203.0.113.1", "认证未启用时应按 IP 限流"
+
+
+def test_x_user_id_ignored_from_untrusted_source(monkeypatch):
+    """非白名单来源伪造 X-User-ID 时不得按 user 维度限流（防止桶拆分绕过）。"""
+    mw = _build_middleware(monkeypatch, trusted_proxies="10.0.0.1", auth_enabled=True)
+    req = _make_request(
+        client_host="203.0.113.1",
+        x_forwarded_for=None,
+        user_id=None,
+    )
+    req.scope["headers"].append((b"x-user-id", b"attacker-forged"))
+    key = mw._get_client_key(req)
+    assert key == "ip:203.0.113.1", "非可信来源的 X-User-ID 必须被忽略"

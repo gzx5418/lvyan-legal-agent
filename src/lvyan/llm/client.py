@@ -27,8 +27,10 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Sequence, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -83,11 +85,19 @@ class LLMClient:
         self._timeout = timeout
 
     def _resolve_model(self, model: str | None) -> str:
-        """解析模型别名到实际模型名。"""
+        """解析模型别名到实际模型名。
+
+        chat 路径专用：``embedding`` / ``reranker`` 别名对应的模型不能走
+        ``/v1/chat/completions``，遇到立即报错（fail fast），避免送到网关
+        才得到晦涩的 4xx。
+        """
+        if model and model.lower() in ("embedding", "reranker"):
+            raise ValueError(
+                f"chat 接口不接受 embedding/reranker 模型别名（收到 {model!r}）；"
+                "请分别使用 embedding/rerank 专用客户端调用"
+            )
         aliases = {
             "chat": os.getenv("CHAT_MODEL", self._default_chat_model),
-            "embedding": os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"),
-            "reranker": os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"),
             "vision": os.getenv("VISION_MODEL", "Qwen/Qwen3-VL-8B-Instruct"),
         }
         if model and model.lower() in aliases:
@@ -105,20 +115,13 @@ class LLMClient:
     ) -> LLMResponse:
         """异步调用 LLM（带重试、并发控制、指标）。"""
         resolved_model = self._resolve_model(model)
-
-        # 并发控制
-        from lvyan.infra.concurrency import get_llm_semaphore
-
-        sem = get_llm_semaphore()
-
-        async with sem:
-            return await self._invoke_with_retry(
-                messages=messages,
-                model=resolved_model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **kwargs,
-            )
+        return await self._invoke_with_retry(
+            messages=messages,
+            model=resolved_model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **kwargs,
+        )
 
     async def _invoke_with_retry(
         self,
@@ -128,19 +131,29 @@ class LLMClient:
         max_tokens: int | None,
         **kwargs: Any,
     ) -> LLMResponse:
-        """带指数退避重试的实际调用。"""
+        """带指数退避重试的实际调用。
+
+        并发控制粒度为 **单次尝试**：每次尝试前获取信号量、尝试结束立即
+        释放，退避睡眠在槽位外进行——否则网关抖动时所有并发槽位都在睡，
+        健康请求也会被阻塞。总并发上限语义不变（同一时刻最多 N 个在途请求）。
+        """
+        from lvyan.infra.concurrency import get_llm_semaphore
+
+        sem = get_llm_semaphore()
         last_exc: Exception | None = None
 
         for attempt in range(self._max_retries):
             start = time.perf_counter()
             try:
-                response = await self._call_gateway(
-                    messages=messages,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    **kwargs,
-                )
+                # 每次尝试前获取并发槽位，请求返回（无论成败）即释放
+                async with sem:
+                    response = await self._call_gateway(
+                        messages=messages,
+                        model=model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        **kwargs,
+                    )
                 duration_ms = (time.perf_counter() - start) * 1000
 
                 result = LLMResponse(
@@ -174,6 +187,7 @@ class LLMClient:
                         delay,
                         exc,
                     )
+                    # 退避睡眠不占用并发槽位
                     await asyncio.sleep(delay)
 
         raise RuntimeError(
@@ -192,8 +206,6 @@ class LLMClient:
         if not self._gateway_url:
             raise RuntimeError("MODEL_GATEWAY_URL 未配置，无法调用 LLM")
 
-        import httpx
-
         url = f"{self._gateway_url.rstrip('/')}/v1/chat/completions"
         payload: dict[str, Any] = {
             "model": model,
@@ -208,28 +220,48 @@ class LLMClient:
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+        client = self._get_http_client(headers)
+        resp = await client.post(url, json=payload, headers=headers)
 
-            if resp.status_code == 429:
-                raise _RetryableError(f"Rate limited (429): {resp.text[:200]}")
-            if resp.status_code >= 500:
-                raise _RetryableError(f"Server error ({resp.status_code}): {resp.text[:200]}")
-            if resp.status_code != 200:
-                raise RuntimeError(f"LLM API error ({resp.status_code}): {resp.text[:500]}")
+        if resp.status_code == 429:
+            raise _RetryableError(f"Rate limited (429): {resp.text[:200]}")
+        if resp.status_code >= 500:
+            raise _RetryableError(f"Server error ({resp.status_code}): {resp.text[:200]}")
+        if resp.status_code != 200:
+            raise RuntimeError(f"LLM API error ({resp.status_code}): {resp.text[:500]}")
 
-            data = resp.json()
-            choice = data.get("choices", [{}])[0]
-            message = choice.get("message", {})
-            usage = data.get("usage", {})
+        data = resp.json()
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        usage = data.get("usage", {})
 
-            return {
-                "content": message.get("content", ""),
-                "input_tokens": usage.get("prompt_tokens", 0),
-                "output_tokens": usage.get("completion_tokens", 0),
-                "finish_reason": choice.get("finish_reason"),
-                "raw": data,
-            }
+        return {
+            "content": message.get("content", ""),
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "finish_reason": choice.get("finish_reason"),
+            "raw": data,
+        }
+
+    # 模块级 AsyncClient 缓存：按 gateway_url + headers 键复用连接池，
+    # 避免每次调用新建 client（无法复用 TCP 连接）。
+    # 进程退出时不主动关闭：httpx 会在 GC 时清理，shutdown 场景可接受。
+    _HTTP_CLIENTS: dict[str, Any] = {}
+    _HTTP_CLIENT_LOCK = threading.Lock()
+
+    def _get_http_client(self, headers: dict[str, str]) -> Any:
+        """获取（或惰性创建）复用的 ``httpx.AsyncClient``。"""
+        import httpx
+
+        # Authorization 头参与缓存键，密钥变更后自然切换到新 client
+        auth = headers.get("Authorization", "")
+        key = f"{self._gateway_url}|{auth}|{self._timeout}"
+        with self._HTTP_CLIENT_LOCK:
+            client = self._HTTP_CLIENTS.get(key)
+            if client is None or client.is_closed:
+                client = httpx.AsyncClient(timeout=self._timeout)
+                self._HTTP_CLIENTS[key] = client
+            return client
 
     def _is_retryable(self, exc: Exception) -> bool:
         """判断异常是否可重试。"""
@@ -313,20 +345,16 @@ _MODEL_PRICES: dict[str, tuple[float, float]] = {
 }
 
 
-def _estimate_cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
-    """按 model 单价表估算单次调用的 USD 成本。
+@lru_cache(maxsize=8)
+def _resolve_prices(env_table: str) -> dict[str, tuple[float, float]]:
+    """解析 ``LLM_PRICE_TABLE`` 环境变量覆盖并合并内置单价表。
 
-    匹配策略：精确 -> 大小写不敏感 -> 前缀子串。未匹配返回 0.0。
-    环境变量 ``LLM_PRICE_TABLE`` 可在运行时覆盖（格式 ``model:in,out;...``）。
+    以环境变量原始值为缓存键（maxsize=8，测试 monkeypatch 修改环境变量
+    会生成新键、不会读到旧缓存），避免每次调用重新解析字符串。
     """
-    prices = _MODEL_PRICES
-
-    # 解析环境变量覆盖
-    import os
-
-    env_table = os.getenv("LLM_PRICE_TABLE", "").strip()
+    parsed: dict[str, tuple[float, float]] = {}
+    env_table = env_table.strip()
     if env_table:
-        parsed: dict[str, tuple[float, float]] = {}
         for entry in env_table.split(";"):
             entry = entry.strip()
             if not entry or ":" not in entry:
@@ -338,8 +366,18 @@ def _estimate_cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
                     parsed[name.strip().lower()] = (float(parts[0]), float(parts[1]))
                 except ValueError:
                     pass
-        if parsed:
-            prices = {**_MODEL_PRICES, **parsed}
+    if parsed:
+        return {**_MODEL_PRICES, **parsed}
+    return _MODEL_PRICES
+
+
+def _estimate_cost_usd(model: str, tokens_in: int, tokens_out: int) -> float:
+    """按 model 单价表估算单次调用的 USD 成本。
+
+    匹配策略：精确 -> 大小写不敏感 -> 前缀子串。未匹配返回 0.0。
+    环境变量 ``LLM_PRICE_TABLE`` 可在运行时覆盖（格式 ``model:in,out;...``）。
+    """
+    prices = _resolve_prices(os.getenv("LLM_PRICE_TABLE", ""))
 
     model_lower = model.lower()
 

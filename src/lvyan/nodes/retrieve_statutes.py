@@ -15,12 +15,15 @@ PR2 升级：RRF 融合后接入 Qwen3-Reranker 重排序，提升检索精度�
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from lvyan.retrieval.reranker import rerank
 from lvyan.retrieval.version_aware import search_statutes
-from lvyan.schemas import Authority, CaseAuthority, CaseState
+from lvyan.schemas import Authority, CaseAuthority, CaseState, OnlineSource
 from lvyan.tools.cases import search_cases
+from lvyan.tools.web_search import search_official_web
+from lvyan.nodes.triage import is_personal_information_dispute
 
 __all__ = ["parallel_retrieval"]
 
@@ -85,16 +88,19 @@ def _mark_plan_done(plan: list[Any], tools_to_complete: tuple[str, ...]) -> list
         tool = _get(step, "tool", "")
         status = _get(step, "status", "")
         if tool in tools_to_complete and status in ("pending", "running", ""):
-            # 兼容 PlanStep 对象与 dict
+            # 兼容 PlanStep 对象与 dict；对象路径用 model_copy 生成新实例，
+            # 避免原地修改共享状态对象。
             try:
                 if isinstance(step, dict):
                     new_step = dict(step)
                     new_step["status"] = "done"
                     new_step["result_summary"] = "检索完成"
                     updated.append(new_step)
+                elif hasattr(step, "model_copy"):
+                    updated.append(
+                        step.model_copy(update={"status": "done", "result_summary": "检索完成"})
+                    )
                 else:
-                    step.status = "done"  # type: ignore[attr-defined]
-                    step.result_summary = "检索完成"  # type: ignore[attr-defined]
                     updated.append(step)
             except Exception:  # noqa: BLE001  标记失败不影响检索结果
                 updated.append(step)
@@ -171,6 +177,7 @@ def _rerank_authorities(
         return authorities[:top_k]
 
     # 按 rerank 结果顺序返回原 Authority，并更新 rerank_score
+    # rerank_score 通过 model_copy 写入新对象，避免原地修改共享状态。
     result: list[Authority] = []
     for sc in reranked:
         idx = int(sc.chunk_id)
@@ -178,7 +185,8 @@ def _rerank_authorities(
             auth = auth_by_idx[idx]
             # 更新 rerank_score 字段
             try:
-                auth.rerank_score = sc.score  # type: ignore[attr-defined]
+                if hasattr(auth, "model_copy"):
+                    auth = auth.model_copy(update={"rerank_score": sc.score})
             except Exception:  # noqa: BLE001
                 pass
             result.append(auth)
@@ -190,7 +198,34 @@ def _rerank_authorities(
 # ---------------------------------------------------------------------------
 
 # P3-22 / P1-22：线程池并行检索
+# 两个池职责分离，避免线程池自等待饿死：
+# - _CONCURRENT_EXECUTOR：外层 job 池（statutes / cases / web 三个互不依赖的任务）；
+# - _QUERY_EXECUTOR：单查询子任务池。
+# 若共用一个池：外层 statutes job 占着 worker 阻塞等待同池的子任务，
+# 多 run 并发时 4 个 worker 可能全被「等待者」占满，子任务永久排队，
+# 30 秒超时后静默退化为空结果——法规检索在并发下无声失败。
 _CONCURRENT_EXECUTOR: Any = None
+_QUERY_EXECUTOR: Any = None
+_QUERY_EXECUTOR_LOCK = threading.Lock()
+
+# 子任务超时必须小于外层 job 的 30 秒，让降级先发生在内层并留下日志，
+# 而不是被外层整体超时吞掉。
+_QUERY_TIMEOUT_SECONDS = 25.0
+
+
+def _get_query_executor() -> Any:
+    """惰性创建单查询子任务线程池（线程安全）。"""
+    global _QUERY_EXECUTOR
+    if _QUERY_EXECUTOR is None:
+        with _QUERY_EXECUTOR_LOCK:
+            if _QUERY_EXECUTOR is None:
+                from concurrent.futures import ThreadPoolExecutor
+
+                _QUERY_EXECUTOR = ThreadPoolExecutor(
+                    max_workers=4,
+                    thread_name_prefix="lvyan-search-query",
+                )
+    return _QUERY_EXECUTOR
 
 
 def _parallel_search_statutes(
@@ -206,10 +241,9 @@ def _parallel_search_statutes(
     线程池方案：
       - 不依赖 asyncio 事件循环状态（同步节点函数的最佳选择）；
       - 每个 query 在独立线程中执行同步 ``search_statutes``；
-      - 默认线程数 = min(len(queries), 4)，避免过度并发压垮检索后端。
+      - 子任务使用独立线程池（_QUERY_EXECUTOR），与外层 job 池分离，
+        防止外层等待者占满 worker 导致子任务饿死。
     """
-    global _CONCURRENT_EXECUTOR
-
     valid_queries: list[str] = []
     for q in queries:
         qt = _get(q, "query_text", "") or ""
@@ -228,22 +262,21 @@ def _parallel_search_statutes(
     if len(valid_queries) == 1:
         return _safe_search(valid_queries[0])
 
-    # 多个查询：用线程池并行
-    if _CONCURRENT_EXECUTOR is None:
-        from concurrent.futures import ThreadPoolExecutor
-
-        _CONCURRENT_EXECUTOR = ThreadPoolExecutor(
-            max_workers=min(len(valid_queries), 4),
-            thread_name_prefix="lvyan-search",
-        )
+    # 多个查询：用独立的子任务线程池并行
+    executor = _get_query_executor()
 
     try:
-        futures = [_CONCURRENT_EXECUTOR.submit(_safe_search, qt) for qt in valid_queries]
+        futures = [executor.submit(_safe_search, qt) for qt in valid_queries]
         results_nested: list[list[Authority]] = []
-        for fut in futures:
+        for qt, fut in zip(valid_queries, futures):
             try:
-                results_nested.append(fut.result(timeout=30.0))
-            except Exception:  # noqa: BLE001 单个超时不影响其他
+                results_nested.append(fut.result(timeout=_QUERY_TIMEOUT_SECONDS))
+            except Exception as exc:  # noqa: BLE001 单个超时不影响其他，但必须留痕
+                _logger.warning(
+                    "法规检索子任务超时/失败，已降级为空结果（query=%.60s）：%s",
+                    qt,
+                    type(exc).__name__,
+                )
                 results_nested.append([])
     except Exception:  # noqa: BLE001 线程池失败回退顺序
         results_nested = [_safe_search(qt) for qt in valid_queries]
@@ -255,7 +288,7 @@ def _parallel_search_statutes(
 
 
 def parallel_retrieval(state: CaseState) -> dict[str, Any]:
-    """并行检索节点：法规检索 + 类案检索。
+    """并行检索节点：法规、类案与可选联网权威来源检索。
 
     PR2 升级：RRF 融合去重后接入 Qwen3-Reranker 重排序。
     P1-22 升级：用 ``concurrent.futures.ThreadPoolExecutor`` 真正并行执行
@@ -291,6 +324,25 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
     law_as_of_date = _get(state, "law_as_of_date", None)
     rerank_query = _get(state, "user_goal", "") or ""
 
+    # 策略守卫：循环失控 / 成本超预算时降级为空检索结果（不中断 run）。
+    # 迭代预算不在此检查——由 routing.route_after_citation 独占控制。
+    from lvyan.graph.policies import PolicyViolationError, enforce_retrieval_guards
+
+    try:
+        enforce_retrieval_guards(state)
+    except PolicyViolationError as exc:
+        _logger.warning("策略守卫拦截检索，降级为空结果：%s", exc)
+        plan = _get(state, "plan", []) or []
+        updated_plan = _mark_plan_done(
+            plan, tools_to_complete=("statute_retrieval", "case_retrieval")
+        )
+        return {
+            "statutes": [],
+            "cases": [],
+            "online_sources": [],
+            "plan": updated_plan,
+        }
+
     case_query_text = ""
     for q in queries:
         qt = _get(q, "query_text", "") or ""
@@ -299,6 +351,13 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
             break
     if not case_query_text:
         case_query_text = rerank_query
+
+    conversation_summary = str(_get(state, "conversation_summary", "") or "")
+    online_search_query = (
+        "中华人民共和国个人信息保护法"
+        if is_personal_information_dispute(rerank_query, conversation_summary)
+        else case_query_text
+    )
 
     def _search_statutes_job() -> list[Authority]:
         raw = _parallel_search_statutes(queries, as_of=law_as_of_date)
@@ -327,6 +386,18 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
                     continue
         return cases
 
+    def _search_official_web_job() -> list[OnlineSource]:
+        preferences = _get(state, "user_preferences", {}) or {}
+        if not bool(_get(preferences, "online_search_enabled", False)):
+            return []
+        if not online_search_query.strip():
+            return []
+        try:
+            return search_official_web(online_search_query, top_k=5)
+        except Exception as exc:  # noqa: BLE001  联网失败不影响本地法律检索
+            _logger.info("联网权威来源检索失败：%s", type(exc).__name__)
+            return []
+
     # --- 法规与类案并发（互不依赖）---
     global _CONCURRENT_EXECUTOR
     if _CONCURRENT_EXECUTOR is None:
@@ -336,6 +407,7 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
 
     stat_future = _CONCURRENT_EXECUTOR.submit(_search_statutes_job)
     case_future = _CONCURRENT_EXECUTOR.submit(_search_cases_job)
+    web_future = _CONCURRENT_EXECUTOR.submit(_search_official_web_job)
 
     try:
         statutes = stat_future.result(timeout=30.0)
@@ -345,6 +417,10 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
         cases = case_future.result(timeout=30.0)
     except Exception:  # noqa: BLE001
         cases = []
+    try:
+        online_sources = web_future.result(timeout=10.0)
+    except Exception:  # noqa: BLE001
+        online_sources = []
 
     # --- 更新 plan ---
     plan = _get(state, "plan", []) or []
@@ -353,5 +429,6 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
     return {
         "statutes": statutes,
         "cases": cases,
+        "online_sources": online_sources,
         "plan": updated_plan,
     }

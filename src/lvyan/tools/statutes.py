@@ -454,4 +454,5 @@ __all__ = [
     "search_statutes",
     "get_statute_article",
     "verify_statute_status",
+    "search_procedure_rules",
 ]

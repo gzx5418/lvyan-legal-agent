@@ -119,10 +119,15 @@ def test_preferences_api_persists_only_whitelisted_fields(tmp_path):
 
     response = client.patch(
         "/api/preferences",
-        json={"response_style": "detailed", "preferred_doc_format": "docx"},
+        json={
+            "response_style": "detailed",
+            "preferred_doc_format": "docx",
+            "online_search_enabled": True,
+        },
     )
     assert response.status_code == 200
     assert response.json()["response_style"] == "detailed"
+    assert response.json()["online_search_enabled"] is True
     assert client.get("/api/preferences").json()["preferred_doc_format"] == "docx"
     assert client.delete("/api/preferences").json() == {"deleted": True}
 
@@ -146,6 +151,7 @@ def test_mcp_registry_exposes_bounded_legal_tools():
         "analyze_contract_clause",
         "calculate_legal_deadline",
         "render_docx",
+        "search_official_web",
     } <= tools.keys()
 
 

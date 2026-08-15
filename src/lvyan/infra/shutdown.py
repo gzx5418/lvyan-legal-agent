@@ -119,6 +119,16 @@ class GracefulShutdown:
         except RuntimeError:
             pass
 
+    async def begin_shutdown(self) -> None:
+        """开始停机序列（公开入口，供 lifespan 等外部调用方使用）。
+
+        若已处于停机流程（例如收到终止信号）则不重复执行。
+        """
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        await self._shutdown_sequence()
+
     async def _shutdown_sequence(self) -> None:
         """执行停机序列。"""
         start = time.monotonic()
@@ -143,6 +153,17 @@ class GracefulShutdown:
                     )
                     for task in pending:
                         task.cancel()
+                    # cancel 后必须 await 任务真正结束（CancelledError 传播完成）
+                    # 再继续清理，否则任务可能在清理回调关闭连接池后仍在跑
+                    done, still_pending = await asyncio.wait(
+                        pending,
+                        timeout=5.0,
+                    )
+                    if still_pending:
+                        _logger.warning(
+                            "%d 个任务取消超时（5s），继续停机流程",
+                            len(still_pending),
+                        )
 
         # 执行清理回调
         for callback in self._cleanup_callbacks:

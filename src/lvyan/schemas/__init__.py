@@ -31,6 +31,7 @@ from .legal_answer import (
     UncertaintyItem,
 )
 from .output import CitationAudit, CitationDetail, OutputMode, ReasoningResult
+from .web import OnlineSource
 from .workspace import (
     CaseEvidence,
     DocumentApproval,
@@ -76,6 +77,7 @@ __all__ = [
     "LegalCitation",
     "CitationLevel",
     "UncertaintyItem",
+    "OnlineSource",
     # workspace.py
     "LegalCase",
     "CaseEvidence",

@@ -74,6 +74,8 @@
 .la-risk-panel-item:last-child { margin-bottom: 0; }
 .la-risk-panel-label { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
 .la-risk-panel-value { font-size: 15px; font-weight: 600; }
+/* 主要不确定点：正文型文本，弱化字号与字重以区别于风险评级 */
+.la-risk-panel-value.la-risk-panel-note { font-size: 13px; font-weight: 400; }
 
 /* --- 风险徽章 --- */
 .risk-badge {
@@ -227,6 +229,16 @@
 .level-normative { background: var(--surface-subtle); color: var(--text-muted); }
 .la-citation-detail { margin-top: 8px; color: var(--text-secondary); font-size: 14px; }
 .la-citation-detail small { color: var(--text-muted); }
+
+/* --- 联网权威来源（与法条引用区分展示） --- */
+.la-online-sources ul { list-style: none; margin: 0; padding: 0; }
+.la-online-source { padding: 10px 0; border-bottom: 1px solid var(--la-border); }
+.la-online-source:last-child { border-bottom: 0; }
+.la-online-source a { color: var(--la-primary); font-weight: 600; text-decoration: none; }
+.la-online-source a:hover { text-decoration: underline; }
+.la-online-source small { display: block; margin-top: 2px; color: var(--text-muted); }
+.la-online-source p { margin: 4px 0 0; color: var(--text-secondary); font-size: 14px; }
+.la-online-note { margin: 12px 0 0; color: var(--text-muted); font-size: 13px; }
 
 /* --- 不确定性 --- */
 .la-uncertainties ul { list-style: none; padding: 0; }

@@ -19,6 +19,7 @@ import re
 import uuid
 from typing import Any
 
+from lvyan.nodes.triage import is_personal_information_dispute
 from lvyan.schemas import CaseState, Fact, MissingFact, TimelineEvent
 
 __all__ = ["fact_extractor"]
@@ -202,6 +203,33 @@ _REQUIRED_FACTS_BY_CASE_TYPE: dict[str, list[tuple[str, str, str, bool]]] = {
     ],
 }
 
+_PERSONAL_INFORMATION_REQUIRED_FACTS: list[tuple[str, str, str, bool]] = [
+    (
+        "privacy_disclosure_scope",
+        "健康信息被公开给了哪些人、通过什么渠道、持续多久？",
+        "公开对象、渠道和传播范围影响是否超出必要范围，以及后续停止侵害或赔偿请求。",
+        False,
+    ),
+    (
+        "privacy_consent_or_basis",
+        "公司是否曾就收集、使用或公开该健康信息单独告知并取得您的同意？",
+        "是否存在有效同意、法定职责或其他合法处理依据，是判断个人信息处理合法性的关键。",
+        False,
+    ),
+    (
+        "privacy_information_source",
+        "公司从何处取得该健康信息（病假材料、体检、就医记录或其他渠道）？",
+        "信息来源决定公司是否有权接触该信息，以及是否超出原始收集目的使用。",
+        False,
+    ),
+    (
+        "privacy_impact",
+        "公开后对您造成了哪些具体影响（工作、生活、名誉、就医或经济损失）？",
+        "影响和损失关系到请求停止侵害、赔礼道歉或赔偿的范围。",
+        False,
+    ),
+]
+
 # fact_key → 已提及检测关键词（用于判断事实是否已出现在已有 facts 中）
 _FACT_KEY_HINTS: dict[str, tuple[str, ...]] = {
     "labor_relationship": (
@@ -225,6 +253,10 @@ _FACT_KEY_HINTS: dict[str, tuple[str, ...]] = {
     "breach_content": ("违约", "未履行", "不履行"),
     "damage_consequence": ("损害", "受伤", "损失"),
     "reported_or_medical": ("报警", "就医", "医院", "出警"),
+    "privacy_disclosure_scope": ("群", "邮件", "同事", "客户", "平台", "朋友圈"),
+    "privacy_consent_or_basis": ("同意", "授权", "告知", "签署", "隐私政策"),
+    "privacy_information_source": ("病假", "体检", "病历", "就医", "提交"),
+    "privacy_impact": ("影响", "损失", "名誉", "歧视", "困扰", "费用"),
     "has_children": ("子女", "孩子", "未成年"),
     "property_status": ("房产", "存款", "财产", "股权"),
     "ip_registered": ("注册", "登记", "证书"),
@@ -404,6 +436,28 @@ def _assess_missing_facts(case_type: str | None, facts: list[Fact]) -> list[Miss
     return missing
 
 
+def _assess_personal_information_missing_facts(
+    facts: list[Fact], context_text: str
+) -> list[MissingFact]:
+    """评估健康等敏感个人信息被不当处理场景的关键事实。"""
+    existing_text = " ".join(
+        [str(context_text or ""), *[str(_get(f, "content", "")) for f in (facts or [])]]
+    )
+    missing: list[MissingFact] = []
+    for fact_key, question, reason, is_blocking in _PERSONAL_INFORMATION_REQUIRED_FACTS:
+        if _fact_already_mentioned(fact_key, existing_text):
+            continue
+        missing.append(
+            MissingFact(
+                fact_key=fact_key,
+                question=question,
+                reason=reason,
+                is_blocking=is_blocking,
+            )
+        )
+    return missing
+
+
 # ---------------------------------------------------------------------------
 # LLM 增强抽取（PR2）
 # ---------------------------------------------------------------------------
@@ -564,7 +618,12 @@ def fact_extractor(state: CaseState) -> dict[str, Any]:
 
     # --- 缺失事实评估 ---
     all_facts = list(existing_facts) + facts
-    missing_facts = _assess_missing_facts(case_type, all_facts)
+    if case_type == "侵权纠纷" and is_personal_information_dispute(user_goal, conversation_summary):
+        missing_facts = _assess_personal_information_missing_facts(
+            all_facts, f"{user_goal}\n{conversation_summary}"
+        )
+    else:
+        missing_facts = _assess_missing_facts(case_type, all_facts)
 
     return {
         "facts": facts,

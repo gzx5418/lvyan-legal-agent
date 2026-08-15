@@ -368,14 +368,16 @@ def test_checkpoint_writes_use_memory_saver_by_default():
 # ---------------------------------------------------------------------------
 # 6. build_graph_with_postgres 在 Postgres 不可达时回退到 MemorySaver
 # ---------------------------------------------------------------------------
-def test_build_graph_with_postgres_falls_back_to_memory_saver(capsys):
-    """本机无运行中的 Postgres，应回退到 MemorySaver 并打印警告，返回可用图。"""
+def test_build_graph_with_postgres_falls_back_to_memory_saver(caplog):
+    """本机无运行中的 Postgres，应回退到 MemorySaver 并记录警告日志，返回可用图。"""
+    import logging
+
     # 指向一个肯定不可达的 DSN，避免依赖环境
-    g = build_graph_with_postgres("postgresql://nobody:nobody@127.0.0.1:1/nowhere")
+    with caplog.at_level(logging.WARNING, logger="lvyan.graph.builder"):
+        g = build_graph_with_postgres("postgresql://nobody:nobody@127.0.0.1:1/nowhere")
     # 应回退为编译后的图（MemorySaver）
     assert isinstance(g, CompiledStateGraph)
-    captured = capsys.readouterr()
-    assert "回退到 MemorySaver" in captured.out
+    assert "回退到 MemorySaver" in caplog.text
 
 
 def test_build_graph_with_postgres_invalid_dsn_still_returns_graph(capsys):

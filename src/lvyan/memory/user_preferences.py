@@ -78,6 +78,7 @@ _ALLOWED_FIELDS = {
     "response_style",
     "prefer_depth",
     "preferred_doc_format",
+    "online_search_enabled",
     "language",
     "created_at",
     "updated_at",
@@ -91,6 +92,8 @@ class UserPreference(BaseModel):
     response_style: str = Field(default="brief")  # "brief" | "detailed"
     prefer_depth: str = Field(default="light")  # "light" | "deep"
     preferred_doc_format: str = Field(default="md")  # "docx" | "md"
+    # 默认关闭：开启后会把脱敏后的检索词发送给第三方搜索服务。
+    online_search_enabled: bool = Field(default=False)
     language: str = Field(default="zh")  # "zh" | "en"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

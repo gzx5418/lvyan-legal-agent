@@ -66,8 +66,14 @@ class AgentRunRequest(BaseModel):
         # 《民法典》施行日（2021-01-01）作为下限参考；早于 1900 视为明显错误。
         if value < _dt.date(1900, 1, 1):
             raise ValueError("law_as_of_date 不能早于 1900-01-01")
-        # 不允许设定超过当前日期 + 10 年的未来点
-        far_future = _dt.date.today().replace(year=_dt.date.today().year + 10)
+        # 不允许设定超过当前日期 + 10 年的未来点。
+        # 注意：today().replace(year=today().year + 10) 在闰日（2月29日）会抛
+        # ValueError 被误判为校验失败，因此改用显式构造日期并做闰日回退。
+        today = _dt.date.today()
+        try:
+            far_future = today.replace(year=today.year + 10)
+        except ValueError:  # 闰日 + 10 年后不存在 2月29日，回退到 2月28日
+            far_future = _dt.date(today.year + 10, 2, 28)
         if value > far_future:
             raise ValueError("law_as_of_date 超出合理未来范围")
         return value
@@ -110,15 +116,6 @@ class HealthResponse(BaseModel):
     # P0-B：retrieval 可能为 degraded（法库/索引不一致），不仅是 ok/unavailable
     retrieval: Literal["ok", "degraded", "unavailable"]
     model_gateway: Literal["ok", "unavailable"]
-
-
-class NodeTrace(BaseModel):
-    """单节点执行追踪摘要。"""
-
-    node: str
-    duration_ms: float = 0.0
-    error: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class UploadResponse(BaseModel):
@@ -167,6 +164,7 @@ class UserPreferenceResponse(BaseModel):
     response_style: Literal["brief", "detailed"] = "brief"
     prefer_depth: Literal["light", "deep"] = "light"
     preferred_doc_format: Literal["md", "docx"] = "md"
+    online_search_enabled: bool = False
     language: Literal["zh", "en"] = "zh"
 
 
@@ -178,6 +176,7 @@ class UserPreferenceUpdate(BaseModel):
     response_style: Literal["brief", "detailed"] | None = None
     prefer_depth: Literal["light", "deep"] | None = None
     preferred_doc_format: Literal["md", "docx"] | None = None
+    online_search_enabled: bool | None = None
     language: Literal["zh", "en"] | None = None
 
 
@@ -268,7 +267,6 @@ __all__ = [
     "HITLRequest",
     "HITLResponse",
     "HealthResponse",
-    "NodeTrace",
     "CostSummary",
     "UploadResponse",
     "ThreadSummary",

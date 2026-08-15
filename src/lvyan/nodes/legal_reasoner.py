@@ -42,6 +42,15 @@ _ALLOWED_TENDENCIES = {
 }
 _ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 
+# 数字概率检测模式（供 _assert_no_numeric_probability 与降级清理复用）：
+# 百分比（含中文百分号）、概率区间、概率关键词
+_NUMERIC_PROBABILITY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\d+(?:\.\d+)?\s*%"),
+    re.compile(r"\d+(?:\.\d+)?\s*％"),
+    re.compile(r"\d+(?:\.\d+)?\s*[-~]\s*\d+(?:\.\d+)?\s*[%％]"),
+    re.compile(r"(胜诉率|胜诉概率|胜率|概率)"),
+)
+
 
 # ---------------------------------------------------------------------------
 # 案由 → 法律关系定性
@@ -546,10 +555,11 @@ def _identify_key_factors(
     """列出影响裁判倾向的关键事实/证据/法规冲突。"""
     factors: list[str] = []
 
-    # 未满足的构成要件
+    # 未满足 / 待查明的构成要件
+    # （规则路径标注为「待查明」，LLM 路径可能标注「未满足」，两种都要匹配）
     for e in elements:
-        if "未满足" in e:
-            factors.append(f"构成要件未满足：{e}")
+        if "未满足" in e or "待查明" in e:
+            factors.append(f"构成要件未满足/待查明：{e}")
 
     # 证据置信度
     if evidence_confidence == "low":
@@ -605,16 +615,7 @@ def _assert_no_numeric_probability(result: ReasoningResult) -> None:
     # 2. 序列化文本检查：百分比/概率关键词模式
     payload = result.model_dump_json()
 
-    # 百分比模式：数字后紧跟 % 或 ％（含中文百分号）
-    # 概率区间：60%-80% / 60%~80%
-    # 概率关键词：胜诉率 / 胜诉概率 / 胜率 / 概率
-    probability_patterns: tuple[re.Pattern[str], ...] = (
-        re.compile(r"\d+(?:\.\d+)?\s*%"),
-        re.compile(r"\d+(?:\.\d+)?\s*％"),
-        re.compile(r"\d+(?:\.\d+)?\s*[-~]\s*\d+(?:\.\d+)?\s*[%％]"),
-        re.compile(r"(胜诉率|胜诉概率|胜率|概率)"),
-    )
-    for pattern in probability_patterns:
+    for pattern in _NUMERIC_PROBABILITY_PATTERNS:
         assert not pattern.search(payload), (
             f"ReasoningResult 序列化文本含数字概率模式 {pattern.pattern}，"
             f"违反「禁止数字概率」约束；payload={payload}"
@@ -656,9 +657,15 @@ def _try_llm_reasoning(state: CaseState) -> ReasoningResult | None:
         )
         or "暂无"
     )
-    cases_summary = (
-        "; ".join(str(_get(c, "title", _get(c, "case_title", ""))) for c in cases[:3]) or "暂无"
-    )
+    # CaseAuthority 无 title/case_title 字段：改用案号 + 裁判要旨前 80 字拼摘要
+    case_parts: list[str] = []
+    for c in cases[:3]:
+        case_number = str(_get(c, "case_number", "") or "").strip()
+        ruling = str(_get(c, "ruling_summary", "") or "").strip()[:80]
+        summary = f"（{case_number}）{ruling}" if case_number else ruling
+        if summary:
+            case_parts.append(summary)
+    cases_summary = "; ".join(case_parts) or "暂无"
     er_summary = f"共{len(evidence_requirements)}项，已满足{sum(1 for er in evidence_requirements if _get(er, 'current_status', '') == 'met')}项"
     missing_summary = "; ".join(str(_get(mf, "question", "")) for mf in missing_facts[:3]) or "无"
     critic_summary = "; ".join(critic_feedback[:2]) or "无"
@@ -821,7 +828,19 @@ def legal_reasoner(state: CaseState) -> dict[str, Any]:
         key_factors=key_factors,
     )
 
-    _assert_no_numeric_probability(result)
+    # 自检：禁止数字概率（规则路径同样捕获断言，降级而非崩溃）
+    try:
+        _assert_no_numeric_probability(result)
+    except AssertionError as exc:
+        _logger.warning("规则路径推理结果含数字概率，剔除违规 key_factor 后降级: %s", exc)
+        cleaned_factors = [
+            k
+            for k in result.key_factors
+            if not any(p.search(k) for p in _NUMERIC_PROBABILITY_PATTERNS)
+        ]
+        result = result.model_copy(
+            update={"key_factors": cleaned_factors or ["案件事实清楚、法律适用明确"]}
+        )
 
     if not statutes:
         confidence = "insufficient"

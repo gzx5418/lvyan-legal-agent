@@ -68,26 +68,56 @@ class TenantAwareCheckpointer:
             )
         return user_id
 
-    async def _set_context(self, user_id: str | None) -> None:
-        """在底层连接上设置租户上下文。"""
-        if not user_id:
-            return
-
-        # AsyncPostgresSaver 内部使用 self.conn (AsyncConnection)
+    def _get_conn(self) -> Any | None:
+        """取得底层 saver 的数据库连接（AsyncPostgresSaver 为 self.conn）。"""
         conn = getattr(self._inner, "conn", None)
         if conn is None:
             # 连接池模式 (psycopg_pool)
             conn = getattr(self._inner, "_conn", None)
+        return conn
 
-        if conn is not None:
-            try:
-                # AsyncPostgresSaver 使用 autocommit 连接，SET LOCAL 会在当前语句
-                # 结束后丢失；使用会话级 set_config，并在每项操作前重新设置。
-                await conn.execute("SELECT set_config('app.user_id', %s, false)", (user_id,))
-            except Exception as exc:  # noqa: BLE001 boundary-exception: 设置上下文失败
-                _logger.warning("设置租户上下文失败: %s", exc)
-                if self._rls_enforced:
-                    raise
+    async def _set_context(self, user_id: str | None) -> None:
+        """在底层连接上设置租户上下文。
+
+        拿不到底层连接时无法注入 RLS 上下文：RLS_ENFORCED=true 必须
+        fail-closed 抛错（否则操作会以连接上残留的上一个租户上下文执行，
+        造成跨租户读写）；仅 RLS_ENFORCED=false 时允许降级放行。
+        """
+        if not user_id:
+            return
+
+        conn = self._get_conn()
+        if conn is None:
+            if self._rls_enforced:
+                raise RuntimeError(
+                    "RLS_ENFORCED=true 但无法取得 checkpointer 底层连接以注入 app.user_id，"
+                    "拒绝执行操作（fail-closed）"
+                )
+            _logger.warning("无法取得 checkpointer 底层连接，跳过租户上下文注入（RLS_ENFORCED=false）")
+            return
+
+        try:
+            # AsyncPostgresSaver 使用 autocommit 连接，SET LOCAL 会在当前语句
+            # 结束后丢失；使用会话级 set_config，操作结束后由 _clear_context 复位。
+            await conn.execute("SELECT set_config('app.user_id', %s, false)", (user_id,))
+        except Exception as exc:  # noqa: BLE001 boundary-exception: 设置上下文失败
+            _logger.warning("设置租户上下文失败: %s", exc)
+            if self._rls_enforced:
+                raise
+
+    async def _clear_context(self) -> None:
+        """操作结束后复位租户上下文，避免会话级 app.user_id 残留。
+
+        残留的上下文会让后续未带 user_id 的操作（或拿不到连接的操作）以
+        上一个租户的身份执行 RLS 过滤的查询，读到错误租户的数据。
+        """
+        conn = self._get_conn()
+        if conn is None:
+            return
+        try:
+            await conn.execute("SELECT set_config('app.user_id', '', false)")
+        except Exception as exc:  # noqa: BLE001 boundary-exception: 清除上下文失败
+            _logger.warning("清除租户上下文失败: %s", exc)
 
     # ------------------------------------------------------------------
     # 代理 LangGraph Checkpointer 协议方法
@@ -98,14 +128,20 @@ class TenantAwareCheckpointer:
         user_id = self._extract_user_id(config)
         async with self._tenant_lock:
             await self._set_context(user_id)
-            return await self._inner.aget(config)
+            try:
+                return await self._inner.aget(config)
+            finally:
+                await self._clear_context()
 
     async def aget_tuple(self, config: dict[str, Any]) -> Optional[Any]:
         """获取完整 checkpoint tuple（LangGraph 状态读取的实际调用路径）。"""
         user_id = self._extract_user_id(config)
         async with self._tenant_lock:
             await self._set_context(user_id)
-            return await self._inner.aget_tuple(config)
+            try:
+                return await self._inner.aget_tuple(config)
+            finally:
+                await self._clear_context()
 
     async def aput(
         self,
@@ -118,7 +154,10 @@ class TenantAwareCheckpointer:
         user_id = self._extract_user_id(config)
         async with self._tenant_lock:
             await self._set_context(user_id)
-            return await self._inner.aput(config, checkpoint, metadata, new_versions)
+            try:
+                return await self._inner.aput(config, checkpoint, metadata, new_versions)
+            finally:
+                await self._clear_context()
 
     async def aput_writes(
         self,
@@ -131,7 +170,10 @@ class TenantAwareCheckpointer:
         user_id = self._extract_user_id(config)
         async with self._tenant_lock:
             await self._set_context(user_id)
-            return await self._inner.aput_writes(config, writes, task_id, task_path)
+            try:
+                return await self._inner.aput_writes(config, writes, task_id, task_path)
+            finally:
+                await self._clear_context()
 
     async def alist(
         self,
@@ -141,14 +183,30 @@ class TenantAwareCheckpointer:
         before: Optional[dict[str, Any]] = None,
         limit: int | None = None,
     ) -> Any:
-        """列出 checkpoints（带 RLS 上下文）。"""
+        """列出 checkpoints（带 RLS 上下文）。
+
+        在锁内物化全部结果后再释放锁并逐条产出：若在 ``async with`` 内
+        ``yield``，锁的持有期由消费方迭代速度决定（消费慢时全进程租户操作
+        被串行阻塞），且消费方在同任务内再调用任何包装方法都会因
+        ``asyncio.Lock`` 不可重入而死锁。checkpoint 列表规模有限（受
+        limit / 单线程 checkpoint 数约束），物化成本可接受。
+        """
         user_id = self._extract_user_id(config) if config else None
         if self._rls_enforced and user_id is None:
             raise ValueError("RLS_ENFORCED=true 时 alist 必须携带含 user_id 的 config")
         async with self._tenant_lock:
             await self._set_context(user_id)
-            async for item in self._inner.alist(config, filter=filter, before=before, limit=limit):
-                yield item
+            try:
+                items = [
+                    item
+                    async for item in self._inner.alist(
+                        config, filter=filter, before=before, limit=limit
+                    )
+                ]
+            finally:
+                await self._clear_context()
+        for item in items:
+            yield item
 
     async def setup(self) -> None:
         """初始化 checkpointer schema，并在强制模式下安装 checkpoint RLS。"""

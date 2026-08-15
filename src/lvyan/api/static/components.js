@@ -68,6 +68,7 @@ function renderLegalAnswer(answer) {
     renderRisks(answer.risks || []),
     renderFullActionPlan(answer.action_plan || []),
     renderCitations(answer.citations || []),
+    renderOnlineSources(answer.online_sources || []),
     renderUncertainties(answer.uncertainties || []),
     renderDisclaimer(answer.disclaimer),
   ];
@@ -112,7 +113,7 @@ function renderSummaryGrid(summary, risks, meta) {
           ${riskItems}
           <div class="la-risk-panel-item">
             <div class="la-risk-panel-label">主要不确定点</div>
-            <div class="la-risk-panel-value" style="font-size:13px;font-weight:400">${esc(summary.main_uncertainty)}</div>
+            <div class="la-risk-panel-value la-risk-panel-note">${esc(summary.main_uncertainty)}</div>
           </div>
         </div>
       </div>
@@ -229,6 +230,34 @@ function renderCitations(citations) {
     </details>`;
   }).join('');
   return `<section class="la-section"><h3>法律依据</h3>${items}</section>`;
+}
+
+function safeOfficialUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    const host = url.hostname.toLowerCase().replace(/\.$/, '');
+    const allowed = host === 'flk.npc.gov.cn' || host === 'npc.gov.cn'
+      || host.endsWith('.gov.cn') || host === 'court.gov.cn'
+      || host.endsWith('.court.gov.cn') || host === 'spp.gov.cn'
+      || host.endsWith('.spp.gov.cn');
+    return url.protocol === 'https:' && allowed ? url.href : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function renderOnlineSources(sources) {
+  if (!sources || !sources.length) return '';
+  const items = sources.map(source => {
+    const url = safeOfficialUrl(source.url);
+    if (!url) return '';
+    const title = esc(source.title || '官方来源');
+    const sourceName = esc(source.source_name || '官方来源');
+    const snippet = source.snippet ? `<p>${esc(source.snippet)}</p>` : '';
+    return `<li class="la-online-source"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${title}</a><small>${sourceName}</small>${snippet}</li>`;
+  }).filter(Boolean).join('');
+  if (!items) return '';
+  return `<section class="la-section la-online-sources"><h3>联网权威来源（供核对）</h3><ul>${items}</ul><p class="la-online-note">联网资料仅供核对，不替代上列已校验的法律依据。</p></section>`;
 }
 
 function renderUncertainties(uncertainties) {

@@ -82,46 +82,62 @@ class CaseVault:
 
         enc_bytes = self._encrypt(content)
         doc_path = thread_dir / f"{self._safe_name(doc_id)}.enc"
+        # 文件写入与 manifest 读-改-写必须在同一把锁内完成：
+        # 否则并发 store 各自短暂持锁，后写者会覆盖先写者的 manifest，丢失文档记录。
+        # _LOCK 是 RLock，_load_manifest/_save_manifest 内部再获取同锁不会死锁。
         with _LOCK:
             with open(doc_path, "wb") as fh:
                 fh.write(enc_bytes)
                 fh.flush()
                 os.fsync(fh.fileno())
 
-        # 更新 manifest
-        manifest = self._load_manifest(thread_id)
-        now = datetime.now(timezone.utc)
-        # 若首次创建，写入默认 TTL
-        if "ttl_seconds" not in manifest:
-            manifest["ttl_seconds"] = DEFAULT_TTL_SECONDS
-            manifest["created_at"] = now.isoformat()
-            manifest["expires_at"] = (now + timedelta(seconds=DEFAULT_TTL_SECONDS)).isoformat()
-        # 记录 / 覆盖该 doc
-        doc_entry = {
-            "doc_id": doc_id,
-            "stored_path": str(doc_path),
-            "metadata": dict(metadata) if metadata else {},
-            "stored_at": now.isoformat(),
-            "content_size": len(content),
-        }
-        docs = manifest.setdefault("documents", [])
-        # 移除同 doc_id 的旧记录（覆盖写语义）
-        docs = [d for d in docs if d.get("doc_id") != doc_id]
-        docs.append(doc_entry)
-        manifest["documents"] = docs
-        manifest["thread_id"] = thread_id
-        self._save_manifest(thread_id, manifest)
+            # 更新 manifest（读-改-写整个周期持锁）
+            manifest = self._load_manifest(thread_id)
+            now = datetime.now(timezone.utc)
+            # 若首次创建，写入默认 TTL
+            if "ttl_seconds" not in manifest:
+                manifest["ttl_seconds"] = DEFAULT_TTL_SECONDS
+                manifest["created_at"] = now.isoformat()
+                manifest["expires_at"] = (
+                    now + timedelta(seconds=DEFAULT_TTL_SECONDS)
+                ).isoformat()
+            # 记录 / 覆盖该 doc
+            doc_entry = {
+                "doc_id": doc_id,
+                "stored_path": str(doc_path),
+                "metadata": dict(metadata) if metadata else {},
+                "stored_at": now.isoformat(),
+                "content_size": len(content),
+            }
+            docs = manifest.setdefault("documents", [])
+            # 移除同 doc_id 的旧记录（覆盖写语义）
+            docs = [d for d in docs if d.get("doc_id") != doc_id]
+            docs.append(doc_entry)
+            manifest["documents"] = docs
+            manifest["thread_id"] = thread_id
+            self._save_manifest(thread_id, manifest)
 
         return str(doc_path)
 
-    def retrieve(self, thread_id: str, doc_id: str) -> bytes | None:
+    def retrieve(
+        self,
+        thread_id: str,
+        doc_id: str,
+        expected_thread_id: str | None = None,
+    ) -> bytes | None:
         """读取案件材料；不存在或跨 thread 访问时返回 ``None``。
 
-        跨 thread 隔离：``retrieve`` 内部先做 ``check_access``，
-        ``requesting_thread_id`` 即 ``thread_id`` 本身，若不匹配则拒绝。
+        跨 thread 隔离：``retrieve`` 内部先做 ``check_access``。
+        注意：隔离校验依赖调用方传入正确的 ``expected_thread_id``——
+        不传（默认 None）时仅做自比校验（兼容旧行为，恒通过非空 thread_id）；
+        调用方应传入当前请求归属的 thread_id，与材料所属 ``thread_id``
+        不一致时返回 ``None``。
         """
         # 隔离校验：retrieve 只允许同 thread 访问
-        if not self.check_access(thread_id, doc_id, thread_id):
+        if expected_thread_id is not None:
+            if not self.check_access(thread_id, doc_id, expected_thread_id):
+                return None
+        elif not self.check_access(thread_id, doc_id, thread_id):
             return None
         # 过期则视为不存在
         if self._is_expired(thread_id):
@@ -132,7 +148,7 @@ class CaseVault:
         with _LOCK:
             with open(doc_path, "rb") as fh:
                 enc_bytes = fh.read()
-        return self._decrypt(enc_bytes)
+        return self._decrypt(enc_bytes, doc_id=doc_id)
 
     def delete(self, thread_id: str, doc_id: str) -> bool:
         """删除单个文件；返回是否确实删除了文件。"""
@@ -141,17 +157,18 @@ class CaseVault:
             return False
         doc_path = self._doc_path(thread_id, doc_id)
         deleted = False
+        # 文件删除与 manifest 读-改-写整体持锁，避免并发 delete/store 交叉丢失更新
         with _LOCK:
             if doc_path.exists():
                 doc_path.unlink()
                 deleted = True
-        if deleted:
-            # 同步从 manifest 移除记录
-            manifest = self._load_manifest(thread_id)
-            docs = manifest.get("documents", [])
-            docs = [d for d in docs if d.get("doc_id") != doc_id]
-            manifest["documents"] = docs
-            self._save_manifest(thread_id, manifest)
+            if deleted:
+                # 同步从 manifest 移除记录
+                manifest = self._load_manifest(thread_id)
+                docs = manifest.get("documents", [])
+                docs = [d for d in docs if d.get("doc_id") != doc_id]
+                manifest["documents"] = docs
+                self._save_manifest(thread_id, manifest)
         return deleted
 
     def delete_thread(self, thread_id: str) -> bool:
@@ -315,7 +332,7 @@ class CaseVault:
         return cls._AES_HEADER + nonce + ct
 
     @classmethod
-    def _decrypt(cls, ciphertext: bytes) -> bytes:
+    def _decrypt(cls, ciphertext: bytes, doc_id: str | None = None) -> bytes:
         if ciphertext.startswith(cls._AES_HEADER):
             key = cls._get_aes_key()
             if key is None:
@@ -331,12 +348,23 @@ class CaseVault:
             try:
                 return aesgcm.decrypt(nonce, ct_with_tag, None)
             except (InvalidTag, TypeError, ValueError) as exc:
-                _logger.error("AES-256-GCM 解密失败：%s", exc)
+                # 解密失败静默返回空串会让密钥配错不可诊断：记录警告（含 doc_id，不含内容）
+                _logger.warning(
+                    "AES-256-GCM 解密失败（doc_id=%s，密文 %d 字节）：密钥可能不匹配，%s",
+                    doc_id or "<unknown>",
+                    len(ciphertext),
+                    exc,
+                )
                 return b""
         # 降级模式：base64（仅开发环境可到达此路径）
         try:
             return base64.b64decode(ciphertext, validate=True)
         except (binascii.Error, TypeError, ValueError):
+            _logger.warning(
+                "base64 降级模式解密失败（doc_id=%s，密文 %d 字节）",
+                doc_id or "<unknown>",
+                len(ciphertext),
+            )
             return b""
 
     # ------------------------------------------------------------------

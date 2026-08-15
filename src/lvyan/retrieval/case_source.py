@@ -210,17 +210,32 @@ class OpenSearchCaseSource(CaseSource):
         return "opensearch"
 
     def _get_client(self) -> Any:
+        import os
+
         if self._client is not None:
             return self._client
 
         from opensearchpy import OpenSearch
         from lvyan.config import settings
 
+        # 证书校验默认开启；仅当显式配置 OPENSEARCH_VERIFY_CERTS=false 时禁用
+        # （此前硬编码 verify_certs=False 会在生产静默关闭 TLS 校验）
+        verify_certs = os.getenv("OPENSEARCH_VERIFY_CERTS", "true").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        if not verify_certs:
+            _logger.warning(
+                "OPENSEARCH_VERIFY_CERTS 已显式禁用，OpenSearch TLS 证书校验被关闭（仅限测试/内网自签场景）"
+            )
+
         self._client = OpenSearch(
             hosts=[settings.opensearch_url],
             http_auth=(settings.opensearch_user, settings.opensearch_password),
             use_ssl=settings.opensearch_url.startswith("https://"),
-            verify_certs=False,
+            verify_certs=verify_certs,
         )
         return self._client
 
@@ -370,14 +385,19 @@ class MultiSourceRetriever:
         return all_results[:top_k]
 
     async def healthcheck(self) -> dict[str, bool]:
-        """所有源健康状态。"""
+        """所有源健康状态（并发检查，各源保留独立 5s 超时）。"""
         import asyncio
 
-        results = {}
-        checks = [(s.name, s.healthcheck()) for s in self._sources]
-        for name, coro in checks:
+        if not self._sources:
+            return {}
+
+        async def _check_one(coro):
             try:
-                results[name] = await asyncio.wait_for(coro, timeout=5.0)
+                return await asyncio.wait_for(coro, timeout=5.0)
             except Exception:  # noqa: BLE001 boundary-exception: 健康检查不阻断
-                results[name] = False
-        return results
+                return False
+
+        outcomes = await asyncio.gather(
+            *(_check_one(source.healthcheck()) for source in self._sources)
+        )
+        return {source.name: ok for source, ok in zip(self._sources, outcomes)}

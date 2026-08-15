@@ -19,6 +19,7 @@ from lvyan.nodes.evidence_analyzer import authority_resolver, evidence_analyzer
 from lvyan.nodes.retrieve_cases import case_difference_compare
 from lvyan.nodes.retrieve_statutes import parallel_retrieval
 from lvyan.schemas import Authority, CaseAuthority, Fact, RetrievalQuery
+from lvyan.schemas.web import OnlineSource
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +81,40 @@ def test_parallel_retrieval_empty_queries_returns_empty_lists():
     result = parallel_retrieval(state)
     assert result["statutes"] == []
     assert result["cases"] == []
+
+
+def test_parallel_retrieval_only_uses_web_search_when_preference_enabled(monkeypatch):
+    """联网检索必须由用户持久化偏好显式开启，默认不触网。"""
+    monkeypatch.setattr("lvyan.nodes.retrieve_statutes.search_statutes", lambda *a, **k: [])
+    monkeypatch.setattr("lvyan.nodes.retrieve_statutes.search_cases", lambda *a, **k: None)
+    calls: list[str] = []
+
+    def search_web(query: str, **kwargs):
+        calls.append(query)
+        return [
+            OnlineSource(
+                title="国家法律法规数据库",
+                url="https://flk.npc.gov.cn/detail2.html",
+                source_name="国家法律法规数据库",
+            )
+        ]
+
+    monkeypatch.setattr("lvyan.nodes.retrieve_statutes.search_official_web", search_web)
+    base_state = {
+        "user_goal": "公司公开健康信息怎么办",
+        "retrieval_queries": [{"query_text": "健康信息 个人信息保护"}],
+        "plan": [],
+    }
+
+    disabled = parallel_retrieval(base_state)
+    assert disabled["online_sources"] == []
+    assert calls == []
+
+    enabled = parallel_retrieval(
+        {**base_state, "user_preferences": {"online_search_enabled": True}}
+    )
+    assert len(enabled["online_sources"]) == 1
+    assert calls == ["中华人民共和国个人信息保护法"]
 
 
 def test_parallel_retrieval_marks_plan_done():
@@ -364,9 +399,9 @@ def test_authority_resolver_hierarchy_conflict():
     hierarchy_conflicts = [
         c for c in result.get("conflicts", []) if getattr(c, "conflict_type", "") == "hierarchy"
     ]
-    assert len(hierarchy_conflicts) >= 1, (
-        f"应至少有 1 个 hierarchy 冲突，实际：{result.get('conflicts', [])}"
-    )
+    assert (
+        len(hierarchy_conflicts) >= 1
+    ), f"应至少有 1 个 hierarchy 冲突，实际：{result.get('conflicts', [])}"
 
 
 # ---------------------------------------------------------------------------
@@ -407,3 +442,80 @@ def test_case_difference_compare_empty_cases():
     state = {"case_type": "劳动争议", "facts": [], "cases": []}
     result = case_difference_compare(state)
     assert result.get("case_differences", []) == []
+
+
+def test_evidence_analyzer_reretrieve_does_not_double_state():
+    """回归：重检索回路再次执行 evidence_analyzer 后，键控合并不得翻倍。
+
+    历史 bug：requirement_id 用随机 uuid 生成，新旧 ID 永不匹配，
+    merge_evidence_requirements 无法去重，状态每轮重检索翻倍。
+    """
+    from lvyan.graph.state import merge_evidence_requirements
+    from lvyan.nodes.evidence_analyzer import evidence_analyzer
+
+    state = {
+        "case_type": "劳动争议",
+        "facts": [{"content": "劳动合同", "category": "证据"}],
+        "user_goal": "追讨欠薪",
+        "conversation_summary": "",
+    }
+    first = evidence_analyzer(state)["evidence_requirements"]
+    assert first, "应产出证据需求清单"
+
+    # 模拟重检索：节点再次执行，reducer 合并新旧两批
+    second = evidence_analyzer(state)["evidence_requirements"]
+    merged = merge_evidence_requirements(first, second)
+    assert len(merged) == len(first), (
+        f"重复执行后状态翻倍：{len(first)} -> {len(merged)}（requirement_id 必须确定性）"
+    )
+    # ID 稳定
+    assert {r.requirement_id for r in first} == {r.requirement_id for r in second}
+
+
+def test_authority_resolver_conflict_ids_stable_across_reruns():
+    """回归：AuthorityConflict 的 conflict_id 跨执行保持稳定。"""
+    from lvyan.nodes.evidence_analyzer import _detect_version_conflicts
+    from lvyan.schemas import Authority
+
+    from datetime import datetime, timezone
+
+    def _auth(sid: str, eff: str | None) -> Authority:
+        return Authority(
+            source_id=sid,
+            title="同一法规",
+            article_number="第一条",
+            article_text="正文",
+            authority_level="法律",
+            status="effective",
+            effective_date=eff,
+            retrieved_at=datetime.now(timezone.utc),
+        )
+
+    authorities = [
+        _auth("law-a", "2021-01-01"),
+        _auth("law-b", "2023-01-01"),
+    ]
+    c1 = _detect_version_conflicts(authorities)
+    c2 = _detect_version_conflicts(authorities)
+    assert c1 and c2
+    assert {c.conflict_id for c in c1} == {c.conflict_id for c in c2}
+
+
+def test_parallel_retrieval_policy_guard_degrades_to_empty():
+    """回归：策略守卫必须真正接线——循环失控时检索降级为空而非继续执行。"""
+    from lvyan.nodes.retrieve_statutes import parallel_retrieval
+
+    dup_query = {"query_id": "q-dup", "query_text": "完全相同的查询"}
+    state = {
+        "case_type": "劳动争议",
+        "user_goal": "测试",
+        "conversation_summary": "",
+        "retrieval_queries": [dup_query, dict(dup_query), dict(dup_query)],
+        "plan": [],
+    }
+    result = parallel_retrieval(state)
+    assert result["statutes"] == []
+    assert result["cases"] == []
+    assert result["online_sources"] == []
+    # plan 仍标记 done，下游不卡 pending
+    assert result["plan"] == []

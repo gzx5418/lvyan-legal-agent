@@ -71,7 +71,9 @@ async def set_tenant_context_async(conn: Any, user_id: str) -> None:
     if not user_id or not user_id.strip():
         raise ValueError("user_id 不能为空：RLS 策略依赖 app.user_id 非空")
 
-    await conn.execute("SET LOCAL app.user_id = %s", (user_id,))
+    # PG 协议不允许对 SET 语句做参数绑定，改用 set_config(..., true)：
+    # 第三个参数 true 等价于 SET LOCAL（仅在当前事务内生效）。
+    await conn.execute("SELECT set_config('app.user_id', %s, true)", (user_id,))
     _logger.debug("async tenant context set: user_id=%s", user_id[:8] + "...")
 
 
