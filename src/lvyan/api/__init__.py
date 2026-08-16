@@ -11,7 +11,7 @@ from .models import (
     HealthResponse,
 )
 from .run_context import RunContext
-from .server import app, create_app
+from .server import create_app
 from .sse import RunManager, format_sse_event
 
 __all__ = [
@@ -23,7 +23,6 @@ __all__ = [
     "HealthResponse",
     "RunContext",
     "RunManager",
-    "app",
     "create_app",
     "format_sse_event",
 ]

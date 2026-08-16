@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from lvyan.common.helpers import get_value as _get
 from lvyan.schemas import CaseState
 
 __all__ = ["case_difference_compare"]
@@ -26,15 +27,6 @@ __all__ = ["case_difference_compare"]
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
 def _keyword_overlap(text_a: str, text_b: str) -> float:
     """2-gram 关键词重叠度评分（0~1）。
 

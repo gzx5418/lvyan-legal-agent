@@ -186,8 +186,7 @@ def get_shutdown_coordinator() -> GracefulShutdown:
     """获取全局停机协调器（惰性创建）。"""
     global _coordinator
     if _coordinator is None:
-        import os
+        from lvyan.config import settings
 
-        grace = int(os.getenv("SHUTDOWN_GRACE_SECONDS", "30"))
-        _coordinator = GracefulShutdown(grace_seconds=grace)
+        _coordinator = GracefulShutdown(grace_seconds=settings.shutdown_grace_seconds)
     return _coordinator

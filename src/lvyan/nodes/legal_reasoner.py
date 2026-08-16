@@ -26,6 +26,8 @@ import logging
 import re
 from typing import Any
 
+from lvyan.common.helpers import count_satisfied_elements as _count_satisfied_elements
+from lvyan.common.helpers import get_value as _get
 from lvyan.schemas import CaseState, ReasoningResult
 
 __all__ = ["legal_reasoner"]
@@ -205,15 +207,6 @@ _CASE_TYPE_PLAINTIFF: dict[str, list[str]] = {
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
 def _facts_text(facts: list[Any]) -> str:
     """将 facts 列表中所有 content 拼接为单一文本，供关键词匹配。"""
     parts: list[str] = []
@@ -308,15 +301,6 @@ def _extract_elements(
         status = "已满足" if is_satisfied else "待查明"
         result.append(f"{element_name}（{status}）")
     return result
-
-
-def _count_satisfied_elements(elements: list[str]) -> tuple[int, int]:
-    """统计构成要件满足情况，返回 (已满足数, 总数)。"""
-    total = len(elements)
-    if total == 0:
-        return 0, 0
-    satisfied = sum(1 for e in elements if "已满足" in e)
-    return satisfied, total
 
 
 def _generate_disputed_focus(disputed_facts: list[Any], case_type: str | None) -> list[str]:
@@ -608,9 +592,9 @@ def _assert_no_numeric_probability(result: ReasoningResult) -> None:
     for name in type(result).model_fields.keys():
         low = name.lower()
         for sub in forbidden_field_substrings:
-            assert sub not in low, (
-                f"ReasoningResult 字段 {name} 含敏感子串 {sub}，违反「禁止数字概率」约束"
-            )
+            assert (
+                sub not in low
+            ), f"ReasoningResult 字段 {name} 含敏感子串 {sub}，违反「禁止数字概率」约束"
 
     # 2. 序列化文本检查：百分比/概率关键词模式
     payload = result.model_dump_json()
@@ -625,6 +609,47 @@ def _assert_no_numeric_probability(result: ReasoningResult) -> None:
 # ---------------------------------------------------------------------------
 # LLM 增强推理（PR2）
 # ---------------------------------------------------------------------------
+_TENDENCY_RANK = {
+    "insufficient": 0,
+    "somewhat_unfavorable": 1,
+    "even": 2,
+    "somewhat_favorable": 3,
+    "favorable": 4,
+}
+_CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def _llm_result_severely_diverges(state: CaseState, result: ReasoningResult) -> bool:
+    """用确定性规则交叉校验 LLM 的核心倾向与证据置信度。"""
+    statutes = _get(state, "statutes", []) or []
+    facts = _get(state, "facts", []) or []
+    evidence_requirements = _get(state, "evidence_requirements", []) or []
+    missing_facts = _get(state, "missing_facts", []) or []
+    cases = _get(state, "cases", []) or []
+    case_type = _get(state, "case_type", None)
+    user_goal = _get(state, "user_goal", "") or ""
+    facts_text = _facts_text(facts)
+    statutes_text = _statutes_text(statutes)
+    elements = _extract_elements(
+        case_type,
+        f"{user_goal} {facts_text}".strip(),
+        statutes_text,
+        evidence_requirements,
+    )
+    rule_confidence = _compute_evidence_confidence(evidence_requirements, missing_facts)
+    rule_tendency = _compute_judicial_tendency(
+        elements, rule_confidence, statutes, cases, missing_facts
+    )
+
+    tendency_gap = abs(
+        _TENDENCY_RANK.get(result.judicial_tendency, 0) - _TENDENCY_RANK.get(rule_tendency, 0)
+    )
+    confidence_gap = _CONFIDENCE_RANK.get(result.evidence_confidence, 0) - _CONFIDENCE_RANK.get(
+        rule_confidence, 0
+    )
+    return tendency_gap >= 2 or confidence_gap >= 2
+
+
 def _try_llm_reasoning(state: CaseState) -> ReasoningResult | None:
     """尝试用 LLM 生成法律推理结果。
 
@@ -632,6 +657,7 @@ def _try_llm_reasoning(state: CaseState) -> ReasoningResult | None:
         ``ReasoningResult`` 或 ``None``（LLM 不可用/输出无效时）。
     """
     from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_security import UNTRUSTED_DATA_INSTRUCTION, delimit_untrusted
 
     if not llm_available():
         return None
@@ -670,26 +696,24 @@ def _try_llm_reasoning(state: CaseState) -> ReasoningResult | None:
     missing_summary = "; ".join(str(_get(mf, "question", "")) for mf in missing_facts[:3]) or "无"
     critic_summary = "; ".join(critic_feedback[:2]) or "无"
     attachment_ctx = _get(state, "relevant_attachment_context", "") or ""
-    attachment_block = f"\n相关材料摘要：\n{attachment_ctx}\n" if attachment_ctx.strip() else ""
+    attachment_block = delimit_untrusted(attachment_ctx, "attachment")
     conversation_summary = _get(state, "conversation_summary", "") or ""
-    history_block = (
-        f"\n此前对话摘要：\n{conversation_summary}\n" if conversation_summary.strip() else ""
-    )
+    history_block = delimit_untrusted(conversation_summary, "history")
 
     system_prompt = (
         "你是法律推理助手。根据案情事实与检索到的法规，进行法律推理分析。"
         "只输出 JSON，不要解释。"
-        "严禁输出任何数字概率、百分比或胜诉率，只输出定性判断。"
+        "严禁输出任何数字概率、百分比或胜诉率，只输出定性判断。" + UNTRUSTED_DATA_INSTRUCTION
     )
     user_prompt = (
         f"案由：{case_type}\n"
-        f"用户目标：{user_goal}\n{attachment_block}{history_block}"
-        f"已知事实：{facts_summary}\n"
-        f"检索法规：{statutes_summary}\n"
-        f"类案参考：{cases_summary}\n"
+        f"{delimit_untrusted(user_goal, 'user_input')}\n{attachment_block}\n{history_block}\n"
+        f"{delimit_untrusted(facts_summary, 'facts')}\n"
+        f"{delimit_untrusted(statutes_summary, 'statutes')}\n"
+        f"{delimit_untrusted(cases_summary, 'cases')}\n"
         f"证据情况：{er_summary}\n"
-        f"缺失事实：{missing_summary}\n"
-        f"评审反馈：{critic_summary}\n\n"
+        f"{delimit_untrusted(missing_summary, 'missing_facts')}\n"
+        f"{delimit_untrusted(critic_summary, 'critic_feedback')}\n\n"
         "请进行法律推理，输出 JSON：\n"
         '{"legal_relationship": "法律关系定性", '
         '"elements": ["要件1（已满足/未满足）"], '
@@ -751,6 +775,14 @@ def _try_llm_reasoning(state: CaseState) -> ReasoningResult | None:
         _assert_no_numeric_probability(reasoning)
     except AssertionError as exc:
         _logger.warning("LLM 推理输出含数字概率，丢弃: %s", exc)
+        return None
+
+    if _llm_result_severely_diverges(state, reasoning):
+        _logger.warning(
+            "LLM 核心结论与确定性证据规则严重背离，丢弃并降级规则复核: tendency=%s confidence=%s",
+            reasoning.judicial_tendency,
+            reasoning.evidence_confidence,
+        )
         return None
 
     _logger.info("LLM 法律推理成功: tendency=%s", tendency)

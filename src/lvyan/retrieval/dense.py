@@ -18,8 +18,10 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
+import time
 from typing import Any
 
 from lvyan.config import settings
@@ -43,6 +45,9 @@ _DENSE_DIM = 256  # 桩向量维度
 # - _DOC_VEC_CACHE: "model:chunk_id" → 真实文档向量（键含模型名避免跨模型污染），
 #   避免每次请求对候选集重复 embed；容量有界，超限按插入序淘汰最旧
 _REAL_EMBEDDING_PROBED: bool | None = None
+_REAL_EMBEDDING_LAST_PROBE: float = 0.0
+_REAL_EMBEDDING_FAILURES: int = 0
+_REAL_EMBEDDING_RETRY_SECONDS = 60.0
 _ST_MODEL_CACHE: Any = None
 _DOC_VEC_CACHE: dict[str, list[float]] = {}
 _DENSE_CANDIDATE_FLOOR = 100
@@ -59,6 +64,7 @@ _REAL_EMBED_BATCH_TIMEOUT = 30.0
 _REAL_RANK_CANDIDATE_LIMIT = 2000
 # 文档向量缓存容量上限（条），超限按插入序淘汰最旧的（dict 保序即可）
 _DOC_VEC_CACHE_MAX_ENTRIES = 50_000
+_logger = logging.getLogger("lvyan.retrieval.dense")
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +123,17 @@ def _probe_real_embedding() -> bool:
     返回 True 表示可用（_ST_MODEL_CACHE 已就绪）；False 表示不可用，
     后续 embed_text 直接走 hash 桩，不再重复探测。
     """
-    global _REAL_EMBEDDING_PROBED, _ST_MODEL_CACHE
-    if _REAL_EMBEDDING_PROBED is not None:
+    global _REAL_EMBEDDING_PROBED, _REAL_EMBEDDING_LAST_PROBE
+    global _REAL_EMBEDDING_FAILURES, _ST_MODEL_CACHE
+    now = time.monotonic()
+    if _REAL_EMBEDDING_PROBED is True:
         return _REAL_EMBEDDING_PROBED
+    if (
+        _REAL_EMBEDDING_PROBED is False
+        and now - _REAL_EMBEDDING_LAST_PROBE < _REAL_EMBEDDING_RETRY_SECONDS
+    ):
+        return False
+    _REAL_EMBEDDING_LAST_PROBE = now
 
     gateway = settings.model_gateway_url
     # 1) 模型网关 HTTP API（仅当 URL 配置时尝试一次，避免反复网络超时）
@@ -143,11 +157,18 @@ def _probe_real_embedding() -> bool:
             # 校验返回结构
             if data.get("data") and isinstance(data["data"][0].get("embedding"), list):
                 _REAL_EMBEDDING_PROBED = True
+                _REAL_EMBEDDING_FAILURES = 0
                 log(f"[Dense] 模型网关可用：{gateway}")
                 return True
         except Exception as exc:  # noqa: BLE001
             log(f"[Dense] 模型网关不可用 ({exc})，降级到 hash 桩")
             _REAL_EMBEDDING_PROBED = False
+            _REAL_EMBEDDING_FAILURES += 1
+            _logger.warning(
+                "真实 embedding 探测失败（累计 %d 次），%.0fs 后重试",
+                _REAL_EMBEDDING_FAILURES,
+                _REAL_EMBEDDING_RETRY_SECONDS,
+            )
             return False
 
     # 2) 尝试本地 sentence-transformers
@@ -156,11 +177,18 @@ def _probe_real_embedding() -> bool:
 
         _ST_MODEL_CACHE = SentenceTransformer(settings.embedding_model)
         _REAL_EMBEDDING_PROBED = True
+        _REAL_EMBEDDING_FAILURES = 0
         log(f"[Dense] sentence-transformers 可用：{settings.embedding_model}")
         return True
     except Exception as exc:  # noqa: BLE001
         log(f"[Dense] sentence-transformers 不可用 ({exc})，降级到 hash 桩")
         _REAL_EMBEDDING_PROBED = False
+        _REAL_EMBEDDING_FAILURES += 1
+        _logger.warning(
+            "本地 embedding 探测失败（累计 %d 次），%.0fs 后重试",
+            _REAL_EMBEDDING_FAILURES,
+            _REAL_EMBEDDING_RETRY_SECONDS,
+        )
         return False
 
 
@@ -496,9 +524,7 @@ def dense_search(
         query_vec = _try_real_embedding(query, model=model)
         if query_vec is not None:
             real_candidates = _select_real_rank_candidates(query, chunks)
-            real_results = _rank_by_real_embedding(
-                query_vec, real_candidates, top_k, model=model
-            )
+            real_results = _rank_by_real_embedding(query_vec, real_candidates, top_k, model=model)
             if real_results is not None:
                 return real_results
             log("[Dense] 真实 embedding 批量失败，降级到 hash 桩")

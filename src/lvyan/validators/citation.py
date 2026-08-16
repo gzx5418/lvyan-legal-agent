@@ -21,6 +21,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from lvyan.common.helpers import get_value as _get
 from lvyan.retrieval.version_aware import verify_statute_status
 
 __all__ = [
@@ -55,15 +56,6 @@ class CitationValidationReport(BaseModel):
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
 # 中文数字解析
 _DIGITS = "零一二三四五六七八九"
 _UNITS: dict[str, int] = {"十": 10, "百": 100, "千": 1000, "万": 10000}

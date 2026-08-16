@@ -28,10 +28,10 @@ CLI / 测试桩等同步路径，向后兼容。
 --------
 - ``CaseMemory(graph_resolver, index_path)``：构造时传入图解析器（延迟绑定）。
 - ``CaseMemory(graph=...)``：旧式构造（立即绑定），向后兼容。
-- ``load(thread_id) -> CaseState | None``：从 checkpointer 加载状态（同步）。
-- ``aload_strict(thread_id) -> CaseState | None``：异步严格加载（API 用）。
-- ``delete(thread_id) -> bool``：删除会话（同步）。
-- ``adelete_strict(thread_id) -> bool``：异步严格删除（API 用）。
+- ``load(thread_id, user_id=None) -> CaseState | None``：从 checkpointer 加载状态（同步）。
+- ``aload_strict(thread_id, user_id=None) -> CaseState | None``：异步严格加载（API 用）。
+- ``delete(thread_id, user_id=None) -> bool``：删除会话（同步）。
+- ``adelete_strict(thread_id, user_id=None) -> bool``：异步严格删除（API 用）。
 - ``list_threads() -> list[tuple[str, dict]]``：列出所有会话摘要。
 - ``register(thread_id, ...)``：注册新会话到索引。
 - ``mark_output(thread_id)``：标记会话已有输出。
@@ -40,6 +40,7 @@ CLI / 测试桩等同步路径，向后兼容。
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -203,38 +204,38 @@ class CaseMemory:
     # ------------------------------------------------------------------
     # 公开 API：checkpoint 读取 / 删除（同步路径，CLI 用）
     # ------------------------------------------------------------------
-    def load(self, thread_id: str) -> CaseState | None:
+    def load(self, thread_id: str, user_id: str | None = None) -> CaseState | None:
         """从 LangGraph checkpointer 加载会话状态（同步路径）。
 
         替代旧 ``ShortTermMemory.load`` 的 JSON 文件读取。
         """
         try:
-            return self.load_strict(thread_id)
+            return self.load_strict(thread_id, user_id=user_id)
         except Exception as exc:  # noqa: BLE001
             _logger.debug("加载 thread %s 状态失败: %s", thread_id, exc)
             return None
 
-    def load_strict(self, thread_id: str) -> CaseState | None:
+    def load_strict(self, thread_id: str, user_id: str | None = None) -> CaseState | None:
         """加载会话状态（同步路径，CLI 用），将 checkpointer 故障传播给调用方。
 
         使用 ``graph.get_state()``。注意：当 ``graph_resolver`` 返回异步图
         （``AsyncPostgresSaver``）时，其 ``get_state`` 继承自基类会抛
         ``NotImplementedError``。API 异步端点请使用 :meth:`aload_strict`。
         """
-        config = {"configurable": {"thread_id": thread_id}}
+        config = _checkpoint_config(thread_id, user_id)
         graph = self._resolve_graph()
         snapshot = graph.get_state(config)
         return _snapshot_to_state(snapshot)
 
-    def delete(self, thread_id: str) -> bool:
+    def delete(self, thread_id: str, user_id: str | None = None) -> bool:
         """删除会话：从 checkpointer 和索引中移除（同步路径）。"""
         try:
-            return self.delete_strict(thread_id)
+            return self.delete_strict(thread_id, user_id=user_id)
         except Exception as exc:  # noqa: BLE001
             _logger.debug("从 checkpointer 删除 thread %s 失败: %s", thread_id, exc)
             return False
 
-    def delete_strict(self, thread_id: str) -> bool:
+    def delete_strict(self, thread_id: str, user_id: str | None = None) -> bool:
         """严格删除 checkpoint 与索引（同步路径），任何存储故障均向调用方传播。
 
         使用 ``checkpointer.delete_thread()``。异步图（``AsyncPostgresSaver``）
@@ -245,23 +246,17 @@ class CaseMemory:
         if checkpointer is None or not hasattr(checkpointer, "delete_thread"):
             raise RuntimeError("checkpointer delete_thread unavailable")
 
-        checkpointer.delete_thread(thread_id)
-
-        # 从索引删除
-        with self._lock:
-            if thread_id in self._index:
-                del self._index[thread_id]
-                self._save_index()
-
+        _invoke_delete_thread(checkpointer, thread_id, _checkpoint_config(thread_id, user_id))
+        self._drop_index_entry(thread_id)
         return True
 
-    def has_interrupt(self, thread_id: str) -> dict[str, Any] | None:
+    def has_interrupt(self, thread_id: str, user_id: str | None = None) -> dict[str, Any] | None:
         """检查会话是否有待处理的 HITL 中断（同步路径）。
 
         Returns:
             中断信息字典（含 message 等），无中断返回 None。
         """
-        config = {"configurable": {"thread_id": thread_id}}
+        config = _checkpoint_config(thread_id, user_id)
         try:
             graph = self._resolve_graph()
             snapshot = graph.get_state(config)
@@ -272,7 +267,7 @@ class CaseMemory:
     # ------------------------------------------------------------------
     # 公开 API：checkpoint 读取 / 删除（异步路径，API server 用）
     # ------------------------------------------------------------------
-    async def aload(self, thread_id: str) -> CaseState | None:
+    async def aload(self, thread_id: str, user_id: str | None = None) -> CaseState | None:
         """从 LangGraph checkpointer 加载会话状态（异步路径，API 用）。
 
         优先使用 ``graph.aget_state()``（异步图，不阻塞事件循环）；
@@ -280,19 +275,21 @@ class CaseMemory:
         ``get_state``（兼容 MemorySaver 等仅同步实现的 checkpointer）。
         """
         try:
-            return await self.aload_strict(thread_id)
+            return await self.aload_strict(thread_id, user_id=user_id)
         except Exception as exc:  # noqa: BLE001
             _logger.debug("异步加载 thread %s 状态失败: %s", thread_id, exc)
             return None
 
-    async def aload_strict(self, thread_id: str) -> CaseState | None:
+    async def aload_strict(
+        self, thread_id: str, user_id: str | None = None
+    ) -> CaseState | None:
         """异步严格加载会话状态（API 用），将 checkpointer 故障传播给调用方。
 
         使用 ``await graph.aget_state()``。当 ``graph_resolver`` 返回的图未实现
         ``aget_state`` 时（如 MemorySaver 场景），回退到 ``asyncio.to_thread``
         包装同步 ``get_state``，确保所有 checkpointer 后端均可工作。
         """
-        config = {"configurable": {"thread_id": thread_id}}
+        config = _checkpoint_config(thread_id, user_id)
         graph = self._resolve_graph()
         aget = getattr(graph, "aget_state", None)
         if callable(aget):
@@ -302,49 +299,97 @@ class CaseMemory:
             snapshot = await asyncio.to_thread(graph.get_state, config)
         return _snapshot_to_state(snapshot)
 
-    async def adelete_strict(self, thread_id: str) -> bool:
+    async def adelete_strict(self, thread_id: str, user_id: str | None = None) -> bool:
         """异步严格删除 checkpoint 与索引（API 用）。
 
-        ``checkpointer.delete_thread`` 为同步操作（LangGraph 未提供异步版本），
-        通过 ``asyncio.to_thread`` 卸载到线程池，避免阻塞事件循环。
+        优先 ``adelete_thread``（租户包装器异步路径）；否则通过
+        ``asyncio.to_thread`` 卸载同步 ``delete_thread``，避免阻塞事件循环。
         """
         graph = self._resolve_graph()
         checkpointer = getattr(graph, "checkpointer", None)
-        if checkpointer is None or not hasattr(checkpointer, "delete_thread"):
+        if checkpointer is None:
             raise RuntimeError("checkpointer delete_thread unavailable")
 
-        await asyncio.to_thread(checkpointer.delete_thread, thread_id)
+        config = _checkpoint_config(thread_id, user_id)
+        adelete = getattr(checkpointer, "adelete_thread", None)
+        if callable(adelete):
+            await adelete(thread_id, config=config)
+        elif hasattr(checkpointer, "delete_thread"):
+            await asyncio.to_thread(_invoke_delete_thread, checkpointer, thread_id, config)
+        else:
+            raise RuntimeError("checkpointer delete_thread unavailable")
 
-        # 从索引删除
-        with self._lock:
-            if thread_id in self._index:
-                del self._index[thread_id]
-                self._save_index()
-
+        self._drop_index_entry(thread_id)
         return True
 
-    async def alist_threads_strict(self) -> list[tuple[str, dict[str, Any]]]:
+    async def alist_threads_strict(
+        self, user_id: str | None = None
+    ) -> list[tuple[str, dict[str, Any]]]:
         """异步列出所有可恢复的会话摘要（API 用）。
 
-        对每个索引项调用 :meth:`aload_strict` 验证 checkpoint 仍存在，
-        仅返回可恢复的会话。``asyncio.to_thread`` 包装索引读取避免锁竞争。
+        优先用 checkpointer ``alist`` 一次扫描 thread_id 集合，避免对每个
+        sidecar 条目分别加载完整 checkpoint（O(N × 状态大小)）。不支持
+        ``alist`` 的旧测试桩才回退逐项校验。
         """
         index_snapshot: list[tuple[str, dict[str, Any]]] = await asyncio.to_thread(
             self.list_threads
         )
+        graph = self._resolve_graph()
+        checkpointer = getattr(graph, "checkpointer", None)
+        alist = getattr(checkpointer, "alist", None)
+        if callable(alist):
+            try:
+                list_config = {"configurable": {"user_id": user_id}} if user_id else None
+                thread_ids: set[str] = set()
+                async for checkpoint in alist(list_config):
+                    config = getattr(checkpoint, "config", None) or {}
+                    thread_id = config.get("configurable", {}).get("thread_id")
+                    if thread_id:
+                        thread_ids.add(str(thread_id))
+                return [(tid, meta) for tid, meta in index_snapshot if tid in thread_ids]
+            except (NotImplementedError, TypeError, AttributeError) as exc:
+                _logger.debug("checkpointer alist 不可用，回退逐项校验: %s", exc)
+
         recoverable: list[tuple[str, dict[str, Any]]] = []
         for tid, meta in index_snapshot:
             try:
-                if await self.aload_strict(tid) is not None:
+                if await self.aload_strict(tid, user_id=user_id) is not None:
                     recoverable.append((tid, meta))
             except Exception as exc:  # noqa: BLE001
                 _logger.debug("异步列出 thread %s 失败: %s", tid, exc)
         return recoverable
 
+    def _drop_index_entry(self, thread_id: str) -> None:
+        with self._lock:
+            if thread_id in self._index:
+                del self._index[thread_id]
+                self._save_index()
+
 
 # ---------------------------------------------------------------------------
-# 辅助函数：snapshot → CaseState / 中断信息
+# 辅助函数：checkpoint config / 删除 / snapshot
 # ---------------------------------------------------------------------------
+def _checkpoint_config(thread_id: str, user_id: str | None = None) -> dict[str, Any]:
+    configurable: dict[str, Any] = {"thread_id": thread_id}
+    if user_id:
+        configurable["user_id"] = user_id
+    return {"configurable": configurable}
+
+
+def _invoke_delete_thread(checkpointer: Any, thread_id: str, config: dict[str, Any]) -> Any:
+    """调用 ``delete_thread``；兼容只接受 ``thread_id`` 的旧测试桩。"""
+    delete = getattr(checkpointer, "delete_thread", None)
+    if not callable(delete):
+        raise RuntimeError("checkpointer delete_thread unavailable")
+    try:
+        params = inspect.signature(delete).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "config" in params:
+        return delete(thread_id, config=config)
+    return delete(thread_id)
+
+
 def _snapshot_to_state(snapshot: Any) -> CaseState | None:
     """从 graph.get_state / aget_state 返回的 snapshot 重建 CaseState。"""
     if snapshot is None or not snapshot.values:

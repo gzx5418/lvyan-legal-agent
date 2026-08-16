@@ -21,6 +21,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from lvyan.common.helpers import get_value as _get
 from lvyan.retrieval.version_aware import verify_statute_status
 
 __all__ = [
@@ -56,15 +57,6 @@ class AuthorityStatusReport(BaseModel):
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
 def _to_date(value: Any) -> date | None:
     """把任意值转换为 ``date``，无法转换时返回 ``None``。"""
     if value is None:

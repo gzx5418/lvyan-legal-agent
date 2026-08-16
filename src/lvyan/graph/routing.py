@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from lvyan.common.helpers import get_compat_counter, get_value as _get
 from lvyan.config import settings
 
 __all__ = [
@@ -30,15 +31,6 @@ __all__ = [
     "route_after_output_guardrail",
     "route_by_complexity",
 ]
-
-
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
 
 
 def route_after_missing_fact(state: Any) -> str:
@@ -62,7 +54,7 @@ def route_after_citation(state: Any) -> str:
     因为 composer 已在 citation_verifier 之前执行）。
 
     - 若 ``state.citation_audit.passed`` 为 False 且
-      ``state.iteration <`` 内部重检索上限 → 返回 ``"reretrieve"``，
+      ``state.retrieval_iteration <`` 内部重检索上限 → 返回 ``"reretrieve"``，
       回到 ``parallel_retrieval`` 重检索。
     - 否则（通过 / 已达迭代上限）→ 返回 ``"output_guardrail"``，进入输出守卫。
 
@@ -74,10 +66,10 @@ def route_after_citation(state: Any) -> str:
     if audit is None:
         return "output_guardrail"
     passed = _get(audit, "passed", True)
-    iteration = _get(state, "iteration", 0)
+    retrieval_iteration = get_compat_counter(state, "retrieval_iteration")
     # 与 citation_verifier 节点内部限制保持一致：min(settings.max_retrieval_iterations, 2)
     max_iterations = min(settings.max_retrieval_iterations, 2)
-    if not passed and iteration < max_iterations:
+    if not passed and retrieval_iteration < max_iterations:
         return "reretrieve"
     return "output_guardrail"
 

@@ -35,6 +35,9 @@ import logging
 import re
 from typing import Any
 
+from lvyan.common.constants import HIGH_RISK_DISCLAIMER
+from lvyan.common.helpers import get_value as _get
+
 from langgraph.types import interrupt
 
 from lvyan.config import settings
@@ -54,12 +57,6 @@ _logger = logging.getLogger("lvyan.nodes.output_guardrail")
 
 # 输出回退最大重试次数（建议 2）
 MAX_OUTPUT_ITERATIONS: int = 2
-
-# 高风险声明（与 composer 保持一致，guardrail 兜底追加）
-_HIGH_RISK_DISCLAIMER: str = (
-    "\n\n---\n⚠ 高风险声明：本案风险等级较高，上述结论存在较大不确定性，"
-    "建议尽快咨询持证律师并收集补强证据，切勿仅凭本意见作出不可逆决定。"
-)
 
 # 不可逆操作关键词（命中即触发 Human-in-the-loop）
 # Task 18.4 安全评测补全：新增「签署合同 / 签署协议 / 代为签署」等签署类敏感动作
@@ -94,15 +91,6 @@ _CITATION_INLINE_RE = re.compile(
 # ---------------------------------------------------------------------------
 # 辅助
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
 def _remove_numeric_probability(text: str) -> str:
     """移除数字概率表达，替换为定性标签「信息不足（未校准）」。"""
     result = text
@@ -317,7 +305,7 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
 
     # --- 6. 高风险声明兜底 ---
     if risk_level == "high" and "高风险声明" not in final_output:
-        final_output = final_output + _HIGH_RISK_DISCLAIMER
+        final_output = final_output + HIGH_RISK_DISCLAIMER
         notes.append("本案风险等级较高，已追加高风险声明")
 
     # --- 6.5 最终校验：脱敏 + 修复后再跑一次完整校验 ---

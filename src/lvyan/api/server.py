@@ -31,12 +31,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import os
 import re
 import time
 import uuid
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -160,6 +162,8 @@ def _state_summary(state: Any) -> dict[str, Any]:
         "risk_level": state.risk_level,
         "confidence": state.confidence,
         "iteration": state.iteration,
+        "reasoner_iteration": getattr(state, "reasoner_iteration", 0),
+        "retrieval_iteration": getattr(state, "retrieval_iteration", 0),
         "final_output": state.final_output,
         "legal_answer": getattr(state, "legal_answer", None),
         "facts_count": len(state.facts),
@@ -197,7 +201,18 @@ def _detect_checkpointer_kind_from_instance(checkpointer: Any) -> str:
     return "unknown"
 
 
-async def _mem_aload(mem: Any, thread_id: str) -> Any:
+def _call_with_optional_user_id(fn: Any, thread_id: str, user_id: str | None) -> Any:
+    """调用 load/delete 等方法；旧测试桩没有 ``user_id`` 参数时自动省略。"""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "user_id" in params:
+        return fn(thread_id, user_id=user_id)
+    return fn(thread_id)
+
+
+async def _mem_aload(mem: Any, thread_id: str, user_id: str | None = None) -> Any:
     """异步加载会话状态，兼容异步 / 同步 CaseMemory 实现。
 
     生产 ``CaseMemory`` 提供 ``aload``（使用异步图 ``aget_state``，不阻塞事件循环，
@@ -206,11 +221,14 @@ async def _mem_aload(mem: Any, thread_id: str) -> Any:
     """
     aload = getattr(mem, "aload", None)
     if callable(aload):
-        return await aload(thread_id)
-    return mem.load(thread_id)
+        result = _call_with_optional_user_id(aload, thread_id, user_id)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    return _call_with_optional_user_id(mem.load, thread_id, user_id)
 
 
-async def _mem_aload_strict(mem: Any, thread_id: str) -> Any:
+async def _mem_aload_strict(mem: Any, thread_id: str, user_id: str | None = None) -> Any:
     """异步严格加载会话状态，兼容异步 / 同步 CaseMemory 实现。
 
     生产 ``CaseMemory`` 提供 ``aload_strict``（使用异步图 ``aget_state``）；
@@ -218,11 +236,16 @@ async def _mem_aload_strict(mem: Any, thread_id: str) -> Any:
     """
     aload_strict = getattr(mem, "aload_strict", None)
     if callable(aload_strict):
-        return await aload_strict(thread_id)
-    return mem.load_strict(thread_id)
+        result = _call_with_optional_user_id(aload_strict, thread_id, user_id)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    return _call_with_optional_user_id(mem.load_strict, thread_id, user_id)
 
 
-async def _mem_adelete_strict(mem: Any, thread_id: str) -> bool:
+async def _mem_adelete_strict(
+    mem: Any, thread_id: str, user_id: str | None = None
+) -> bool:
     """异步严格删除会话，兼容异步 / 同步 CaseMemory 实现。
 
     生产 ``CaseMemory`` 提供 ``adelete_strict``（通过 ``asyncio.to_thread``
@@ -231,11 +254,16 @@ async def _mem_adelete_strict(mem: Any, thread_id: str) -> bool:
     """
     adelete_strict = getattr(mem, "adelete_strict", None)
     if callable(adelete_strict):
-        return await adelete_strict(thread_id)
-    return mem.delete_strict(thread_id)
+        result = _call_with_optional_user_id(adelete_strict, thread_id, user_id)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    return _call_with_optional_user_id(mem.delete_strict, thread_id, user_id)
 
 
-async def _mem_alist_threads_recoverable(mem: Any) -> list[tuple[str, dict[str, Any]]]:
+async def _mem_alist_threads_recoverable(
+    mem: Any, user_id: str | None = None
+) -> list[tuple[str, dict[str, Any]]]:
     """异步列出可恢复的会话，兼容异步 / 同步 CaseMemory 实现。
 
     生产 ``CaseMemory`` 提供 ``alist_threads_strict``（异步校验每个索引项的
@@ -243,12 +271,19 @@ async def _mem_alist_threads_recoverable(mem: Any) -> list[tuple[str, dict[str, 
     """
     alist_strict = getattr(mem, "alist_threads_strict", None)
     if callable(alist_strict):
-        return await alist_strict()
+        try:
+            params = inspect.signature(alist_strict).parameters
+        except (TypeError, ValueError):
+            params = {}
+        result = alist_strict(user_id=user_id) if "user_id" in params else alist_strict()
+        if inspect.isawaitable(result):
+            return await result
+        return result
     # 回退：同步遍历索引，逐项校验 checkpoint（兼容旧测试桩）
     recoverable: list[tuple[str, dict[str, Any]]] = []
     for tid, meta in mem.list_threads():
         try:
-            if mem.load_strict(tid) is not None:
+            if _call_with_optional_user_id(mem.load_strict, tid, user_id) is not None:
                 recoverable.append((tid, meta))
         except Exception:  # noqa: BLE001
             continue
@@ -409,7 +444,7 @@ def warm_corpus_in_background(
             return
         from lvyan.retrieval.manifest import ensure_corpus_ready
 
-        result = ensure_corpus_ready(lawtext_dir, manifests_dir)
+        result = ensure_corpus_ready(lawtext_dir, manifests_dir, force=True)
         if not result["consistent"]:
             _logger.warning(
                 "法律索引启动预热未就绪（reason=%s）；/readyz 将报告 degraded",
@@ -653,17 +688,58 @@ def _enforce_zip_uncompressed_limit(content: bytes, limit: int) -> None:
         offset = idx + 30 + name_len + extra_len + max(comp_size, 0)
 
 
-# P1-4：文档转换并发信号量（惰性创建，按 settings.max_concurrent_conversions）
-_conversion_semaphore: asyncio.Semaphore | None = None
+# P1-4：按事件循环维护文档转换信号量，避免多 loop 场景复用绑定到旧 loop
+# 的 asyncio 原语。转换任务集合用于在 HTTP 超时后继续持有配额。
+_conversion_semaphores: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+_conversion_tasks: set[asyncio.Task[Any]] = set()
+_zombie_conversion_paths: set[Path] = set()
 
 
 def _get_conversion_semaphore() -> asyncio.Semaphore:
-    global _conversion_semaphore
-    if _conversion_semaphore is None:
-        from lvyan.config import settings as _settings
+    loop = asyncio.get_running_loop()
+    semaphore = _conversion_semaphores.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(max(1, settings.max_concurrent_conversions))
+        _conversion_semaphores[loop] = semaphore
+    return semaphore
 
-        _conversion_semaphore = asyncio.Semaphore(max(1, _settings.max_concurrent_conversions))
-    return _conversion_semaphore
+
+async def _convert_with_retained_slot(raw_path: Path, timeout_seconds: float) -> dict[str, Any]:
+    """执行不可取消的线程转换；超时后仍占用配额直到线程真正结束。"""
+    semaphore = _get_conversion_semaphore()
+    await semaphore.acquire()
+    task = asyncio.create_task(asyncio.to_thread(convert_to_markdown, raw_path))
+    _conversion_tasks.add(task)
+
+    def _finished(done: asyncio.Task[Any]) -> None:
+        semaphore.release()
+        _conversion_tasks.discard(done)
+        # 取出异常，避免超时后的后台任务产生未检索异常警告。
+        if not done.cancelled():
+            try:
+                done.exception()
+            except asyncio.CancelledError:
+                pass
+        if raw_path in _zombie_conversion_paths:
+            _zombie_conversion_paths.discard(raw_path)
+            try:
+                raw_path.unlink(missing_ok=True)
+            except OSError:
+                _logger.warning("超时转换临时文件清理失败: %s", raw_path.name)
+
+    task.add_done_callback(_finished)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        if not task.done():
+            _zombie_conversion_paths.add(raw_path)
+        raise
+    except asyncio.CancelledError:
+        if not task.done():
+            _zombie_conversion_paths.add(raw_path)
+        raise
 
 
 def _load_attachment_markdown(meta: dict[str, Any], fid: str, case_vault: Any = None) -> str:
@@ -736,6 +812,15 @@ def _lifespan(app: FastAPI) -> Any:
             await asyncio.to_thread(warm_corpus_in_background)
         except Exception:  # noqa: BLE001
             _logger.exception("法律索引启动预热失败（lifespan）")
+
+        case_vault = getattr(app.state, "case_vault", None)
+        if case_vault is not None:
+            try:
+                cleaned = await asyncio.to_thread(case_vault.cleanup_expired)
+                if cleaned:
+                    _logger.info("启动时清理 %d 个过期案件材料目录", cleaned)
+            except (OSError, ValueError, TypeError):
+                _logger.exception("案件材料 TTL 清理失败")
 
         yield
 
@@ -1155,7 +1240,7 @@ def create_app(
                 assert_thread_owner(existing_meta, user_id, req.thread_id)
             elif is_auth_enabled():
                 # sidecar 索引缺失时，从 checkpoint 状态中恢复 owner 校验
-                cs = await _mem_aload(mem, req.thread_id)
+                cs = await _mem_aload(mem, req.thread_id, user_id=user_id)
                 if cs is not None:
                     cp_user_id = str(getattr(cs, "user_id", ANONYMOUS_USER) or ANONYMOUS_USER)
                     if cp_user_id != user_id:
@@ -1327,10 +1412,12 @@ def create_app(
         # P2-13：run ownership 校验
         assert_run_owner(ctx, user_id, run_id)
 
+        subscriber = ctx.subscribe()
+
         async def event_generator():
             try:
                 while True:
-                    event = await ctx.queue.get()
+                    event = await subscriber.get()
                     if event is None:  # 哨兵：运行结束
                         break
                     yield format_sse_event(event)
@@ -1338,6 +1425,8 @@ def create_app(
                 # 客户端断开连接；记录日志，由 GC 收尾 RunContext
                 _logger.info("SSE 客户端断开 run %s", run_id)
                 raise
+            finally:
+                ctx.unsubscribe(subscriber)
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -1350,9 +1439,7 @@ def create_app(
             try:
                 # 同步 DB 查询放入线程池，避免 Postgres 延迟阻塞事件循环
                 meta = await asyncio.to_thread(metadata_store.get_thread, thread_id)
-                messages = await asyncio.to_thread(
-                    metadata_store.list_messages, thread_id, user_id
-                )
+                messages = await asyncio.to_thread(metadata_store.list_messages, thread_id, user_id)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,
@@ -1369,7 +1456,7 @@ def create_app(
         cs: Any = None
         checkpoint_available = False
         try:
-            cs = await _mem_aload_strict(mem, thread_id)
+            cs = await _mem_aload_strict(mem, thread_id, user_id=user_id)
             checkpoint_available = cs is not None
         except Exception as exc:  # noqa: BLE001
             _logger.warning("加载 thread %s checkpoint 失败（仅降级标记）: %s", thread_id, exc)
@@ -1396,6 +1483,8 @@ def create_app(
                 "risk_level": None,
                 "confidence": None,
                 "iteration": 0,
+                "reasoner_iteration": 0,
+                "retrieval_iteration": 0,
                 "final_output": None,
                 "facts_count": 0,
                 "statutes_count": 0,
@@ -1449,7 +1538,7 @@ def create_app(
                         detail="checkpoint 初始化失败",
                     ) from exc
             try:
-                await _mem_adelete_strict(mem, thread_id)
+                await _mem_adelete_strict(mem, thread_id, user_id=user_id)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,
@@ -1483,7 +1572,7 @@ def create_app(
                     detail="该会话仍在运行，请先终止运行",
                 )
             try:
-                await _mem_adelete_strict(mem, thread_id)
+                await _mem_adelete_strict(mem, thread_id, user_id=user_id)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,
@@ -1517,7 +1606,7 @@ def create_app(
             # 只向前端暴露仍可恢复的会话，避免点击历史记录后看到空白页。
             # C2 修复：使用异步方法避免同步 get_state 阻塞事件循环。
             try:
-                threads = await _mem_alist_threads_recoverable(mem)
+                threads = await _mem_alist_threads_recoverable(mem, user_id=user_id)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,
@@ -1645,11 +1734,9 @@ def create_app(
             from lvyan.config import settings as _settings
 
             try:
-                async with _get_conversion_semaphore():
-                    convert_result = await asyncio.wait_for(
-                        asyncio.to_thread(convert_to_markdown, raw_path),
-                        timeout=_settings.document_conversion_timeout_seconds,
-                    )
+                convert_result = await _convert_with_retained_slot(
+                    raw_path, _settings.document_conversion_timeout_seconds
+                )
             except asyncio.TimeoutError as exc:
                 raise HTTPException(
                     status_code=504,
@@ -1728,6 +1815,8 @@ def create_app(
         except Exception:
             # 清理本次产生的残留文件
             for path in created:
+                if path in _zombie_conversion_paths:
+                    continue
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:
@@ -1885,8 +1974,4 @@ def create_app(
     return app
 
 
-# 模块级默认应用，供 ``uvicorn lvyan.api.server:app`` 使用
-app = create_app()
-
-
-__all__ = ["create_app", "app"]
+__all__ = ["create_app"]

@@ -47,7 +47,12 @@ class RunContext:
         self.load_history: Any = load_history
         # 状态：started / running / awaiting_hitl / completed / failed / cancelled
         self.status: str = "started"
+        # ``queue`` 保留给内部测试/旧调用方；SSE 使用独立订阅队列广播，避免
+        # 多个客户端在同一 Queue 上竞争并各自只收到部分事件。
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
+        self._event_history: list[dict[str, Any]] = []
+        self._subscribers: set[asyncio.Queue[Any]] = set()
+        self._stream_closed = False
         self.final_output: str | None = None
         # 结构化法律输出（LegalAnswerV1 dict），与 final_output 并行
         self.legal_answer: dict[str, Any] | None = None
@@ -71,8 +76,39 @@ class RunContext:
         self.fail_code: str | None = None
 
     async def publish(self, event: dict[str, Any]) -> None:
-        """发布一个 SSE 事件到队列，供流式消费者读取。"""
+        """广播 SSE 事件，并保留本次 run 的有限重放历史。"""
+        if self._stream_closed:
+            _logger.debug("忽略已关闭 run %s 的迟到事件: %s", self.run_id, event.get("event"))
+            return
+        self._event_history.append(event)
         await self.queue.put(event)
+        for subscriber in tuple(self._subscribers):
+            await subscriber.put(event)
+
+    def subscribe(self) -> asyncio.Queue[Any]:
+        """注册独立订阅队列，并重放订阅前已产生的事件。"""
+        subscriber: asyncio.Queue[Any] = asyncio.Queue()
+        for event in self._event_history:
+            subscriber.put_nowait(event)
+        if self._stream_closed:
+            subscriber.put_nowait(None)
+        else:
+            self._subscribers.add(subscriber)
+        return subscriber
+
+    def unsubscribe(self, subscriber: asyncio.Queue[Any]) -> None:
+        """注销断开的 SSE 订阅者。"""
+        self._subscribers.discard(subscriber)
+
+    async def close(self) -> None:
+        """向旧队列及每个订阅者分别发送终态哨兵；可重复调用。"""
+        if self._stream_closed:
+            return
+        self._stream_closed = True
+        await self.queue.put(None)
+        for subscriber in tuple(self._subscribers):
+            await subscriber.put(None)
+        self._subscribers.clear()
 
     def poll_cancel(self) -> bool:
         """节流地检查跨实例取消请求。间隔内重复调用直接返回 False。

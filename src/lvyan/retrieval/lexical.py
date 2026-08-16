@@ -290,6 +290,7 @@ def _load_article_chunks() -> list[Any]:
     # 延迟导入避免循环依赖（manifest → lexical 会循环，但 manifest 内部
     # 用函数内 import 解 lexical._compute_chunk_signature，此处安全）。
     cache_trusted = True
+    check: dict[str, Any] = {}
     try:
         from lvyan.retrieval.manifest import ensure_corpus_ready
 
@@ -313,6 +314,10 @@ def _load_article_chunks() -> list[Any]:
             result = SafeIndexStore.load(
                 _ARTICLE_INDEX_LVIX,
                 expected_schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+                expected_corpus_hash=str(
+                    (check.get("manifest") or {}).get("chunks_signature") or ""
+                )
+                or None,
             )
             if result is not None:
                 cached_data = result["data"]
@@ -616,6 +621,7 @@ def _load_or_build_global_bm25_index(chunks: list[Any]) -> dict[str, Any]:
             result = SafeIndexStore.load(
                 _BM25_INDEX_LVIX,
                 expected_schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
+                expected_corpus_hash=expected_sig,
             )
             if result is not None:
                 raw = result["data"]

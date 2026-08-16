@@ -146,3 +146,93 @@ async def test_alist_releases_lock_before_iteration(monkeypatch):
         # 消费期间再次调用（锁必须可用，否则死锁）
         await saver.aget(_config())
     assert consumed == [{"config": _config()}]
+
+
+class _DeleteSaver(_FakeSaver):
+    def __init__(self) -> None:
+        super().__init__()
+        self.deleted: list[str] = []
+
+    def delete_thread(self, thread_id: str) -> None:
+        self.deleted.append(thread_id)
+
+
+@pytest.mark.asyncio
+async def test_adelete_thread_sets_tenant_and_clears(monkeypatch):
+    monkeypatch.setenv("RLS_ENFORCED", "true")
+    from lvyan.db.tenant_saver import TenantAwareCheckpointer
+
+    inner = _DeleteSaver()
+    saver = TenantAwareCheckpointer(inner)
+    await saver.adelete_thread("thread-a", _config())
+
+    assert inner.deleted == ["thread-a"]
+    assert inner.conn.calls == [
+        ("SELECT set_config('app.user_id', %s, false)", ("user-a",)),
+        ("SELECT set_config('app.user_id', '', false)", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adelete_thread_rejects_missing_tenant_when_enforced(monkeypatch):
+    monkeypatch.setenv("RLS_ENFORCED", "true")
+    from lvyan.db.tenant_saver import TenantAwareCheckpointer
+
+    saver = TenantAwareCheckpointer(_DeleteSaver())
+    with pytest.raises(ValueError, match="user_id"):
+        await saver.adelete_thread("thread-a")
+
+
+@pytest.mark.asyncio
+async def test_async_delete_thread_does_not_bypass_wrapper(monkeypatch):
+    monkeypatch.setenv("RLS_ENFORCED", "true")
+    from lvyan.db.tenant_saver import TenantAwareCheckpointer
+
+    saver = TenantAwareCheckpointer(_DeleteSaver())
+    with pytest.raises(RuntimeError, match="adelete_thread"):
+        saver.delete_thread("thread-a", _config())
+
+
+class _FakeSyncConn:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def execute(self, query: object, params: object = None) -> None:
+        q = query.as_string(None) if hasattr(query, "as_string") else str(query)
+        self.calls.append((q, params))
+
+
+class _FakeSyncSaver:
+    def __init__(self) -> None:
+        self.conn = _FakeSyncConn()
+        self.deleted: list[str] = []
+
+    def delete_thread(self, thread_id: str) -> None:
+        self.deleted.append(thread_id)
+
+    def get(self, config: dict):
+        return config
+
+
+def test_sync_delete_thread_sets_tenant_when_enforced(monkeypatch):
+    monkeypatch.setenv("RLS_ENFORCED", "true")
+    from lvyan.db.tenant_saver import SyncTenantAwareCheckpointer
+
+    inner = _FakeSyncSaver()
+    saver = SyncTenantAwareCheckpointer(inner)
+    saver.delete_thread("thread-a", _config())
+
+    assert inner.deleted == ["thread-a"]
+    assert inner.conn.calls == [
+        ("SELECT set_config('app.user_id', %s, false)", ("user-a",)),
+        ("SELECT set_config('app.user_id', '', false)", None),
+    ]
+
+
+def test_sync_delete_thread_rejects_missing_tenant_when_enforced(monkeypatch):
+    monkeypatch.setenv("RLS_ENFORCED", "true")
+    from lvyan.db.tenant_saver import SyncTenantAwareCheckpointer
+
+    saver = SyncTenantAwareCheckpointer(_FakeSyncSaver())
+    with pytest.raises(ValueError, match="user_id"):
+        saver.delete_thread("thread-a")

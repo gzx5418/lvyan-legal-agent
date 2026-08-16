@@ -27,6 +27,7 @@ import operator
 from datetime import date
 from typing import Annotated, Any, Literal, TypedDict
 
+from lvyan.common.helpers import authority_score
 from lvyan.schemas.authority import Authority
 from lvyan.schemas.case import (
     DocumentRef,
@@ -80,16 +81,6 @@ def merge_retrieval_queries(
     return [merged[k] for k in order]
 
 
-def _authority_score(item: object) -> float:
-    """取 Authority 三路分数的最大值（缺失视为 0）。"""
-    scores = (
-        float(_get_attr(item, "rerank_score", 0.0) or 0.0),
-        float(_get_attr(item, "dense_score", 0.0) or 0.0),
-        float(_get_attr(item, "lexical_score", 0.0) or 0.0),
-    )
-    return max(scores)
-
-
 def merge_authorities(old: list[Authority], new: list[Authority]) -> list[Authority]:
     """Authority 按 (source_id, article_number) 去重，保留分数更高者。
 
@@ -108,7 +99,7 @@ def merge_authorities(old: list[Authority], new: list[Authority]) -> list[Author
             merged[key] = item
             continue
         existing = merged[key]
-        if _authority_score(item) > _authority_score(existing):
+        if authority_score(item) > authority_score(existing):
             merged[key] = item
     return [merged[k] for k in order]
 
@@ -198,7 +189,8 @@ class GraphState(TypedDict):
     覆盖语义字段：
         run_id, thread_id, current_date, user_goal, jurisdiction, case_type,
         complexity, reasoning_result, citation_audit, critic_report,
-        critic_feedback, risk_level, confidence, iteration, final_output,
+        critic_feedback, risk_level, confidence, iteration,
+        reasoner_iteration, retrieval_iteration, final_output,
         pending_human_approval, output_iteration, output_retry_needed,
         document_payload
     """
@@ -255,7 +247,10 @@ class GraphState(TypedDict):
     confidence: Literal["high", "medium", "low", "insufficient"]
 
     # --- 迭代与产出（覆盖） ---
+    # 旧 checkpoint 兼容字段；新代码不再用它控制回退预算。
     iteration: int
+    reasoner_iteration: int
+    retrieval_iteration: int
     final_output: str | None
     # LegalAnswerV1 结构化输出（与 final_output 并行，供前端组件化渲染）
     legal_answer: dict | None

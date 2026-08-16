@@ -64,12 +64,12 @@ def _get_markitdown() -> Any:
 
 
 def _read_text_file(file_path: Path, max_chars: int = 50000) -> str:
-    """直接读取文本文件内容。"""
+    """有界读取文本文件，避免先完整载入超大文件再截断。"""
     for enc in ("utf-8", "gbk", "gb2312", "latin-1"):
         try:
-            text = file_path.read_text(encoding=enc)
-            return text[:max_chars]
-        except UnicodeDecodeError:
+            with file_path.open("r", encoding=enc) as handle:
+                return handle.read(max_chars)
+        except (UnicodeDecodeError, OSError):
             continue
     return ""
 

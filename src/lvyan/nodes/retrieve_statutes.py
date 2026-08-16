@@ -18,6 +18,8 @@ import logging
 import threading
 from typing import Any
 
+from lvyan.common.helpers import deduplicate_authorities as _dedup_authorities
+from lvyan.common.helpers import get_value as _get
 from lvyan.retrieval.reranker import rerank
 from lvyan.retrieval.version_aware import search_statutes
 from lvyan.schemas import Authority, CaseAuthority, CaseState, OnlineSource
@@ -36,47 +38,6 @@ _RERANK_POOL_MULTIPLIER = 2
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
-def _authority_score(auth: Authority) -> float:
-    """取 Authority 的最高分（lexical / dense / rerank）。"""
-    return max(
-        float(_get(auth, "lexical_score", 0.0) or 0.0),
-        float(_get(auth, "dense_score", 0.0) or 0.0),
-        float(_get(auth, "rerank_score", 0.0) or 0.0),
-    )
-
-
-def _dedup_authorities(authorities: list[Authority]) -> list[Authority]:
-    """按 ``source_id + article_number`` 去重，保留最高分版本。
-
-    - key 缺失 ``article_number`` 时，仅用 ``source_id`` 作为键。
-    - 同键多条时，保留分数最高者；分数相同保留先入者。
-    """
-    bucket: dict[str, Authority] = {}
-    order: list[str] = []
-    for auth in authorities:
-        source_id = str(_get(auth, "source_id", "") or "")
-        article_number = _get(auth, "article_number", None)
-        article_key = str(article_number) if article_number else ""
-        key = f"{source_id}::{article_key}"
-        if key not in bucket:
-            bucket[key] = auth
-            order.append(key)
-            continue
-        existing = bucket[key]
-        if _authority_score(auth) > _authority_score(existing):
-            bucket[key] = auth
-    return [bucket[k] for k in order]
-
-
 def _mark_plan_done(plan: list[Any], tools_to_complete: tuple[str, ...]) -> list[Any]:
     """将 plan 中匹配 ``tool`` 的 ``pending``/``running`` 步骤标记为 ``done``。
 

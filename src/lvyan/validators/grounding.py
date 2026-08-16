@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from lvyan.common.helpers import get_value as _get
 from lvyan.validators.citation import (
     _char_bigrams,
     _extract_citations,
@@ -71,15 +72,6 @@ _GROUNDING_COMMON_THRESHOLD = 2
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
 def _truncate(text: str, max_len: int = 80) -> str:
     """截断文本到指定长度，末尾加省略号。"""
     if len(text) <= max_len:

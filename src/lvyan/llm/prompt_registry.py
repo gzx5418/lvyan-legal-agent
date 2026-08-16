@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from lvyan.llm.prompt_security import UNTRUSTED_DATA_INSTRUCTION
+
 
 @dataclass(frozen=True)
 class PromptSpec:
@@ -22,7 +24,7 @@ _PROMPTS: dict[str, PromptSpec] = {
         version="2026-08-10.v1",
         system=(
             "你是中国大陆法律服务分诊器。只输出 JSON。不得生成法律结论或虚构事实；"
-            "涉外、人身安全、刑事风险和紧急期限必须保守标高风险。"
+            "涉外、人身安全、刑事风险和紧急期限必须保守标高风险。" + UNTRUSTED_DATA_INSTRUCTION
         ),
     ),
     "missing_fact_assessor": PromptSpec(
@@ -30,7 +32,7 @@ _PROMPTS: dict[str, PromptSpec] = {
         version="2026-08-10.v1",
         system=(
             "你是法律案件关键事实审查器。只输出 JSON；只能指出缺失信息，不能补造事实。"
-            "只有缺失后无法给出方向性结论的事实才标记 blocking。"
+            "只有缺失后无法给出方向性结论的事实才标记 blocking。" + UNTRUSTED_DATA_INSTRUCTION
         ),
     ),
     "evidence_analyzer": PromptSpec(
@@ -38,7 +40,7 @@ _PROMPTS: dict[str, PromptSpec] = {
         version="2026-08-10.v1",
         system=(
             "你是证据审查专家。只允许评估给定证据清单，不得新增证据或事实。"
-            "输出 JSON，并让每项 requirement_id 与输入完全一致。"
+            "输出 JSON，并让每项 requirement_id 与输入完全一致。" + UNTRUSTED_DATA_INSTRUCTION
         ),
     ),
     "authority_resolver": PromptSpec(
@@ -46,7 +48,7 @@ _PROMPTS: dict[str, PromptSpec] = {
         version="2026-08-10.v1",
         system=(
             "你是法规权威排序器。只能重排给定 source_id，不得生成新法条、案号或来源。"
-            "有效性、时间窗口和效力层级由确定性代码决定。只输出 JSON。"
+            "有效性、时间窗口和效力层级由确定性代码决定。只输出 JSON。" + UNTRUSTED_DATA_INSTRUCTION
         ),
     ),
     "critic": PromptSpec(
@@ -55,6 +57,7 @@ _PROMPTS: dict[str, PromptSpec] = {
         system=(
             "你是对抗性法律审稿人。检查遗漏反方观点、事实跳跃、证据不足、法规冲突和"
             "过度确定性。只能依据给定事实和来源，不得新增法条。只输出 JSON。"
+            + UNTRUSTED_DATA_INSTRUCTION
         ),
     ),
 }

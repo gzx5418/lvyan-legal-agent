@@ -13,10 +13,14 @@
 from __future__ import annotations
 
 import hashlib
-import uuid
 from collections import defaultdict
 from typing import Any
 
+from lvyan.common.helpers import (
+    authority_score as _authority_score,
+    deduplicate_authorities as _dedup_authorities,
+    get_value as _get,
+)
 from lvyan.nodes.triage import is_personal_information_dispute
 from lvyan.retrieval.version_aware import verify_statute_status as _verify_status
 from lvyan.schemas import Authority, AuthorityConflict, CaseState, EvidenceRequirement
@@ -44,20 +48,6 @@ _DEFAULT_LEVEL_ORDER = 99
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
-def _short_id() -> str:
-    """生成 8 位短 id（uuid4 hex 前缀）。"""
-    return uuid.uuid4().hex[:8]
-
-
 def _stable_requirement_id(fact_to_prove: str, evidence_types: list[str]) -> str:
     """由待证事实 + 证据类型派生确定性 requirement_id。
 
@@ -78,15 +68,6 @@ def _stable_conflict_id(conflict_type: str, authority_ids: list[str]) -> str:
         f"{conflict_type}::{'|'.join(sorted(authority_ids))}".encode("utf-8")
     ).hexdigest()[:12]
     return f"conflict-{digest}"
-
-
-def _authority_score(auth: Authority) -> float:
-    """取 Authority 的最高分（lexical / dense / rerank）。"""
-    return max(
-        float(_get(auth, "lexical_score", 0.0) or 0.0),
-        float(_get(auth, "dense_score", 0.0) or 0.0),
-        float(_get(auth, "rerank_score", 0.0) or 0.0),
-    )
 
 
 def _level_weight(level: str | None) -> int:
@@ -226,6 +207,7 @@ def _llm_refine_evidence(
 ) -> list[EvidenceRequirement]:
     """仅在既有清单内修正证据状态；任何未知 requirement_id 都会被丢弃。"""
     from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_security import delimit_untrusted
     from lvyan.llm.prompt_registry import get_prompt
     from lvyan.observability.metrics import record_llm_fallback
 
@@ -244,7 +226,8 @@ def _llm_refine_evidence(
                 {
                     "role": "user",
                     "content": (
-                        f"已知事实和证据：{fact_text or '无'}\n证据清单：{input_items}\n"
+                        f"{delimit_untrusted(fact_text or '无', 'facts')}\n"
+                        f"{delimit_untrusted(input_items, 'evidence_requirements')}\n"
                         '输出 {"items":[{"requirement_id":"原ID",'
                         '"current_status":"met|partial|missing","gap_description":"说明或null"}]}'
                     ),
@@ -285,25 +268,6 @@ def _llm_refine_evidence(
 # ---------------------------------------------------------------------------
 # SubTask 11.4: authority_resolver
 # ---------------------------------------------------------------------------
-def _dedup_authorities(authorities: list[Authority]) -> list[Authority]:
-    """按 ``source_id + article_number`` 去重，保留最高分版本。"""
-    bucket: dict[str, Authority] = {}
-    order: list[str] = []
-    for auth in authorities:
-        source_id = str(_get(auth, "source_id", "") or "")
-        article_number = _get(auth, "article_number", None)
-        article_key = str(article_number) if article_number else ""
-        key = f"{source_id}::{article_key}"
-        if key not in bucket:
-            bucket[key] = auth
-            order.append(key)
-            continue
-        existing = bucket[key]
-        if _authority_score(auth) > _authority_score(existing):
-            bucket[key] = auth
-    return [bucket[k] for k in order]
-
-
 def _sort_by_authority_level(authorities: list[Authority]) -> list[Authority]:
     """按 ``authority_level`` 升序排序（位阶高者在前）。
 
@@ -527,6 +491,7 @@ def _authority_key(authority: Authority) -> str:
 def _llm_rank_authorities(authorities: list[Authority], user_goal: str) -> list[Authority]:
     """在确定性效力层级内重排候选，禁止 LLM 创建或跨层级提升来源。"""
     from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_security import delimit_untrusted
     from lvyan.llm.prompt_registry import get_prompt
     from lvyan.observability.metrics import record_llm_fallback
 
@@ -553,7 +518,11 @@ def _llm_rank_authorities(authorities: list[Authority], user_goal: str) -> list[
                 {"role": "system", "content": f"{spec.system}\nprompt_version={spec.version}"},
                 {
                     "role": "user",
-                    "content": f'用户问题：{user_goal}\n候选：{candidates}\n输出 {{"ordered_ids":["原ID"]}}',
+                    "content": (
+                        f"{delimit_untrusted(user_goal, 'user_input')}\n"
+                        f"{delimit_untrusted(candidates, 'candidates')}\n"
+                        '输出 {"ordered_ids":["原ID"]}'
+                    ),
                 },
             ],
             temperature=0.0,

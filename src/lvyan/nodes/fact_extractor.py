@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
 from typing import Any
 
+from lvyan.common.helpers import get_value as _get, short_id as _short_id
 from lvyan.nodes.triage import is_personal_information_dispute
 from lvyan.schemas import CaseState, Fact, MissingFact, TimelineEvent
 
@@ -267,20 +267,6 @@ _FACT_KEY_HINTS: dict[str, tuple[str, ...]] = {
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
-def _short_id() -> str:
-    """生成 8 位短 id（uuid4 hex 前缀）。"""
-    return uuid.uuid4().hex[:8]
-
-
 def _extract_amounts(text: str) -> list[Fact]:
     """抽取金额事实。"""
     facts: list[Fact] = []
@@ -473,22 +459,21 @@ def _try_llm_extract_facts(
         ``(facts, timeline)`` 或 ``None``（LLM 不可用/输出无效时）。
     """
     from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_security import UNTRUSTED_DATA_INSTRUCTION, delimit_untrusted
 
     if not llm_available() or not user_goal.strip():
         return None
 
     case_hint = f"案由：{case_type}" if case_type else "案由待定"
-    context_block = (
-        f"\n相关材料摘要：\n{attachment_context}\n" if attachment_context.strip() else ""
-    )
-    history_block = (
-        f"\n此前对话摘要：\n{conversation_summary}\n" if conversation_summary.strip() else ""
-    )
+    context_block = delimit_untrusted(attachment_context, "attachment")
+    history_block = delimit_untrusted(conversation_summary, "history")
     system_prompt = (
         "你是法律事实抽取助手。从用户描述中抽取结构化事实与时间线。只输出 JSON，不要解释。"
+        + UNTRUSTED_DATA_INSTRUCTION
     )
     user_prompt = (
-        f"{case_hint}\n用户描述：{user_goal}\n{context_block}{history_block}\n"
+        f"{case_hint}\n{delimit_untrusted(user_goal, 'user_input')}\n"
+        f"{context_block}\n{history_block}\n"
         "请抽取事实并输出 JSON，格式：\n"
         '{"facts": [{"category": "金额|时间|当事人|行为|其他", '
         '"content": "具体内容", "confidence": 0.0-1.0}], '

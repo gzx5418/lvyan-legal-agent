@@ -24,18 +24,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from lvyan.common.helpers import get_value as _get
 from lvyan.schemas import CaseState
 
 _logger = logging.getLogger("lvyan.nodes.legal_answer_finalizer")
 
 __all__ = ["legal_answer_finalizer"]
-
-
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """安全读取 dict 或 Pydantic 模型的属性。"""
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
 
 
 def _redact_string_fields(answer: dict[str, Any]) -> dict[str, Any]:

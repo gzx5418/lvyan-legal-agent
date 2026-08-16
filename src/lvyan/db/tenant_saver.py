@@ -25,12 +25,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
+import threading
 from typing import Any, Optional, Sequence
 
 _logger = logging.getLogger("lvyan.db.tenant_saver")
 
-__all__ = ["TenantAwareCheckpointer"]
+__all__ = ["TenantAwareCheckpointer", "SyncTenantAwareCheckpointer"]
 
 
 class TenantAwareCheckpointer:
@@ -42,12 +42,9 @@ class TenantAwareCheckpointer:
             inner: LangGraph AsyncPostgresSaver 或兼容的 checkpointer 实例。
         """
         self._inner = inner
-        self._rls_enforced = os.getenv("RLS_ENFORCED", "false").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        from lvyan.config import is_rls_enforced
+
+        self._rls_enforced = is_rls_enforced()
         # AsyncPostgresSaver 复用单一连接。tenant context 是连接级状态，必须把
         # “设置 user_id + 执行 saver 操作”串行化，避免并发请求串租户。
         self._tenant_lock = asyncio.Lock()
@@ -57,9 +54,9 @@ class TenantAwareCheckpointer:
         """获取底层 checkpointer（用于 setup/health check 等无需 RLS 的操作）。"""
         return self._inner
 
-    def _extract_user_id(self, config: dict[str, Any]) -> str | None:
+    def _extract_user_id(self, config: dict[str, Any] | None) -> str | None:
         """从 LangGraph config 中提取 user_id。"""
-        configurable = config.get("configurable", {})
+        configurable = (config or {}).get("configurable", {})
         user_id = configurable.get("user_id")
         if not user_id and self._rls_enforced:
             raise ValueError(
@@ -93,7 +90,9 @@ class TenantAwareCheckpointer:
                     "RLS_ENFORCED=true 但无法取得 checkpointer 底层连接以注入 app.user_id，"
                     "拒绝执行操作（fail-closed）"
                 )
-            _logger.warning("无法取得 checkpointer 底层连接，跳过租户上下文注入（RLS_ENFORCED=false）")
+            _logger.warning(
+                "无法取得 checkpointer 底层连接，跳过租户上下文注入（RLS_ENFORCED=false）"
+            )
             return
 
         try:
@@ -208,6 +207,39 @@ class TenantAwareCheckpointer:
         for item in items:
             yield item
 
+    async def adelete_thread(
+        self,
+        thread_id: str,
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        """删除 thread 的全部 checkpoint（带 RLS 上下文）。"""
+        user_id = self._extract_user_id(config)
+        async with self._tenant_lock:
+            await self._set_context(user_id)
+            try:
+                delete = getattr(self._inner, "delete_thread", None)
+                if not callable(delete):
+                    raise RuntimeError("checkpointer delete_thread unavailable")
+                result = delete(thread_id)
+                if hasattr(result, "__await__"):
+                    await result
+            finally:
+                await self._clear_context()
+
+    def delete_thread(
+        self,
+        thread_id: str,
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        """阻止经 ``__getattr__`` 漏到未注入租户的底层 ``delete_thread``。
+
+        异步包装器必须走 ``adelete_thread``：同步调用既无法使用
+        ``asyncio.Lock``，也会在运行中的事件循环里死锁。
+        """
+        raise RuntimeError(
+            "TenantAwareCheckpointer 请使用 await adelete_thread(thread_id, config=...)"
+        )
+
     async def setup(self) -> None:
         """初始化 checkpointer schema，并在强制模式下安装 checkpoint RLS。"""
         if hasattr(self._inner, "setup"):
@@ -226,4 +258,135 @@ class TenantAwareCheckpointer:
 
     def __getattr__(self, name: str) -> Any:
         """透传未覆盖的属性到底层 saver。"""
+        return getattr(self._inner, name)
+
+
+class SyncTenantAwareCheckpointer:
+    """同步 PostgresSaver 的租户上下文包装器，供 CLI/invoke 路径使用。"""
+
+    def __init__(self, inner: Any) -> None:
+        from lvyan.config import is_rls_enforced
+
+        self._inner = inner
+        self._rls_enforced = is_rls_enforced()
+        self._tenant_lock = threading.RLock()
+
+    @property
+    def inner(self) -> Any:
+        return self._inner
+
+    def _extract_user_id(self, config: dict[str, Any] | None) -> str | None:
+        user_id = (config or {}).get("configurable", {}).get("user_id")
+        if not user_id and self._rls_enforced:
+            raise ValueError("RLS_ENFORCED=true 时同步 checkpointer 操作必须携带 user_id")
+        return user_id
+
+    def _get_conn(self) -> Any | None:
+        return getattr(self._inner, "conn", None) or getattr(self._inner, "_conn", None)
+
+    def _set_context(self, user_id: str | None) -> None:
+        if not user_id:
+            return
+        conn = self._get_conn()
+        if conn is None:
+            if self._rls_enforced:
+                raise RuntimeError("无法取得同步 checkpointer 连接以注入 app.user_id")
+            _logger.warning(
+                "无法取得同步 checkpointer 底层连接，跳过租户上下文注入（RLS_ENFORCED=false）"
+            )
+            return
+        try:
+            conn.execute("SELECT set_config('app.user_id', %s, false)", (user_id,))
+        except Exception as exc:  # noqa: BLE001 boundary-exception: 设置上下文失败
+            _logger.warning("设置同步租户上下文失败: %s", exc)
+            if self._rls_enforced:
+                raise
+
+    def _clear_context(self) -> None:
+        conn = self._get_conn()
+        if conn is None:
+            return
+        try:
+            conn.execute("SELECT set_config('app.user_id', '', false)")
+        except Exception as exc:  # noqa: BLE001 boundary-exception: 清除上下文失败
+            _logger.warning("清除同步租户上下文失败: %s", exc)
+
+    def _call(self, method: str, config: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+        user_id = self._extract_user_id(config)
+        with self._tenant_lock:
+            self._set_context(user_id)
+            try:
+                return getattr(self._inner, method)(config, *args, **kwargs)
+            finally:
+                self._clear_context()
+
+    def get(self, config: dict[str, Any]) -> Any:
+        return self._call("get", config)
+
+    def get_tuple(self, config: dict[str, Any]) -> Any:
+        return self._call("get_tuple", config)
+
+    def put(
+        self,
+        config: dict[str, Any],
+        checkpoint: Any,
+        metadata: Any = None,
+        new_versions: Any = None,
+    ) -> Any:
+        return self._call("put", config, checkpoint, metadata, new_versions)
+
+    def put_writes(
+        self,
+        config: dict[str, Any],
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> Any:
+        return self._call("put_writes", config, writes, task_id, task_path)
+
+    def list(
+        self,
+        config: Optional[dict[str, Any]] = None,
+        *,
+        filter: Optional[dict[str, Any]] = None,
+        before: Optional[dict[str, Any]] = None,
+        limit: int | None = None,
+    ) -> Any:
+        user_id = self._extract_user_id(config)
+        with self._tenant_lock:
+            self._set_context(user_id)
+            try:
+                items = list(self._inner.list(config, filter=filter, before=before, limit=limit))
+            finally:
+                self._clear_context()
+        yield from items
+
+    def delete_thread(
+        self,
+        thread_id: str,
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        user_id = self._extract_user_id(config)
+        with self._tenant_lock:
+            self._set_context(user_id)
+            try:
+                delete = getattr(self._inner, "delete_thread", None)
+                if not callable(delete):
+                    raise RuntimeError("checkpointer delete_thread unavailable")
+                delete(thread_id)
+            finally:
+                self._clear_context()
+
+    def setup(self) -> None:
+        if hasattr(self._inner, "setup"):
+            self._inner.setup()
+        if self._rls_enforced:
+            conn = self._get_conn()
+            if conn is None:
+                raise RuntimeError("RLS_ENFORCED=true 但无法取得同步 checkpointer 数据库连接")
+            from lvyan.db.checkpoint_rls import ensure_checkpoint_rls_sync
+
+            ensure_checkpoint_rls_sync(conn)
+
+    def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
