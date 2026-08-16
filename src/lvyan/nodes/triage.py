@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 import re
 
+from lvyan.common.helpers import get_value as _get
 from lvyan.schemas import CaseState, MissingFact
 
 __all__ = ["is_personal_information_dispute", "jurisdiction_triage"]
@@ -101,15 +102,6 @@ _COMPLEXITY_DOCUMENT_KEYWORDS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
 def is_personal_information_dispute(*texts: str) -> bool:
     """判断上下文是否指向个人信息、隐私或健康信息被不当处理。"""
     combined = "\n".join(str(text or "") for text in texts)
@@ -168,6 +160,7 @@ def _detect_complexity(user_goal: str) -> str:
 def _try_llm_triage(user_goal: str, conversation_summary: str) -> dict[str, str | None] | None:
     """LLM 语义分诊；输出必须落入封闭枚举，安全规则仍拥有最终优先级。"""
     from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_security import delimit_untrusted
     from lvyan.llm.prompt_registry import get_prompt
     from lvyan.observability.metrics import record_llm_fallback
 
@@ -182,7 +175,8 @@ def _try_llm_triage(user_goal: str, conversation_summary: str) -> dict[str, str 
                 {
                     "role": "user",
                     "content": (
-                        f"当前问题：{user_goal}\n历史摘要：{conversation_summary[:2000]}\n"
+                        f"{delimit_untrusted(user_goal, 'user_input')}\n"
+                        f"{delimit_untrusted(conversation_summary, 'history', max_chars=2000)}\n"
                         '输出 {"jurisdiction":"中国大陆|港澳台/涉外",'
                         '"case_type":"工伤认定|劳动争议|合同纠纷|侵权纠纷|婚姻家庭|'
                         '知识产权|其他|null","complexity":"light|deep|document",'

@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from lvyan.common.helpers import get_value as _get
 from lvyan.retrieval.attachment_ranker import rank_chunks
 from lvyan.schemas.attachment import AttachmentChunk
 from lvyan.tools.attachment_chunker import chunk_attachment_markdown
@@ -17,14 +18,6 @@ from lvyan.tools.attachment_chunker import chunk_attachment_markdown
 __all__ = ["attachment_retriever"]
 
 _logger = logging.getLogger("lvyan.nodes.attachment_retriever")
-
-
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
 
 
 def _load_markdown(stored_path: str) -> str:

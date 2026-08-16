@@ -150,7 +150,11 @@ class CaseState(BaseModel):
     confidence: Literal["high", "medium", "low", "insufficient"] = "insufficient"
 
     # --- 迭代与产出 ---
+    # ``iteration`` 仅为旧 checkpoint 兼容字段；两个回退环路必须使用各自
+    # 独立计数器，避免 critic 重试侵蚀 citation 重检索预算（反之亦然）。
     iteration: int = 0
+    reasoner_iteration: int = 0
+    retrieval_iteration: int = 0
     final_output: str | None = None
 
 

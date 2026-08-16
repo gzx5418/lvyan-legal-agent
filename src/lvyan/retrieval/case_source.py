@@ -139,7 +139,10 @@ class CuratedCaseSource(CaseSource):
         """简单关键词匹配搜索（精编库数量少，无需向量化）。"""
         self._load()
 
-        query_lower = query.lower()
+        from lvyan.retrieval.lexical import _bm25_tokenize
+
+        query_lower = query.lower().strip()
+        query_terms = set(_bm25_tokenize(query_lower))
         scored: list[tuple[float, dict[str, Any]]] = []
 
         for case in self._cases:
@@ -153,10 +156,11 @@ class CuratedCaseSource(CaseSource):
                 ]
             ).lower()
 
-            # 简单 TF 评分
-            for term in query_lower.split():
-                if term in searchable:
-                    score += 1.0
+            # 中文查询通常没有空格；使用领域词 + CJK bigram 计算重叠。
+            searchable_terms = set(_bm25_tokenize(searchable))
+            score += float(len(query_terms & searchable_terms))
+            if query_lower and query_lower in searchable:
+                score += 2.0
 
             if score > 0:
                 scored.append((score, case))

@@ -10,7 +10,7 @@
 
 用法
 ----
-    from lvyan.runtime.concurrency import llm_semaphore, retrieval_semaphore
+    from lvyan.infra.concurrency import llm_semaphore, retrieval_semaphore
 
     async with llm_semaphore:
         response = await llm.invoke(messages)
@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from contextlib import asynccontextmanager
 from collections.abc import Callable
@@ -41,6 +40,9 @@ __all__ = [
 
 class InstrumentedSemaphore:
     """带监控的异步信号量。
+
+    ``_active`` / ``_waiting`` 仅在单一事件循环内更新，没有额外锁；
+    不得从同步线程或其它 loop 读写这些计数。
 
     记录：
     - 当前活跃数
@@ -74,36 +76,16 @@ class InstrumentedSemaphore:
     @asynccontextmanager
     async def acquire(self) -> AsyncGenerator[None, None]:
         """获取信号量（带监控）。"""
-        self._waiting += 1
-        start = time.perf_counter()
-
-        try:
-            await self._semaphore.acquire()
-        finally:
-            self._waiting -= 1
-
-        wait_time = time.perf_counter() - start
-        self._active += 1
-
-        if wait_time > 1.0:
-            _logger.warning(
-                "%s 信号量等待 %.2fs (active=%d/%d, waiting=%d)",
-                self._name,
-                wait_time,
-                self._active,
-                self._limit,
-                self._waiting,
-            )
-
+        await self.__aenter__()
         try:
             yield
         finally:
-            self._active -= 1
-            self._semaphore.release()
+            await self.__aexit__()
 
     async def __aenter__(self) -> "InstrumentedSemaphore":
         self._waiting += 1
         start = time.perf_counter()
+
         try:
             await self._semaphore.acquire()
         finally:
@@ -121,6 +103,7 @@ class InstrumentedSemaphore:
                 self._limit,
                 self._waiting,
             )
+
         return self
 
     async def __aexit__(self, *args: object) -> None:
@@ -137,7 +120,9 @@ def get_llm_semaphore() -> InstrumentedSemaphore:
     """获取 LLM 并发信号量。"""
     global _llm_sem
     if _llm_sem is None:
-        limit = int(os.getenv("MAX_LLM_CONCURRENCY", "10"))
+        from lvyan.config import settings
+
+        limit = settings.max_llm_concurrency
         _llm_sem = InstrumentedSemaphore("llm", limit)
         _logger.info("LLM 信号量初始化: limit=%d", limit)
     return _llm_sem
@@ -147,7 +132,9 @@ def get_retrieval_semaphore() -> InstrumentedSemaphore:
     """获取检索并发信号量。"""
     global _retrieval_sem
     if _retrieval_sem is None:
-        limit = int(os.getenv("MAX_RETRIEVAL_CONCURRENCY", "20"))
+        from lvyan.config import settings
+
+        limit = settings.max_retrieval_concurrency
         _retrieval_sem = InstrumentedSemaphore("retrieval", limit)
         _logger.info("检索信号量初始化: limit=%d", limit)
     return _retrieval_sem

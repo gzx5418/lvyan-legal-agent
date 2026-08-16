@@ -133,7 +133,7 @@ class RunManager:
         # （curl/第三方集成）会在 await queue.get() 上永久阻塞，服务端为每个
         # 失败 run 维持一个悬挂连接。_drive/_resume_drive 的 finally 排除了
         # failed 状态，关闭责任在此。
-        await ctx.queue.put(None)
+        await ctx.close()
 
     async def _cancel_context(
         self,
@@ -163,7 +163,7 @@ class RunManager:
         )
         await self._aappend_message(ctx, "assistant", message)
         await ctx.publish({"event": "cancelled", "message": message})
-        await ctx.queue.put(None)
+        await ctx.close()
         if not persisted:
             return (
                 "unavailable",
@@ -498,7 +498,7 @@ class RunManager:
             self._stop_cancel_watcher(cancel_watcher)
             # 仅在非中断且未取消时关闭 SSE 流（取消路径由 _cancel_context 关闭）
             if not interrupted and ctx.status not in {"cancelled", "failed"}:
-                await ctx.queue.put(None)
+                await ctx.close()
 
     # ------------------------------------------------------------------
     # 查询
@@ -700,8 +700,8 @@ class RunManager:
                     resume_payload["edited_output"] = request.edited_output
 
                 claim_status, _claim = await asyncio.to_thread(
-                self._claim_hitl, run_id, current_user_id
-            )
+                    self._claim_hitl, run_id, current_user_id
+                )
                 if claim_status == "forbidden":
                     self._runs.pop(run_id, None)
                     return ("forbidden", f"run {run_id} 不属于当前用户")
@@ -839,7 +839,7 @@ class RunManager:
             self._stop_cancel_watcher(cancel_watcher)
             # 仅在非中断且未取消时关闭 SSE 流（取消路径由 _cancel_context 关闭）
             if not interrupted and ctx.status not in {"cancelled", "failed"}:
-                await ctx.queue.put(None)
+                await ctx.close()
 
     async def cancel_run(
         self,

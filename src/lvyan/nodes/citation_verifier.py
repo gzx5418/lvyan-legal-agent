@@ -20,6 +20,7 @@ import logging
 from datetime import date
 from typing import Any
 
+from lvyan.common.helpers import get_compat_counter, get_value as _get
 from lvyan.config import settings
 from lvyan.retrieval.query_rewriter import rewrite_for_reretrieval
 from lvyan.schemas import CaseState, RetrievalQuery
@@ -41,15 +42,6 @@ __all__ = ["citation_verifier"]
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
 def _to_date(value: Any) -> date | None:
     """把任意值转换为 ``date``，无法转换时返回 ``None``。"""
     if value is None:
@@ -287,7 +279,7 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
     4. 若 ``passed=False`` 且 ``iteration < settings.max_retrieval_iterations``：
        - 调用 :func:`rewrite_for_reretrieval` 改写最后一条查询
        - 追加新的 :class:`RetrievalQuery` 到 ``retrieval_queries``
-       - ``iteration += 1``
+       - ``retrieval_iteration += 1``
        - 由 ``route_after_citation`` 路由回 ``parallel_retrieval``
     5. 若 ``passed=False`` 且已达迭代上限：
        - 标记 ``risk_level="high"`` / ``confidence="insufficient"``
@@ -296,7 +288,7 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
     返回更新字典（覆盖语义）：
         - ``citation_audit``: dict（CitationAudit 序列化）
         - ``retrieval_queries``: list[RetrievalQuery]（重检索时追加）
-        - ``iteration``: int（重检索时 +1）
+        - ``retrieval_iteration``: int（重检索时 +1）
         - ``risk_level``: str（达到上限时设为 "high"）
         - ``confidence``: str（达到上限时设为 "insufficient"）
     """
@@ -306,7 +298,7 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
     current_date = _to_date(_get(state, "current_date", None))
     law_as_of_date = _to_date(_get(state, "law_as_of_date", None))
     validation_date = law_as_of_date or current_date
-    iteration = int(_get(state, "iteration", 0) or 0)
+    retrieval_iteration = get_compat_counter(state, "retrieval_iteration")
     retrieval_queries = list(_get(state, "retrieval_queries", []) or [])
     user_goal = str(_get(state, "user_goal", "") or "")
     # Composer output is the user-visible authority. Validate it directly when
@@ -428,7 +420,7 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
         grounding_report,
     )
     audit = _summarize_audit(
-        details, citation_report, authority_report, grounding_report, iteration
+        details, citation_report, authority_report, grounding_report, retrieval_iteration
     )
 
     passed = audit.passed
@@ -436,13 +428,13 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
     max_iterations = min(settings.max_retrieval_iterations, 2)
 
     # --- 3. 不通过且未达上限：触发重检索 ---
-    if not passed and iteration < max_iterations:
+    if not passed and retrieval_iteration < max_iterations:
         # 改写查询
         original_query = _select_query_for_rewrite(retrieval_queries, user_goal)
-        rewritten = rewrite_for_reretrieval(original_query, iteration + 1)
+        rewritten = rewrite_for_reretrieval(original_query, retrieval_iteration + 1)
 
         new_query = RetrievalQuery(
-            query_id=f"rq-reretrieval-{iteration + 1}",
+            query_id=f"rq-reretrieval-{retrieval_iteration + 1}",
             query_text=rewritten,
             rewritten=original_query if original_query != rewritten else None,
             route="hybrid",
@@ -451,16 +443,17 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
         retrieval_queries.append(new_query)
 
         # 更新 audit 的 reretrieval_count
-        audit = audit.model_copy(update={"reretrieval_count": iteration + 1})
+        audit = audit.model_copy(update={"reretrieval_count": retrieval_iteration + 1})
 
         return {
             "citation_audit": audit.model_dump(),
             "retrieval_queries": retrieval_queries,
-            "iteration": iteration + 1,
+            "retrieval_iteration": retrieval_iteration + 1,
+            "iteration": retrieval_iteration + 1,
         }
 
     # --- 4. 不通过且已达上限：强制通过，标记高风险 ---
-    if not passed and iteration >= max_iterations:
+    if not passed and retrieval_iteration >= max_iterations:
         return {
             "citation_audit": audit.model_dump(),
             "risk_level": "high",

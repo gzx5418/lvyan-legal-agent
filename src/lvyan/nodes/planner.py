@@ -172,6 +172,7 @@ def _try_llm_missing_facts(
 ) -> list[MissingFact]:
     """从语义层识别规则模板遗漏的决定性事实，失败时返回空列表。"""
     from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_security import delimit_untrusted
     from lvyan.llm.prompt_registry import get_prompt
     from lvyan.observability.metrics import record_llm_fallback
 
@@ -187,7 +188,8 @@ def _try_llm_missing_facts(
                 {
                     "role": "user",
                     "content": (
-                        f"案由：{case_type}\n问题：{user_goal}\n已确认事实：{fact_text or '无'}\n"
+                        f"案由：{case_type}\n{delimit_untrusted(user_goal, 'user_input')}\n"
+                        f"{delimit_untrusted(fact_text or '无', 'facts')}\n"
                         '输出 {"missing_facts":[{"fact_key":"英文或拼音稳定键",'
                         '"question":"向用户提出的单一问题","reason":"为何影响结论",'
                         '"is_blocking":true|false}]}，最多 5 项。'
@@ -241,6 +243,7 @@ def _try_llm_plan(
         ``(queries, plan_steps)`` 或 ``None``（LLM 不可用/输出无效时）。
     """
     from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_security import UNTRUSTED_DATA_INSTRUCTION, delimit_untrusted
 
     if not llm_available() or not user_goal.strip():
         return None
@@ -249,18 +252,16 @@ def _try_llm_plan(
         "; ".join(str(_get(f, "content", "")) for f in (facts or [])[:8]) or "暂无结构化事实"
     )
     case_hint = f"案由：{case_type}" if case_type else "案由待定"
-    context_block = (
-        f"\n相关材料摘要：\n{attachment_context}\n" if attachment_context.strip() else ""
-    )
-    history_block = (
-        f"\n此前对话摘要：\n{conversation_summary}\n" if conversation_summary.strip() else ""
-    )
+    context_block = delimit_untrusted(attachment_context, "attachment")
+    history_block = delimit_untrusted(conversation_summary, "history")
 
     system_prompt = (
         "你是法律检索计划生成助手。根据用户案情生成检索查询与执行步骤。只输出 JSON，不要解释。"
+        + UNTRUSTED_DATA_INSTRUCTION
     )
     user_prompt = (
-        f"{case_hint}\n用户目标：{user_goal}\n已知事实：{facts_summary}\n{context_block}{history_block}\n"
+        f"{case_hint}\n{delimit_untrusted(user_goal, 'user_input')}\n"
+        f"{delimit_untrusted(facts_summary, 'facts')}\n{context_block}\n{history_block}\n"
         "请生成检索计划，输出 JSON 格式：\n"
         '{"retrieval_queries": [{"query_text": "检索词", "route": "hybrid|bm25|case_rule|article_no"}], '
         '"plan_steps": [{"action": "步骤描述", "tool": "statute_retrieval|case_retrieval|evidence_analyzer"}]}\n\n'
@@ -386,6 +387,8 @@ def planner(state: CaseState) -> dict[str, Any]:
             "plan": plan,
             "retrieval_queries": queries,
             "iteration": 0,
+            "reasoner_iteration": 0,
+            "retrieval_iteration": 0,
         }
 
     # --- 降级：规则+模板 ---
@@ -435,4 +438,6 @@ def planner(state: CaseState) -> dict[str, Any]:
         "plan": plan,
         "retrieval_queries": queries,
         "iteration": 0,
+        "reasoner_iteration": 0,
+        "retrieval_iteration": 0,
     }

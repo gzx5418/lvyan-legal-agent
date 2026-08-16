@@ -4,9 +4,8 @@
 - ``parallel_retrieval``（retrieve_statutes.py）入口调用
   :func:`enforce_retrieval_guards`（循环失控 + 成本预算），违反时该节点
   降级返回空检索结果并记 warning，不中断 run。
-- 检索**迭代**预算不在 parallel_retrieval 检查：iteration 计数器由
-  ``routing.route_after_citation`` 独占控制，两处共享同一计数器会互相
-  侵蚀预算（critic 回退也消耗同一计数器），把合法重检索误判为超限。
+- 检索**迭代**预算由独立的 ``retrieval_iteration`` 控制，不再与
+  ``reasoner_iteration`` 共享。
 - :func:`enforce_policies` 保留为完整检查入口，供测试与未来接入
   composer 输出前的场景使用。
 
@@ -23,6 +22,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from lvyan.common.helpers import get_compat_counter, get_value as _get
 from lvyan.config import settings
 
 __all__ = [
@@ -47,23 +47,14 @@ class PolicyViolationError(RuntimeError):
         super().__init__(f"[{kind}] {message}")
 
 
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
 def check_retrieval_budget(state: Any) -> bool:
     """检查是否仍有检索预算。
 
-    返回 ``state.iteration < settings.MAX_RETRIEVAL_ITERATIONS``。
+    返回 ``state.retrieval_iteration < settings.MAX_RETRIEVAL_ITERATIONS``。
     ``True`` 表示可继续检索，``False`` 表示已达上限。
     """
-    iteration = _get(state, "iteration", 0)
-    return iteration < settings.max_retrieval_iterations
+    retrieval_iteration = get_compat_counter(state, "retrieval_iteration")
+    return retrieval_iteration < settings.max_retrieval_iterations
 
 
 def check_cost_budget(state: Any) -> bool:
@@ -84,8 +75,14 @@ def check_cost_budget(state: Any) -> bool:
                 return real_cost <= settings.max_cost_budget_usd
         except Exception:  # noqa: BLE001 - 成本读取失败回退占位估算
             pass
-    iteration = _get(state, "iteration", 0)
-    estimated_cost = iteration * 0.5
+    reasoner_iteration = int(_get(state, "reasoner_iteration", 0) or 0)
+    retrieval_iteration = int(_get(state, "retrieval_iteration", 0) or 0)
+    # 旧 checkpoint 只有 iteration；仅在两个新字段都缺失/为零时回退旧值。
+    legacy_iteration = int(_get(state, "iteration", 0) or 0)
+    total_iterations = reasoner_iteration + retrieval_iteration
+    if total_iterations == 0:
+        total_iterations = legacy_iteration
+    estimated_cost = total_iterations * 0.5
     return estimated_cost <= settings.max_cost_budget_usd
 
 
@@ -107,10 +104,9 @@ def detect_loop(state: Any) -> bool:
 def enforce_retrieval_guards(state: Any) -> None:
     """检索入口守卫：循环失控 + 成本预算。
 
-    与 :func:`enforce_policies` 的区别：**不**检查检索迭代预算——iteration
-    计数器由 ``routing.route_after_citation`` 独占控制（critic 回退与
-    citation 重检索共享同一计数器），在检索入口重复检查会把合法的
-    重检索误判为超限。
+    与 :func:`enforce_policies` 的区别：**不**检查检索迭代预算——该预算
+    由 ``routing.route_after_citation`` 使用独立的 ``retrieval_iteration``
+    控制，避免同一次重检索在路由与入口重复扣减。
 
     违反时抛 :class:`PolicyViolationError`（``loop`` / ``cost_budget``），
     调用方（parallel_retrieval）捕获后降级返回空结果，不中断 run。

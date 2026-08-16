@@ -21,6 +21,7 @@ from typing import Any, Iterator
 
 from pydantic import BaseModel, Field
 
+from lvyan.common.constants import CLI_USER_ID
 from lvyan.runtime import get_shared_graph
 from lvyan.schemas import CaseState
 
@@ -50,6 +51,7 @@ def _build_initial_state(
         user_goal=query,
         complexity=complexity,
         case_type=case_type,
+        user_id=CLI_USER_ID,
     )
 
 
@@ -70,7 +72,9 @@ def run_agent_with_state(
     # P1-5 修复：CLI / Python API 改用共享图实例（同一 checkpointer），
     # 与 API 入口保持单一状态源，支持 interrupt resume
     graph = get_shared_graph()
-    config = {"configurable": {"thread_id": resolved_thread_id}}
+    config = {
+        "configurable": {"thread_id": resolved_thread_id, "user_id": CLI_USER_ID}
+    }
     result = graph.invoke(initial.model_dump(), config)
     state_dict = result if isinstance(result, dict) else {}
     final_output = state_dict.get("final_output") or ""
@@ -126,7 +130,9 @@ def stream_agent(
     initial = _build_initial_state(run_id, resolved_thread_id, query, complexity, case_type)
     # P1-5 修复：CLI 流式入口同样使用共享图实例
     graph = get_shared_graph()
-    config = {"configurable": {"thread_id": resolved_thread_id}}
+    config = {
+        "configurable": {"thread_id": resolved_thread_id, "user_id": CLI_USER_ID}
+    }
     final_output = ""
     try:
         for chunk in graph.stream(initial.model_dump(), config, stream_mode="updates"):

@@ -79,9 +79,7 @@ _DEFAULT_AGENT_DIR = _SRC_DIR.parent  # 本地开发默认 AGENT 根目录
 # 未提供时尝试加载 __file__ 推导的默认目录下的 .env（.env 中定义的
 # AGENT_DIR 随之生效）。
 _bootstrap_dir = (
-    Path(os.getenv("AGENT_DIR", "")).resolve()
-    if os.getenv("AGENT_DIR")
-    else _DEFAULT_AGENT_DIR
+    Path(os.getenv("AGENT_DIR", "")).resolve() if os.getenv("AGENT_DIR") else _DEFAULT_AGENT_DIR
 )
 _load_dotenv_from(_bootstrap_dir / ".env")
 
@@ -394,6 +392,14 @@ def _build_settings() -> Settings:
 settings: Settings = _build_settings()
 
 
+def is_rls_enforced() -> bool:
+    """返回当前 RLS 开关；环境覆盖只在此配置边界统一解析。"""
+    raw = os.getenv("RLS_ENFORCED")
+    if raw is None:
+        return settings.rls_enforced
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def is_official_db_available() -> bool:
     """官方法律全文库是否可用（目录存在且非空）。
 
@@ -488,8 +494,7 @@ def validate_runtime_config() -> None:
 
     # P2: 多租户配置校验（生产环境必须强制 RLS + Redis 限流）
     if is_production():
-        rls_val = os.getenv("RLS_ENFORCED", "false").strip().lower()
-        if rls_val not in {"1", "true", "yes", "on"}:
+        if not is_rls_enforced():
             raise RuntimeError(
                 "生产模式下 RLS_ENFORCED 必须为 true（确保 RLS 策略已部署并强制启用）"
             )

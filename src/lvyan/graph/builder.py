@@ -318,7 +318,9 @@ def build_graph_with_postgres(dsn: str | None = None) -> Any:
             row_factory=dict_row,
             connect_timeout=3,
         )
-        saver = PostgresSaver(conn)
+        from lvyan.db.tenant_saver import SyncTenantAwareCheckpointer
+
+        saver = SyncTenantAwareCheckpointer(PostgresSaver(conn))
         saver.setup()
     except Exception as exc:  # noqa: BLE001
         if conn is not None:

@@ -436,8 +436,8 @@ def test_citation_verifier_never_exceeds_two_reretrievals(
 def test_critic_iteration_capped(monkeypatch: pytest.MonkeyPatch):
     """critic 始终不通过：iteration 不超过 MAX_LEGAL_REASONER_ITERATIONS。"""
     # 保留测试意图：允许 2 次回退（默认值已降为 1 以减少 LLM 调用）
-    monkeypatch.setattr("lvyan.nodes.critic.MAX_LEGAL_REASONER_ITERATIONS", 2)
-    from lvyan.nodes.critic import MAX_LEGAL_REASONER_ITERATIONS as _max_iter
+    monkeypatch.setattr(settings, "max_legal_reasoner_iterations", 2)
+    _max_iter = settings.max_legal_reasoner_iterations
 
     assert _max_iter == 2
 
@@ -463,8 +463,8 @@ def test_critic_iteration_capped(monkeypatch: pytest.MonkeyPatch):
 
 def test_critic_iteration_never_exceeds_max(monkeypatch: pytest.MonkeyPatch):
     """连续模拟多次 critic，iteration 始终 <= MAX_LEGAL_REASONER_ITERATIONS。"""
-    monkeypatch.setattr("lvyan.nodes.critic.MAX_LEGAL_REASONER_ITERATIONS", 2)
-    from lvyan.nodes.critic import MAX_LEGAL_REASONER_ITERATIONS as _max_iter
+    monkeypatch.setattr(settings, "max_legal_reasoner_iterations", 2)
+    _max_iter = settings.max_legal_reasoner_iterations
 
     max_iteration = 0
     for start_iter in range(5):
@@ -480,7 +480,7 @@ def test_critic_passes_when_reasoning_present(
     monkeypatch: pytest.MonkeyPatch, make_reasoning_result
 ):
     """critic 对正常 reasoning_result（无遗漏/过度推断/冲突）→ 通过。"""
-    monkeypatch.setattr("lvyan.nodes.critic.MAX_LEGAL_REASONER_ITERATIONS", 2)
+    monkeypatch.setattr(settings, "max_legal_reasoner_iterations", 2)
     rr = make_reasoning_result()
     state = _critic_state(reasoning_result=rr, iteration=0)
     result = critic(state)

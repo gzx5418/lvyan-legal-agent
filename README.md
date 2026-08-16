@@ -240,13 +240,13 @@ docker compose up -d                 # 全部依赖
 安装依赖并启动服务：
 
 ```bash
-python -m uvicorn lvyan.api.server:app --host 0.0.0.0 --port 8000
+python -m uvicorn lvyan.api.server:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
 开发热重载：
 
 ```bash
-python -m uvicorn lvyan.api.server:app --reload --port 8000
+python -m uvicorn lvyan.api.server:create_app --factory --reload --port 8000
 ```
 
 打开 [http://localhost:8000](http://localhost:8000) 使用内置前端。

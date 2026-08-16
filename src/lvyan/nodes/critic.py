@@ -13,9 +13,9 @@
 - 生成 ``CriticReport``（pydantic 模型），序列化为 dict 写入 ``state["critic_report"]``。
 - 路由策略（由 ``route_after_critic`` 实现）：
   * 通过 → citation_verifier
-  * 不通过且 iteration < MAX_LEGAL_REASONER_ITERATIONS → 回退 legal_reasoner，
-    iteration += 1，追加 critic_feedback
-  * 不通过且 iteration >= MAX_LEGAL_REASONER_ITERATIONS → 强制通过，
+  * 不通过且 reasoner_iteration < MAX_LEGAL_REASONER_ITERATIONS → 回退 legal_reasoner，
+    reasoner_iteration += 1，追加 critic_feedback
+  * 不通过且 reasoner_iteration >= MAX_LEGAL_REASONER_ITERATIONS → 强制通过，
     risk_level="high"，附警告"自动 critic 未通过，需人工复核"
 """
 
@@ -25,6 +25,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from lvyan.common.helpers import count_satisfied_elements as _count_satisfied_elements
+from lvyan.common.helpers import get_compat_counter, get_value as _get
 from lvyan.config import settings
 from lvyan.schemas import CaseState
 
@@ -59,27 +61,6 @@ class CriticReport(BaseModel):
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
-def _count_satisfied_elements(elements: list[str]) -> tuple[int, int]:
-    """统计构成要件满足情况，返回 (已满足数, 总数)。
-
-    elements 格式为 ``["要件名（已满足）", "要件名（未满足）"]``。
-    """
-    total = len(elements)
-    if total == 0:
-        return 0, 0
-    satisfied = sum(1 for e in elements if "已满足" in e)
-    return satisfied, total
-
-
 # ---------------------------------------------------------------------------
 # 检查 1：遗漏反方论点
 # ---------------------------------------------------------------------------
@@ -224,6 +205,7 @@ def _try_llm_critic(
         由调用方回退「无问题即通过」规则）。
     """
     from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_security import delimit_untrusted
     from lvyan.llm.prompt_registry import get_prompt
     from lvyan.observability.metrics import record_llm_fallback
 
@@ -253,7 +235,9 @@ def _try_llm_critic(
                 {
                     "role": "user",
                     "content": (
-                        f"事实：{fact_payload}\n来源：{statute_payload}\n推理：{reasoning_payload}\n"
+                        f"{delimit_untrusted(fact_payload, 'facts')}\n"
+                        f"{delimit_untrusted(statute_payload, 'statutes')}\n"
+                        f"{delimit_untrusted(reasoning_payload, 'reasoning')}\n"
                         '输出 {"passed":true|false,"issues":["问题"],'
                         '"suggestions":["可执行修正"]}。最多各 6 项。'
                     ),
@@ -292,7 +276,7 @@ def critic(state: CaseState) -> dict[str, Any]:
     返回更新字典（覆盖语义）：
         - ``critic_report``: dict（CriticReport 序列化）
         - ``critic_feedback``: list[str]（反馈给 legal_reasoner 的问题清单）
-        - ``iteration``: int（不通过时 +1）
+        - ``reasoner_iteration``: int（不通过时 +1）
         - ``risk_level``: str（强制通过时设为 "high"）
     """
     # 当前使用规则引擎做评审；可接入 LLM 做语义级增强
@@ -300,7 +284,7 @@ def critic(state: CaseState) -> dict[str, Any]:
     statutes = _get(state, "statutes", []) or []
     conflicts = _get(state, "conflicts", []) or []
     facts = _get(state, "facts", []) or []
-    iteration = _get(state, "iteration", 0)
+    reasoner_iteration = get_compat_counter(state, "reasoner_iteration")
     existing_feedback = _get(state, "critic_feedback", []) or []
 
     issues: list[str] = []
@@ -320,9 +304,7 @@ def critic(state: CaseState) -> dict[str, Any]:
             suggestions.append(suggestion)
 
         # LLM 只补充对抗性问题；确定性规则的结论不会被 LLM 覆盖或删除。
-        llm_issues, llm_suggestions, llm_passed = _try_llm_critic(
-            reasoning_result, statutes, facts
-        )
+        llm_issues, llm_suggestions, llm_passed = _try_llm_critic(reasoning_result, statutes, facts)
         for llm_issue in llm_issues:
             if llm_issue not in issues:
                 issues.append(llm_issue)
@@ -343,8 +325,9 @@ def critic(state: CaseState) -> dict[str, Any]:
             suggestions.append(suggestion)
 
     # --- 决定是否通过 ---
-    # 优先采用 LLM 明确给出的 bool 型 passed；未给出时回退「无问题即通过」规则
-    passed = bool(llm_passed) if isinstance(llm_passed, bool) else len(issues) == 0
+    # 确定性规则拥有否决权：LLM 只能发现额外问题，不能用 passed=true
+    # 覆盖规则已发现的问题（否则提示词注入可直接绕过 critic）。
+    passed = len(issues) == 0 and llm_passed is not False
 
     if passed:
         # 通过：清空 feedback
@@ -361,8 +344,8 @@ def critic(state: CaseState) -> dict[str, Any]:
         }
 
     # 不通过：检查是否已达最大迭代次数
-    if iteration < MAX_LEGAL_REASONER_ITERATIONS:
-        # 回退 legal_reasoner：iteration += 1，追加 critic_feedback
+    if reasoner_iteration < settings.max_legal_reasoner_iterations:
+        # 回退 legal_reasoner：reasoner_iteration += 1，追加 critic_feedback
         report = CriticReport(
             passed=False,
             issues=issues,
@@ -378,7 +361,8 @@ def critic(state: CaseState) -> dict[str, Any]:
         return {
             "critic_report": report.model_dump(),
             "critic_feedback": new_feedback,
-            "iteration": iteration + 1,
+            "reasoner_iteration": reasoner_iteration + 1,
+            "iteration": reasoner_iteration + 1,
         }
 
     # 已达最大迭代次数：强制通过，标记高风险

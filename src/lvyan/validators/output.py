@@ -186,15 +186,6 @@ _QUALITATIVE_LABELS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """统一从 dict 或对象读取属性，``obj`` 为 None 时返回 default。"""
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
 def _check_sections(
     text: str,
     sections: list[tuple[str, tuple[str, ...]]],

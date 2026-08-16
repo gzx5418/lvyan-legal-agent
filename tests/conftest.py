@@ -3,8 +3,7 @@
 在收集期（任何被测模块 import 之前）锁定开发默认环境，避免：
 
 - 生产部署变量（RUNTIME_MODE=production / PERSISTENCE_REQUIRED=true）意外残留在
-  shell 环境中，导致 ``lvyan.api.server`` 模块级 ``app = create_app()`` 在
-  import 时因持久化强制而抛 PersistenceUnavailable，使大批测试无法 import。
+  shell 环境中，导致显式 ``create_app()`` 测试受外部环境污染。
 - 单个测试内部仍可用 ``monkeypatch.setenv`` 临时切换到生产模式验证 P0-1。
 
 本文件只在 collection 时执行一次 os.environ 清理，不改变运行时行为。
@@ -22,8 +21,8 @@ os.environ.setdefault("PERSISTENCE_REQUIRED", "false")
 # 这里需要强制覆盖，故用直接赋值）。
 os.environ["RUNTIME_MODE"] = os.environ.get("LVYAN_TEST_RUNTIME_MODE", "development")
 os.environ["PERSISTENCE_REQUIRED"] = os.environ.get("LVYAN_TEST_PERSISTENCE_REQUIRED", "false")
-# 测试环境不保存真实案件材料；显式允许开发期 base64 降级，避免模块级
-# ``create_app()`` 在 collection 阶段因缺少 CASE_VAULT_KEY 而失败。生产模式
+# 测试环境不保存真实案件材料；显式允许开发期 base64 降级，避免显式
+# ``create_app()`` 测试因缺少 CASE_VAULT_KEY 而失败。生产模式
 # 始终忽略该开关，相关安全用例也会在各自测试中清理或覆盖该变量。
 os.environ["CASE_VAULT_ALLOW_INSECURE"] = os.environ.get(
     "LVYAN_TEST_CASE_VAULT_ALLOW_INSECURE", "true"

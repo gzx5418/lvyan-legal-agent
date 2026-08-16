@@ -182,6 +182,16 @@ class InMemoryCaseWorkspaceStore:
                 None,
             )
             if existing is not None:
+                now = _now()
+                self._cases[case_id] = case.model_copy(update={"updated_at": now})
+                self._audit_event(
+                    case_id,
+                    user_id,
+                    "evidence.relinked",
+                    "evidence",
+                    existing.evidence_id,
+                    {"file_id": file_id},
+                )
                 return existing
             evidence = CaseEvidence(
                 evidence_id=_id("evidence"),

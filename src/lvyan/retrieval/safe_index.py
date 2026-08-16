@@ -37,7 +37,12 @@ from typing import Any
 
 import msgpack
 
-__all__ = ["SafeIndexStore", "IndexCorruptedError", "IndexVersionMismatchError"]
+__all__ = [
+    "SafeIndexStore",
+    "IndexCorruptedError",
+    "IndexSignatureMismatchError",
+    "IndexVersionMismatchError",
+]
 
 _logger = logging.getLogger("lvyan.retrieval.safe_index")
 
@@ -58,6 +63,10 @@ class IndexCorruptedError(Exception):
 
 class IndexVersionMismatchError(Exception):
     """索引 schema 版本不匹配。"""
+
+
+class IndexSignatureMismatchError(Exception):
+    """索引源数据签名不匹配。"""
 
 
 class SafeIndexStore:
@@ -164,12 +173,14 @@ class SafeIndexStore:
         path: str | Path,
         *,
         expected_schema_version: int | None = None,
+        expected_corpus_hash: str | None = None,
     ) -> dict[str, Any] | None:
         """安全读取索引文件。
 
         Args:
             path: 索引文件路径。
             expected_schema_version: 期望的 schema 版本号；不匹配时返回 None。
+            expected_corpus_hash: 期望的索引源数据签名；不匹配时拒绝加载。
 
         Returns:
             包含 header 和 data 的字典：
@@ -193,9 +204,7 @@ class SafeIndexStore:
             _logger.warning("索引文件状态读取失败: %s", path.name)
             return None
         if file_size > len(_MAGIC) + 1 + 4 + _MAX_HEADER_BYTES + _MAX_PAYLOAD_BYTES:
-            _logger.warning(
-                "索引文件大小超限: %s (%d bytes)", path.name, file_size
-            )
+            _logger.warning("索引文件大小超限: %s (%d bytes)", path.name, file_size)
             return None
 
         try:
@@ -241,6 +250,14 @@ class SafeIndexStore:
                 if expected_schema_version is not None and schema_ver != expected_schema_version:
                     raise IndexVersionMismatchError(
                         f"schema_version={schema_ver}, 期望={expected_schema_version}"
+                    )
+
+                if (
+                    expected_corpus_hash is not None
+                    and header.get("corpus_hash") != expected_corpus_hash
+                ):
+                    raise IndexSignatureMismatchError(
+                        f"corpus_hash={header.get('corpus_hash')}, 期望={expected_corpus_hash}"
                     )
 
                 # item_count 安全校验

@@ -314,6 +314,7 @@ def _verify_disk_indexes(
     from lvyan.retrieval.safe_index import (
         SafeIndexStore,
         IndexCorruptedError,
+        IndexSignatureMismatchError,
         IndexVersionMismatchError,
     )
 
@@ -330,11 +331,17 @@ def _verify_disk_indexes(
     article_data = None
     if article_lvix.is_file():
         try:
-            result = SafeIndexStore.load(article_lvix, expected_schema_version=expected_schema)
+            result = SafeIndexStore.load(
+                article_lvix,
+                expected_schema_version=expected_schema,
+                expected_corpus_hash=str(manifest.get("chunks_signature", "")) or None,
+            )
             if result is not None:
                 article_data = result["data"]
         except IndexVersionMismatchError:
             return "article_index_schema_mismatch"
+        except IndexSignatureMismatchError:
+            return "article_index_signature_mismatch"
         except IndexCorruptedError:
             return "article_index_unreadable"
         except OSError:
@@ -374,11 +381,17 @@ def _verify_disk_indexes(
     bm25_json = manifests_dir / "bm25_index.json"
     if bm25_lvix.is_file():
         try:
-            result = SafeIndexStore.load(bm25_lvix, expected_schema_version=expected_schema)
+            result = SafeIndexStore.load(
+                bm25_lvix,
+                expected_schema_version=expected_schema,
+                expected_corpus_hash=str(manifest.get("bm25_signature", "")) or None,
+            )
             if result is not None:
                 bm25_data = result["data"]
         except IndexVersionMismatchError:
             return "bm25_schema_mismatch"
+        except IndexSignatureMismatchError:
+            return "bm25_signature_mismatch"
         except IndexCorruptedError:
             return "bm25_index_unreadable"
         except OSError:
@@ -638,6 +651,8 @@ def rebuild_corpus_indexes(
 def ensure_corpus_ready(
     lawtext_dir: Path | None = None,
     manifests_dir: Path | None = None,
+    *,
+    force: bool = False,
 ) -> dict[str, Any]:
     """P0-3：保证法库/索引一致（自愈入口）。
 
@@ -651,7 +666,7 @@ def ensure_corpus_ready(
     lawtext_dir = Path(lawtext_dir or LAWTEXT_DIR)
     manifests_dir = Path(manifests_dir or (AGENT_DIR / "knowledge" / "manifests"))
 
-    check = verify_corpus_consistency(lawtext_dir, manifests_dir, force=True)
+    check = verify_corpus_consistency(lawtext_dir, manifests_dir, force=force)
     if check["consistent"]:
         return check
 
