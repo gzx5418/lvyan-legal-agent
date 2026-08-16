@@ -133,6 +133,41 @@ def test_c2_adelete_strict_uses_to_thread(tmp_path):
     assert graph.deleted == ["thread-1"]
 
 
+def test_adelete_strict_unbound_graph_still_drops_index(tmp_path):
+    """服务重启后图尚未绑定：删除应清掉 sidecar，而不是 503。"""
+    mem = CaseMemory(index_path=tmp_path / "idx.json", graph_resolver=lambda: None)
+    mem.register("thread-1", title="t", user_id="alice")
+
+    asyncio.run(mem.adelete_strict("thread-1", user_id="alice"))
+    assert mem.list_threads() == []
+
+
+def test_alist_threads_unbound_graph_returns_empty(tmp_path):
+    """图未绑定时空列表，避免 /api/agent/threads 503。"""
+    mem = CaseMemory(index_path=tmp_path / "idx.json", graph_resolver=lambda: None)
+    mem.register("thread-1", title="t", user_id="alice")
+
+    assert asyncio.run(mem.alist_threads_strict(user_id="alice")) == []
+
+
+def test_adelete_strict_compat_with_memory_saver(tmp_path):
+    """LangGraph InMemorySaver.adelete_thread(thread_id) 不接受 config。
+
+    本地 CHECKPOINTER_BACKEND=memory 时，无条件传 config 会 TypeError，
+    API 再包装成「checkpoint 删除失败」。
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+
+    saver = MemorySaver()
+    graph = SimpleNamespace(checkpointer=saver)
+    mem = CaseMemory(graph=graph, index_path=tmp_path / "idx.json")
+    mem.register("thread-1", title="t", user_id="alice")
+
+    asyncio.run(mem.adelete_strict("thread-1", user_id="alice"))
+    remaining = [tid for tid, _ in mem.list_threads()]
+    assert remaining == []
+
+
 def test_c2_sync_load_strict_still_works_for_cli(tmp_path):
     """CLI 同步路径：load_strict 仍使用同步 get_state，向后兼容。"""
     snapshot = _snapshot_with_values(None)

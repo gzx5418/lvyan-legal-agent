@@ -304,16 +304,25 @@ class CaseMemory:
 
         优先 ``adelete_thread``（租户包装器异步路径）；否则通过
         ``asyncio.to_thread`` 卸载同步 ``delete_thread``，避免阻塞事件循环。
+
+        图尚未初始化（例如 ``CHECKPOINTER_BACKEND=memory`` 且服务刚重启）时，
+        checkpoint 已不存在，仍清除 sidecar 索引，让前端删除历史可以成功。
         """
-        graph = self._resolve_graph()
+        try:
+            graph = self._resolve_graph()
+        except RuntimeError:
+            self._drop_index_entry(thread_id)
+            return True
+
         checkpointer = getattr(graph, "checkpointer", None)
         if checkpointer is None:
-            raise RuntimeError("checkpointer delete_thread unavailable")
+            self._drop_index_entry(thread_id)
+            return True
 
         config = _checkpoint_config(thread_id, user_id)
         adelete = getattr(checkpointer, "adelete_thread", None)
         if callable(adelete):
-            await adelete(thread_id, config=config)
+            await _invoke_adelete_thread(adelete, thread_id, config)
         elif hasattr(checkpointer, "delete_thread"):
             await asyncio.to_thread(_invoke_delete_thread, checkpointer, thread_id, config)
         else:
@@ -334,7 +343,12 @@ class CaseMemory:
         index_snapshot: list[tuple[str, dict[str, Any]]] = await asyncio.to_thread(
             self.list_threads
         )
-        graph = self._resolve_graph()
+        try:
+            graph = self._resolve_graph()
+        except RuntimeError:
+            # 图未绑定：内存 checkpointer 重启后无法校验，不把 sidecar 幽灵记录
+            # 当成可恢复会话，也不要 503 卡住历史列表。
+            return []
         checkpointer = getattr(graph, "checkpointer", None)
         alist = getattr(checkpointer, "alist", None)
         if callable(alist):
@@ -381,6 +395,23 @@ def _invoke_delete_thread(checkpointer: Any, thread_id: str, config: dict[str, A
     delete = getattr(checkpointer, "delete_thread", None)
     if not callable(delete):
         raise RuntimeError("checkpointer delete_thread unavailable")
+    return _call_delete_thread(delete, thread_id, config)
+
+
+async def _invoke_adelete_thread(adelete: Any, thread_id: str, config: dict[str, Any]) -> Any:
+    """调用 ``adelete_thread``；兼容 MemorySaver 等不接受 ``config`` 的实现。
+
+    LangGraph ``InMemorySaver.adelete_thread(thread_id)`` 不接受 ``config``。
+    若无条件传入，会 TypeError，API 层再包装成「checkpoint 删除失败」。
+    """
+    result = _call_delete_thread(adelete, thread_id, config)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+def _call_delete_thread(delete: Any, thread_id: str, config: dict[str, Any]) -> Any:
+    """按签名决定是否传入 ``config``。"""
     try:
         params = inspect.signature(delete).parameters
     except (TypeError, ValueError):

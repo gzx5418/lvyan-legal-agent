@@ -1540,6 +1540,7 @@ def create_app(
             try:
                 await _mem_adelete_strict(mem, thread_id, user_id=user_id)
             except Exception as exc:  # noqa: BLE001
+                _logger.exception("checkpoint 删除失败 thread=%s", thread_id)
                 raise HTTPException(
                     status_code=503,
                     detail="checkpoint 删除失败",
@@ -1571,9 +1572,21 @@ def create_app(
                     status_code=409,
                     detail="该会话仍在运行，请先终止运行",
                 )
+            if using_shared_memory:
+                try:
+                    from lvyan.runtime import get_shared_graph_async
+
+                    await get_shared_graph_async()
+                except Exception as exc:  # noqa: BLE001
+                    _logger.exception("checkpoint 初始化失败 thread=%s", thread_id)
+                    raise HTTPException(
+                        status_code=503,
+                        detail="checkpoint 初始化失败",
+                    ) from exc
             try:
                 await _mem_adelete_strict(mem, thread_id, user_id=user_id)
             except Exception as exc:  # noqa: BLE001
+                _logger.exception("checkpoint 删除失败 thread=%s", thread_id)
                 raise HTTPException(
                     status_code=503,
                     detail="checkpoint 删除失败",
@@ -1605,13 +1618,18 @@ def create_app(
             # 元数据索引可能在 checkpointer 被清理或故障恢复后遗留条目。
             # 只向前端暴露仍可恢复的会话，避免点击历史记录后看到空白页。
             # C2 修复：使用异步方法避免同步 get_state 阻塞事件循环。
+            if using_shared_memory:
+                try:
+                    from lvyan.runtime import get_shared_graph_async
+
+                    await get_shared_graph_async()
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("列出会话时 checkpoint 初始化失败: %s", exc)
             try:
                 threads = await _mem_alist_threads_recoverable(mem, user_id=user_id)
             except Exception as exc:  # noqa: BLE001
-                raise HTTPException(
-                    status_code=503,
-                    detail="checkpoint 读取失败，暂时无法列出会话",
-                ) from exc
+                _logger.warning("checkpoint 列表失败，返回空列表: %s", exc)
+                threads = []
         summaries: list[ThreadSummary] = []
         for tid, meta in threads:
             # ownership 过滤
