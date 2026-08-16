@@ -94,15 +94,18 @@ def _convert_with_markitdown(file_path: Path) -> str:
 def _convert_image_with_vision(file_path: Path) -> str:
     """用视觉模型理解图片内容，生成文本描述。
 
-    将图片 base64 编码后发送到模型网关的 /v1/chat/completions，
-    使用 vision_model（默认 Pro/Qwen/Qwen2.5-VL-7B-Instruct）生成描述。
+    将图片 base64 编码后发送到视觉网关的 chat/completions，
+    使用 vision_model（默认 GLM-4.6V-Flash / Qwen3-VL）生成描述。
     """
     import base64
     import mimetypes
 
-    gateway = settings.model_gateway_url
-    api_key = settings.model_gateway_api_key
+    gateway = (settings.vision_gateway_url or settings.model_gateway_url).strip()
+    api_key = (settings.vision_api_key or settings.model_gateway_api_key).strip()
     vision_model = settings.vision_model
+    api_path = (settings.vision_api_path or "/v1/chat/completions").strip()
+    if not api_path.startswith("/"):
+        api_path = f"/{api_path}"
 
     if not gateway or not api_key:
         return f"[视觉模型未配置，无法解析图片 {file_path.name}]"
@@ -150,7 +153,7 @@ def _convert_image_with_vision(file_path: Path) -> str:
         }
 
         resp = httpx.post(
-            f"{gateway.rstrip('/')}/v1/chat/completions",
+            f"{gateway.rstrip('/')}{api_path}",
             json=payload,
             headers=headers,
             timeout=30.0,

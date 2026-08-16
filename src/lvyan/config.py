@@ -190,7 +190,19 @@ class Settings(BaseModel):
     reranker_model: str = Field(default="BAAI/bge-reranker-v2-m3", description="Reranker 模型名称")
     vision_model: str = Field(
         default="Qwen/Qwen3-VL-8B-Instruct",
-        description="视觉模型名称（图片理解），走模型网关 /v1/chat/completions",
+        description="视觉模型名称（图片理解），走视觉网关 chat/completions",
+    )
+    vision_gateway_url: str = Field(
+        default="",
+        description="视觉模型网关根 URL；为空时回退 model_gateway_url",
+    )
+    vision_api_key: str = Field(
+        default="",
+        description="视觉模型 API Key；为空时回退 model_gateway_api_key",
+    )
+    vision_api_path: str = Field(
+        default="/v1/chat/completions",
+        description="视觉 chat completions 路径（智谱为 /chat/completions）",
     )
 
     # --- Langfuse（可观测性） ---
@@ -355,6 +367,9 @@ def _build_settings() -> Settings:
         embedding_model=_get("EMBEDDING_MODEL", "BAAI/bge-m3"),
         reranker_model=_get("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"),
         vision_model=_get("VISION_MODEL", "Qwen/Qwen3-VL-8B-Instruct"),
+        vision_gateway_url=_get("VISION_GATEWAY_URL", ""),
+        vision_api_key=_get("VISION_API_KEY", ""),
+        vision_api_path=_get("VISION_API_PATH", "/v1/chat/completions"),
         langfuse_host=_get("LANGFUSE_HOST", ""),
         langfuse_public_key=_get("LANGFUSE_PUBLIC_KEY", ""),
         langfuse_secret_key=_get("LANGFUSE_SECRET_KEY", ""),
