@@ -1613,9 +1613,10 @@ def create_app(
         """
         from .auth import ANONYMOUS_USER, is_auth_enabled
 
+        degraded = False
         if metadata_store is not None:
             try:
-                threads = metadata_store.list_threads(user_id)
+                threads = await asyncio.to_thread(metadata_store.list_threads, user_id)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,
@@ -1632,11 +1633,14 @@ def create_app(
                     await get_shared_graph_async()
                 except Exception as exc:  # noqa: BLE001
                     _logger.warning("列出会话时 checkpoint 初始化失败: %s", exc)
+                    degraded = True
             try:
                 threads = await _mem_alist_threads_recoverable(mem, user_id=user_id)
             except Exception as exc:  # noqa: BLE001
                 _logger.warning("checkpoint 列表失败，返回空列表: %s", exc)
                 threads = []
+                # 标记降级：让前端能区分「无历史」与「历史暂时不可用」
+                degraded = True
         summaries: list[ThreadSummary] = []
         for tid, meta in threads:
             # ownership 过滤
@@ -1653,7 +1657,7 @@ def create_app(
                     has_output=bool(meta.get("has_output")),
                 )
             )
-        return ThreadListResponse(threads=summaries)
+        return ThreadListResponse(threads=summaries, degraded=degraded)
 
     @app.post("/api/upload", response_model=UploadResponse)
     async def upload_file(

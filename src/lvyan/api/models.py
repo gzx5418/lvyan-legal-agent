@@ -146,9 +146,14 @@ class ThreadSummary(BaseModel):
 
 
 class ThreadListResponse(BaseModel):
-    """GET /api/agent/threads 响应体。"""
+    """GET /api/agent/threads 响应体。
+
+    ``degraded=true`` 表示底层 checkpoint/索引查询失败、返回的是空/部分
+    列表（前端可据此提示「历史暂时不可用」而非「无历史」）。
+    """
 
     threads: list[ThreadSummary] = Field(default_factory=list)
+    degraded: bool = False
 
 
 class DeleteResponse(BaseModel):

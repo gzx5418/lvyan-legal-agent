@@ -46,6 +46,12 @@ def test_production_invalid_key_startup_fails(monkeypatch):
 def test_development_no_key_no_insecure_fails(monkeypatch):
     """开发环境 + 无 key + CASE_VAULT_ALLOW_INSECURE 未设置 → 失败。"""
     monkeypatch.setenv("RUNTIME_MODE", "development")
+    # 「未设置」需要同时清环境变量与 settings 默认值
+    #（conftest 为整个测试套件启用了 base64 降级）
+    monkeypatch.delenv("CASE_VAULT_ALLOW_INSECURE", raising=False)
+    from lvyan.config import settings
+
+    monkeypatch.setattr(settings, "case_vault_allow_insecure", False)
 
     from lvyan.memory.case_vault import CaseVault
 
@@ -96,7 +102,11 @@ def test_aes_encrypt_decrypt_roundtrip(monkeypatch):
 def test_encrypt_fails_without_key_in_strict_mode(monkeypatch):
     """无 key + 不允许不安全模式 → _encrypt 抛异常。"""
     monkeypatch.setenv("RUNTIME_MODE", "development")
-    # 不设置 CASE_VAULT_ALLOW_INSECURE
+    # 「不允许」需要同时清环境变量与 settings 默认值（conftest 全局启用了降级）
+    monkeypatch.delenv("CASE_VAULT_ALLOW_INSECURE", raising=False)
+    from lvyan.config import settings
+
+    monkeypatch.setattr(settings, "case_vault_allow_insecure", False)
 
     from lvyan.memory.case_vault import CaseVault
 

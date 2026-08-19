@@ -275,13 +275,19 @@ class CaseVault:
 
         仅在 **非生产环境** 且 `CASE_VAULT_ALLOW_INSECURE=true` 时允许。
         生产环境无论如何都不允许降级。
+
+        环境变量优先（测试可用 monkeypatch 注入），未设置时回退
+        ``settings.case_vault_allow_insecure``——Settings 字段因此真正生效，
+        而不是「看似可配置实际不生效」的死配置。
         """
-        from lvyan.config import is_production
+        from lvyan.config import is_production, settings
 
         if is_production():
             return False
-        raw = os.getenv("CASE_VAULT_ALLOW_INSECURE", "").strip().lower()
-        return raw in {"1", "true", "yes", "on"}
+        raw = os.getenv("CASE_VAULT_ALLOW_INSECURE")
+        if raw is None:
+            return bool(settings.case_vault_allow_insecure)
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
 
     @classmethod
     def validate_encryption_config(cls) -> None:

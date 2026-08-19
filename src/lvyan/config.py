@@ -493,6 +493,15 @@ def validate_runtime_config() -> None:
         raise RuntimeError(
             f"CHECKPOINTER_BACKEND='{backend}' 非法；允许值: memory / postgres / auto"
         )
+    # 视觉网关 URL 不应带 /v1 等版本段：请求路径（VISION_API_PATH，默认
+    # /v1/chat/completions）已含版本前缀，网关侧再带会拼出 /v1/v1/...。
+    vision_gateway = os.getenv("VISION_GATEWAY_URL", settings.vision_gateway_url).strip()
+    if vision_gateway.rstrip("/").endswith("/v1"):
+        raise RuntimeError(
+            "VISION_GATEWAY_URL 不应包含 /v1 后缀（请求路径 VISION_API_PATH 已带版本"
+            "前缀，重复拼接会得到 /v1/v1/...）；请只填网关根地址，"
+            "如需自定义完整路径请改 VISION_API_PATH"
+        )
     if backend == "memory" and persistence_required():
         raise RuntimeError("PERSISTENCE_REQUIRED=true 时禁止 CHECKPOINTER_BACKEND=memory")
     # P1-4：生产认证配置校验

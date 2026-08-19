@@ -47,7 +47,19 @@ _DENSE_DIM = 256  # 桩向量维度
 _REAL_EMBEDDING_PROBED: bool | None = None
 _REAL_EMBEDDING_LAST_PROBE: float = 0.0
 _REAL_EMBEDDING_FAILURES: int = 0
-_REAL_EMBEDDING_RETRY_SECONDS = 60.0
+# 基础重试间隔；实际间隔随连续失败次数指数增长（60s → 120s → 240s …，封顶 30min），
+# 避免网关长时间不可用时探测（含本地模型加载的秒级开销）周期性制造延迟尖峰。
+_REAL_EMBEDDING_RETRY_BASE_SECONDS = 60.0
+_REAL_EMBEDDING_RETRY_MAX_SECONDS = 1800.0
+
+
+def _embedding_retry_delay() -> float:
+    """按连续失败次数计算指数退避的重试间隔。"""
+    failures = max(_REAL_EMBEDDING_FAILURES, 1)
+    return min(
+        _REAL_EMBEDDING_RETRY_BASE_SECONDS * (2 ** (failures - 1)),
+        _REAL_EMBEDDING_RETRY_MAX_SECONDS,
+    )
 _ST_MODEL_CACHE: Any = None
 _DOC_VEC_CACHE: dict[str, list[float]] = {}
 _DENSE_CANDIDATE_FLOOR = 100
@@ -130,7 +142,7 @@ def _probe_real_embedding() -> bool:
         return _REAL_EMBEDDING_PROBED
     if (
         _REAL_EMBEDDING_PROBED is False
-        and now - _REAL_EMBEDDING_LAST_PROBE < _REAL_EMBEDDING_RETRY_SECONDS
+        and now - _REAL_EMBEDDING_LAST_PROBE < _embedding_retry_delay()
     ):
         return False
     _REAL_EMBEDDING_LAST_PROBE = now
@@ -167,7 +179,7 @@ def _probe_real_embedding() -> bool:
             _logger.warning(
                 "真实 embedding 探测失败（累计 %d 次），%.0fs 后重试",
                 _REAL_EMBEDDING_FAILURES,
-                _REAL_EMBEDDING_RETRY_SECONDS,
+                _embedding_retry_delay(),
             )
             return False
 
@@ -187,7 +199,7 @@ def _probe_real_embedding() -> bool:
         _logger.warning(
             "本地 embedding 探测失败（累计 %d 次），%.0fs 后重试",
             _REAL_EMBEDDING_FAILURES,
-            _REAL_EMBEDDING_RETRY_SECONDS,
+            _embedding_retry_delay(),
         )
         return False
 

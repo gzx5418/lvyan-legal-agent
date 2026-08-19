@@ -79,8 +79,11 @@ def main() -> int:
         _logger.error("未配置 DATABASE_URL 或 --dsn")
         return 1
 
-    # 转换 SQLAlchemy URL 为 psycopg URL
-    dsn = dsn.replace("postgresql+psycopg://", "postgresql://")
+    # 转换 SQLAlchemy URL 为 psycopg URL（覆盖常见驱动前缀）
+    for prefix in ("postgresql+psycopg://", "postgresql+psycopg2://", "postgresql+asyncpg://"):
+        if dsn.startswith(prefix):
+            dsn = "postgresql://" + dsn[len(prefix):]
+            break
 
     try:
         import psycopg
@@ -97,32 +100,38 @@ def main() -> int:
     issues_found = 0
     issues_fixed = 0
 
-    for desc, check_sql, fix_sql in _CHECKS:
+    # 连接统一在 finally 中关闭：循环体内的非 psycopg 异常（如结果解包）
+    # 不应让连接泄漏
+    try:
+        for desc, check_sql, fix_sql in _CHECKS:
+            try:
+                cur = conn.execute(check_sql)
+                count = cur.fetchone()[0]
+            except psycopg.Error as exc:
+                # 表可能不存在（首次部署），跳过
+                _logger.warning("检查跳过 (%s): %s", desc, exc)
+                continue
+
+            if count > 0:
+                issues_found += 1
+                _logger.warning("发现问题: %s (count=%d)", desc, count)
+
+                if args.fix and fix_sql:
+                    try:
+                        conn.execute(fix_sql)
+                        _logger.info("已修复: %s", desc)
+                        issues_fixed += 1
+                    except psycopg.Error as exc:
+                        _logger.error("修复失败: %s (%s)", desc, exc)
+                elif fix_sql is None:
+                    _logger.error("  → 不可自动修复，需人工处理")
+            else:
+                _logger.info("通过: %s", desc)
+    finally:
         try:
-            cur = conn.execute(check_sql)
-            count = cur.fetchone()[0]
-        except psycopg.Error as exc:
-            # 表可能不存在（首次部署），跳过
-            _logger.warning("检查跳过 (%s): %s", desc, exc)
-            continue
-
-        if count > 0:
-            issues_found += 1
-            _logger.warning("发现问题: %s (count=%d)", desc, count)
-
-            if args.fix and fix_sql:
-                try:
-                    conn.execute(fix_sql)
-                    _logger.info("已修复: %s", desc)
-                    issues_fixed += 1
-                except psycopg.Error as exc:
-                    _logger.error("修复失败: %s (%s)", desc, exc)
-            elif fix_sql is None:
-                _logger.error("  → 不可自动修复，需人工处理")
-        else:
-            _logger.info("通过: %s", desc)
-
-    conn.close()
+            conn.close()
+        except Exception:  # noqa: BLE001 关闭失败不影响检查结论
+            pass
 
     _logger.info("检查完成: 发现 %d 个问题，修复 %d 个", issues_found, issues_fixed)
 

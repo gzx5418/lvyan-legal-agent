@@ -467,11 +467,15 @@ def write_to_opensearch(chunks: list[ArticleChunk]) -> int:
     该索引只保存法规条文，不依赖或伪装成类案数据库。
     """
     url = settings.opensearch_url
+    scheme = "http"
     try:
         parsed = urlparse(url)
         host = parsed.hostname or "localhost"
         port = parsed.port or (443 if parsed.scheme == "https" else 9200)
+        scheme = parsed.scheme or "http"
     except ValueError:
+        # urlparse 对非法端口等会抛 ValueError；parsed 此时不可用，
+        # 用安全默认值，避免后续 parsed.scheme 触发 NameError
         host, port = "localhost", 9200
 
     if not _tcp_reachable(host, port):
@@ -504,7 +508,7 @@ def write_to_opensearch(chunks: list[ArticleChunk]) -> int:
         client = OpenSearch(
             hosts=[{"host": host, "port": port}],
             http_auth=(settings.opensearch_user, settings.opensearch_password),
-            use_ssl=parsed.scheme == "https",
+            use_ssl=scheme == "https",
             verify_certs=verify_certs,
             ssl_show_warn=False,
         )
