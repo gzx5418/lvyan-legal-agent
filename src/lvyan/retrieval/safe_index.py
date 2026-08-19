@@ -31,7 +31,7 @@ import logging
 import os
 import struct
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +67,19 @@ class IndexVersionMismatchError(Exception):
 
 class IndexSignatureMismatchError(Exception):
     """索引源数据签名不匹配。"""
+
+
+def _msgpack_default(obj: Any) -> Any:
+    """MsgPack 序列化兜底：``datetime.date`` / ``datetime.datetime`` 转 ISO 字符串。
+
+    纵深防御（issue #11）：即使调用方漏用 ``model_dump(mode="json")`` 把原生
+    date 对象传进来，也不会在 ``packb`` 阶段崩溃。其他未知类型仍抛 TypeError，
+    避免静默吞掉序列化错误。
+    """
+    # datetime 是 date 的子类，一次 isinstance 即可覆盖两者
+    if isinstance(obj, date):
+        return obj.isoformat()
+    raise TypeError(f"无法 MsgPack 序列化的类型: {type(obj).__name__}")
 
 
 class SafeIndexStore:
@@ -113,7 +126,7 @@ class SafeIndexStore:
         if item_count > _MAX_ITEM_COUNT:
             raise ValueError(f"item_count ({item_count}) 超过安全限制 ({_MAX_ITEM_COUNT})")
 
-        payload_bytes = msgpack.packb(data, use_bin_type=True)
+        payload_bytes = msgpack.packb(data, use_bin_type=True, default=_msgpack_default)
         if len(payload_bytes) > _MAX_PAYLOAD_BYTES:
             raise ValueError(
                 f"payload 大小 ({len(payload_bytes)} bytes) 超过安全限制 "
@@ -130,7 +143,7 @@ class SafeIndexStore:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "format_version": _FORMAT_VERSION,
         }
-        header_bytes = msgpack.packb(header, use_bin_type=True)
+        header_bytes = msgpack.packb(header, use_bin_type=True, default=_msgpack_default)
 
         if len(header_bytes) > _MAX_HEADER_BYTES:
             raise ValueError(

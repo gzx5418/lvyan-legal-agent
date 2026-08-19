@@ -70,12 +70,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.rebuild:
         from lvyan.scripts.rebuild_indexes import main as rebuild_main
 
-        previous = sys.argv
-        try:
-            sys.argv = ["rebuild_indexes", "--force"]
-            return int(rebuild_main())
-        finally:
-            sys.argv = previous
+        # 把 sync 自身参数（如 --lawtext-dir）传递给重建入口——此前 sys.argv
+        # hack 会把用户传给 sync_sources 的参数静默替换掉。force 显式置 True
+        # 保持 --rebuild 原有的强制重建语义。
+        rebuild_args = argparse.Namespace(
+            manifests_dir=None,
+            force=True,
+            lawtext_dir=args.lawtext_dir,
+        )
+        return int(rebuild_main(rebuild_args))
     return 0
 
 

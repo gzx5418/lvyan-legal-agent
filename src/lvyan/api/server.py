@@ -161,7 +161,14 @@ def _state_summary(state: Any) -> dict[str, Any]:
         "complexity": state.complexity,
         "risk_level": state.risk_level,
         "confidence": state.confidence,
-        "iteration": state.iteration,
+        # issue #16：legacy ``iteration`` 已停写（critic / citation_verifier 只
+        # 维护各自的新计数器），展示口径取 max(legacy, reasoner, retrieval)，
+        # 兼容旧 checkpoint 中仍带 legacy 计数的状态。
+        "iteration": max(
+            int(getattr(state, "iteration", 0) or 0),
+            int(getattr(state, "reasoner_iteration", 0) or 0),
+            int(getattr(state, "retrieval_iteration", 0) or 0),
+        ),
         "reasoner_iteration": getattr(state, "reasoner_iteration", 0),
         "retrieval_iteration": getattr(state, "retrieval_iteration", 0),
         "final_output": state.final_output,

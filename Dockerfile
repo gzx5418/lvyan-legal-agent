@@ -18,29 +18,33 @@
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim AS builder
 
-# 禁用字节码缓存（减小构建产物体积），pip 缓存走 BuildKit cache mount
+# 禁用字节码缓存（减小构建产物体积），uv 缓存走 BuildKit cache mount
+# UV_PROJECT_ENVIRONMENT：venv 固定在 /opt/venv，与 runtime 阶段 COPY --from 对齐
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 
 WORKDIR /build
 
-# 先仅复制依赖描述，最大化利用层缓存
-COPY pyproject.toml README.md ./
+# 先仅复制依赖描述（含 uv.lock），最大化利用层缓存
+COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-# 创建 venv 并安装项目（含 documents extras，支持 Office/PDF 转 Markdown）
-# --no-cache-dir 减小 venv 体积；cache mount 仅加速构建，不进最终镜像
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m venv /opt/venv && \
-    /opt/venv/bin/pip install --upgrade pip && \
-    /opt/venv/bin/pip install ".[documents]"
+# 按 uv.lock 精确安装（--frozen 不重新解析）：镜像内依赖集与 uv.lock / CI
+# （uv sync --frozen）完全一致，杜绝 pip 自行解析造成的版本漂移
+# （langfuse 4.x 事故的根治点）。uv 版本与生成 uv.lock 的本地版本钉死一致。
+# --no-editable 保持与原 pip install 一致的普通安装（非 editable），
+# venv 产物进 /opt/venv（见上方 UV_PROJECT_ENVIRONMENT），runtime 阶段直接复制。
+# documents extra 支持 Office/PDF 转 Markdown（markitdown）。
+COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /uvx /bin/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-editable --extra documents
 
 # P0-2：构建期预热法律检索索引，避免首个用户请求触发 10-30s 冷启动。
 # 复制官方法律库 submodule 内容（构建前需 git submodule update --init --recursive）。
-# submodule 未检出时目录为空，prewarm 会生成空索引——不影响构建，运行时降级到精编库。
-COPY external/lvyan-lawtext/content ./external/lvyan-lawtext/content
+# 整目录 COPY external/：父仓库跟踪的 external/README.md 保证该目录在构建
+# 上下文中始终存在——submodule 未 init 时 COPY 也不会失败（仅缺 content 数据）。
+COPY external/ ./external/
 
 # AGENT_DIR 指向 /build，使 config.py 正确解析 lawtext 与 manifests 路径
 # （包已装进 venv，__file__ 推导出的路径是 site-packages，必须显式覆盖）
@@ -84,9 +88,11 @@ COPY README.md ./
 
 # 官方法律全文库（git submodule，采集自 flk.npc.gov.cn）
 # 前提：构建前本地执行 `git submodule update --init --recursive` 检出数据。
-# 若 submodule 未检出，此 COPY 不产生内容，应用降级到精编知识库（不影响启动）。
+# 整目录 COPY external/：父仓库跟踪的 external/README.md 保证 COPY 在
+# submodule 未 init 时也能成功；此时镜像内仅缺 content/，应用运行时经
+# is_official_db_available() 检测缺失后降级到精编知识库（不影响启动）。
 # 也可通过运行时挂卷 + LAWTEXT_DIR 环境变量覆盖（见 .env.example）。
-COPY external/lvyan-lawtext/content ./external/lvyan-lawtext/content
+COPY external/ ./external/
 
 # P1：从 builder 复制构建期预热的检索索引（article_index_v3.lvix +
 # bm25_index_v3.lvix + JSON 兼容），运行时直接载入，首个请求无需冷启动构建。

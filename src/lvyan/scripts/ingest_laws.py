@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import re
 import socket
@@ -40,6 +41,11 @@ from lvyan.retrieval.version_resolver import (
 )
 
 ARTICLE_INDEX_SCHEMA_VERSION = 3
+
+_logger = logging.getLogger(__name__)
+
+# 默认生产输出路径（--limit 测试模式下禁止未显式覆盖时写入）
+_DEFAULT_OUTPUT_PATH = AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.json"
 
 # ---------------------------------------------------------------------------
 # 正则与常量
@@ -411,8 +417,11 @@ def prewarm_bm25_index(chunks: list[ArticleChunk], manifests_dir: Path) -> None:
     )
     print(f"[prewarm] 已写入 LVIX BM25 索引 -> {bm25_lvix}", file=sys.stderr)
 
-    with open(bm25_json, "w", encoding="utf-8") as f:
-        json.dump(serialized, f, ensure_ascii=False)
+    # 原子写 JSON（temp + os.replace）：避免半写入的损坏索引（同 save_index_json
+    # / lexical._atomic_write_json 模式；os.replace 在 Windows 上也是原子切换）
+    bm25_json_tmp = bm25_json.with_suffix(bm25_json.suffix + ".tmp")
+    bm25_json_tmp.write_text(json.dumps(serialized, ensure_ascii=False), encoding="utf-8")
+    os.replace(bm25_json_tmp, bm25_json)
     print(f"[prewarm] 已写入 JSON BM25 索引 -> {bm25_json}", file=sys.stderr)
 
 
@@ -429,6 +438,26 @@ def _tcp_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
     finally:
         sock.close()
+
+
+def _warn_duplicate_chunk_ids(chunks: list[ArticleChunk]) -> None:
+    """入库前统计同 chunk_id 重复次数并告警。
+
+    不改变写入语义（OpenSearch 幂等覆盖 / PostgreSQL ON CONFLICT DO NOTHING），
+    仅让冲突可见，便于排查切分规则产生重复 chunk 的问题。
+    """
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for chunk in chunks:
+        if chunk.chunk_id in seen:
+            duplicates.add(chunk.chunk_id)
+        seen.add(chunk.chunk_id)
+    if duplicates:
+        _logger.warning(
+            "检测到 %d 个重复 chunk_id（如 %s），将按幂等覆盖语义写入",
+            len(duplicates),
+            ", ".join(sorted(duplicates)[:3]),
+        )
 
 
 def write_to_opensearch(chunks: list[ArticleChunk]) -> int:
@@ -452,15 +481,31 @@ def write_to_opensearch(chunks: list[ArticleChunk]) -> int:
         )
         return 0
 
+    _warn_duplicate_chunk_ids(chunks)
+
     try:
         from opensearchpy import OpenSearch  # type: ignore[import-untyped]
         from opensearchpy.helpers import bulk  # type: ignore[import-untyped]
+
+        # 证书校验默认开启；仅当显式配置 OPENSEARCH_VERIFY_CERTS=false 时禁用
+        # （与 retrieval/case_source.py 一致；此前硬编码 verify_certs=False 会
+        # 在生产静默关闭 TLS 校验）
+        verify_certs = os.getenv("OPENSEARCH_VERIFY_CERTS", "true").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        if not verify_certs:
+            _logger.warning(
+                "OPENSEARCH_VERIFY_CERTS 已显式禁用，OpenSearch TLS 证书校验被关闭（仅限测试/内网自签场景）"
+            )
 
         client = OpenSearch(
             hosts=[{"host": host, "port": port}],
             http_auth=(settings.opensearch_user, settings.opensearch_password),
             use_ssl=parsed.scheme == "https",
-            verify_certs=False,
+            verify_certs=verify_certs,
             ssl_show_warn=False,
         )
         index_name = "law_articles_v2"
@@ -494,7 +539,15 @@ def write_to_opensearch(chunks: list[ArticleChunk]) -> int:
             }
             for chunk in chunks
         )
-        succeeded, _ = bulk(client, actions, raise_on_error=False, stats_only=True)
+        # stats_only=True 时 bulk 返回 (成功数, 失败数)；raise_on_error=False
+        # 不抛异常，失败数需在此显式告警，避免静默丢数据
+        succeeded, failed = bulk(client, actions, raise_on_error=False, stats_only=True)
+        if failed:
+            _logger.warning(
+                "OpenSearch bulk 写入存在失败：成功 %d 条 / 失败 %d 条",
+                succeeded,
+                failed,
+            )
         client.indices.refresh(index=index_name)
         return int(succeeded)
     except Exception as exc:  # noqa: BLE001
@@ -522,6 +575,8 @@ def write_to_postgres(chunks: list[ArticleChunk]) -> int:
             file=sys.stderr,
         )
         return 0
+
+    _warn_duplicate_chunk_ids(chunks)
 
     # 可达时的真实写入逻辑（后续完善）
     try:
@@ -574,8 +629,11 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=AGENT_DIR / "knowledge" / "manifests" / "article_index_v2.json",
-        help="输出 JSON 路径（默认 AGENT/knowledge/manifests/article_index_v2.json）",
+        default=None,
+        help=(
+            "输出 JSON 路径（默认 AGENT/knowledge/manifests/article_index_v2.json；"
+            "使用 --limit 时必须显式指定非生产路径）"
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -599,6 +657,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # --limit 测试模式禁止写入默认生产索引：截断后的索引一旦落盘会静默覆盖
+    # 全量生产缓存（issue #12）。default=None 用于区分「用户显式传参」与
+    # 「未传参走默认」，此处未显式指定 --output 即拒绝执行。
+    if args.limit is not None and args.output is None:
+        parser.error("--limit 测试模式必须用 --output 指定非生产路径")
+    output_path = args.output or _DEFAULT_OUTPUT_PATH
+
     lawtext_dir = args.lawtext_dir or settings.lawtext_dir
 
     print(f"[ingest] 扫描法规库：{lawtext_dir}", file=sys.stderr)
@@ -614,18 +679,18 @@ def main() -> None:
         except Exception:  # noqa: BLE001 - malformed law file is skipped
             continue
 
-    save_index_json(chunks, args.output)
+    save_index_json(chunks, output_path)
 
     if args.prewarm:
         # P1：生成 LVIX 安全索引 + BM25 倒排索引，供运行时直接加载
-        lvix_path = args.output.parent / "article_index_v3.lvix"
+        lvix_path = output_path.parent / "article_index_v3.lvix"
         _save_article_index_lvix(chunks, lvix_path)
         print(f"[ingest] 已写入 LVIX 索引：{lvix_path}", file=sys.stderr)
-        prewarm_bm25_index(chunks, args.output.parent)
+        prewarm_bm25_index(chunks, output_path.parent)
         # P0-B：生成 corpus_manifest.json，供运行时校验法库/索引一致性
         from lvyan.retrieval.manifest import write_corpus_manifest
 
-        manifest_path = write_corpus_manifest(chunks, lawtext_dir, args.output.parent)
+        manifest_path = write_corpus_manifest(chunks, lawtext_dir, output_path.parent)
         print(f"[ingest] 已写入 corpus_manifest：{manifest_path}", file=sys.stderr)
 
     if args.stats:
@@ -638,7 +703,7 @@ def main() -> None:
         print(f"[stats] 有 chapter      : {with_chapter}")
         print(f"[stats] 有 section      : {with_section}")
 
-    print(f"[ingest] 已写入：{args.output}", file=sys.stderr)
+    print(f"[ingest] 已写入：{output_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

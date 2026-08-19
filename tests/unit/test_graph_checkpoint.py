@@ -368,10 +368,15 @@ def test_checkpoint_writes_use_memory_saver_by_default():
 # ---------------------------------------------------------------------------
 # 6. build_graph_with_postgres 在 Postgres 不可达时回退到 MemorySaver
 # ---------------------------------------------------------------------------
-def test_build_graph_with_postgres_falls_back_to_memory_saver(caplog):
+def test_build_graph_with_postgres_falls_back_to_memory_saver(caplog, monkeypatch):
     """本机无运行中的 Postgres，应回退到 MemorySaver 并记录警告日志，返回可用图。"""
     import logging
 
+    # 显式走 auto 后端：显式 memory 后端会在入口静默短路（不打「回退」警告），
+    # 而本测试要验证的正是「连接失败 → 警告回退」分支。不显式指定会受
+    # 本机 .env 的 CHECKPOINTER_BACKEND 影响导致非封闭。
+    monkeypatch.setenv("CHECKPOINTER_BACKEND", "auto")
+    monkeypatch.setenv("PERSISTENCE_REQUIRED", "false")
     # 指向一个肯定不可达的 DSN，避免依赖环境
     with caplog.at_level(logging.WARNING, logger="lvyan.graph.builder"):
         g = build_graph_with_postgres("postgresql://nobody:nobody@127.0.0.1:1/nowhere")

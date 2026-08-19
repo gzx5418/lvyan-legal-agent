@@ -191,8 +191,10 @@ def test_citation_verifier_fabricated_triggers_reretrieval(
     assert audit["passed"] is False
     assert audit["fabricated"] >= 1
 
-    # 应触发重检索：iteration+1, 追加 retrieval_query
-    assert result["iteration"] == 1
+    # 应触发重检索：retrieval_iteration+1, 追加 retrieval_query
+    # issue #16：节点停写 legacy ``iteration``，只维护 retrieval_iteration
+    assert result["retrieval_iteration"] == 1
+    assert "iteration" not in result
     assert len(result["retrieval_queries"]) == len(original_queries) + 1
     new_query = result["retrieval_queries"][-1]
     assert isinstance(new_query, RetrievalQuery)
@@ -360,14 +362,15 @@ def test_citation_verifier_iteration_increments(
         iteration=0,
     )
     result1 = citation_verifier(state)
-    assert result1["iteration"] == 1
+    assert result1["retrieval_iteration"] == 1
+    assert "iteration" not in result1  # issue #16：停写 legacy iteration
 
-    # 第二次：iteration 1 → 2
+    # 第二次：retrieval_iteration 1 → 2
     state2 = dict(state)
-    state2["iteration"] = result1["iteration"]
+    state2["retrieval_iteration"] = result1["retrieval_iteration"]
     state2["retrieval_queries"] = result1["retrieval_queries"]
     result2 = citation_verifier(state2)
-    assert result2["iteration"] == 2
+    assert result2["retrieval_iteration"] == 2
 
 
 # ---------------------------------------------------------------------------

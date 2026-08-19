@@ -189,7 +189,8 @@ class GraphState(TypedDict):
     覆盖语义字段：
         run_id, thread_id, current_date, user_goal, jurisdiction, case_type,
         complexity, reasoning_result, citation_audit, critic_report,
-        critic_feedback, risk_level, confidence, iteration,
+        critic_feedback, risk_level, confidence,
+        iteration（deprecated，仅兼容旧 checkpoint 读取）,
         reasoner_iteration, retrieval_iteration, final_output,
         pending_human_approval, output_iteration, output_retry_needed,
         document_payload
@@ -247,7 +248,9 @@ class GraphState(TypedDict):
     confidence: Literal["high", "medium", "low", "insufficient"]
 
     # --- 迭代与产出（覆盖） ---
-    # 旧 checkpoint 兼容字段；新代码不再用它控制回退预算。
+    # DEPRECATED（issue #16）：旧 checkpoint 兼容字段，仅为读取旧状态而保留
+    # （get_compat_counter 在新计数器缺失时回退到它）。critic / citation_verifier
+    # 已停写该字段，新代码一律使用 reasoner_iteration / retrieval_iteration。
     iteration: int
     reasoner_iteration: int
     retrieval_iteration: int

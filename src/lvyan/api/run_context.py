@@ -18,6 +18,12 @@ _logger = logging.getLogger("lvyan.api.run_context")
 # runner 协议：async (query, thread_id, complexity, ctx) -> final_output(str)
 Runner = Callable[..., Any]
 
+# issue #16：重放历史上限。晚订阅者重放「最后 _EVENT_HISTORY_CAP 条事件 +
+# 终态哨兵（close 时补发 None）」——超上限的早期事件只保证已实时广播给
+# 当时的在线订阅者，不保证晚订阅者可重放；这足以支撑 SSE 断线重连场景
+# （重连只关心最近进度与终态），同时防止长 run 的 history 无界增长。
+_EVENT_HISTORY_CAP = 200
+
 
 class RunContext:
     """单次 Agent 运行的上下文。"""
@@ -31,7 +37,17 @@ class RunContext:
         attachment_refs: list[dict] | None = None,
         user_preferences: dict[str, Any] | None = None,
         load_history: Any = None,
+        legacy_queue: bool = True,
     ) -> None:
+        """初始化运行上下文。
+
+        Args:
+            legacy_queue: 是否向 ``self.queue`` 投递事件副本。生产 SSE 路由只
+                消费订阅者队列（``subscribe()``），旧队列无消费者、事件会被
+                双份保留，故 ``api/sse.py`` 构造时传 ``False`` 关闭投递。
+                默认 ``True`` 保持既有测试/旧调用方（直接读 ``ctx.queue``）
+                兼容。
+        """
         self.run_id = run_id
         self.thread_id = thread_id
         # P2-13：归属用户；用于 stream / hitl 端点的 ownership 校验
@@ -48,8 +64,12 @@ class RunContext:
         # 状态：started / running / awaiting_hitl / completed / failed / cancelled
         self.status: str = "started"
         # ``queue`` 保留给内部测试/旧调用方；SSE 使用独立订阅队列广播，避免
-        # 多个客户端在同一 Queue 上竞争并各自只收到部分事件。
+        # 多个客户端在同一 Queue 上竞争并各自只收到部分事件。生产路径构造
+        # RunContext 时传 legacy_queue=False 关闭本队列投递（issue #16：无
+        # 消费者时事件被双份保留浪费内存）；队列对象本身仍创建，close() 的
+        # 终态哨兵照发，保证旧读取方语义不变。
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
+        self._legacy_queue: bool = bool(legacy_queue)
         self._event_history: list[dict[str, Any]] = []
         self._subscribers: set[asyncio.Queue[Any]] = set()
         self._stream_closed = False
@@ -76,12 +96,23 @@ class RunContext:
         self.fail_code: str | None = None
 
     async def publish(self, event: dict[str, Any]) -> None:
-        """广播 SSE 事件，并保留本次 run 的有限重放历史。"""
+        """广播 SSE 事件，并保留本次 run 的有限重放历史。
+
+        重放语义：history 只保留最后 ``_EVENT_HISTORY_CAP`` 条；晚订阅者由
+        :meth:`subscribe` 重放这段尾部历史，run 结束时 :meth:`close` 再补发
+        终态哨兵 ``None``，因此 cap 后「晚订阅者最终必然看到终态」的语义
+        仍然成立（早期事件若被挤出 history，仅影响重连客户端的完整回放，
+        不影响在线订阅者的实时收件）。
+        """
         if self._stream_closed:
             _logger.debug("忽略已关闭 run %s 的迟到事件: %s", self.run_id, event.get("event"))
             return
         self._event_history.append(event)
-        await self.queue.put(event)
+        if len(self._event_history) > _EVENT_HISTORY_CAP:
+            # 只裁掉超出上限的最旧事件（切片删除，避免每次重建列表）
+            del self._event_history[: len(self._event_history) - _EVENT_HISTORY_CAP]
+        if self._legacy_queue:
+            await self.queue.put(event)
         for subscriber in tuple(self._subscribers):
             await subscriber.put(event)
 

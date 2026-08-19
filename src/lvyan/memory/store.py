@@ -305,19 +305,26 @@ class CaseMemory:
         优先 ``adelete_thread``（租户包装器异步路径）；否则通过
         ``asyncio.to_thread`` 卸载同步 ``delete_thread``，避免阻塞事件循环。
 
-        图尚未初始化（例如 ``CHECKPOINTER_BACKEND=memory`` 且服务刚重启）时，
-        checkpoint 已不存在，仍清除 sidecar 索引，让前端删除历史可以成功。
+        图尚未初始化时：仅当确认后端是内存（``CHECKPOINTER_BACKEND=memory``，
+        或 auto 且未配置 DATABASE_URL——重启即空、checkpoint 确不存在）才允许
+        「删 sidecar 索引即成功」；持久后端图未绑定只说明图还没建好，
+        checkpoint 行仍在 Postgres 里，此时删索引并返回成功会永久遗留孤儿
+        数据，必须向上抛错（路由层转 503）。
         """
         try:
             graph = self._resolve_graph()
         except RuntimeError:
-            self._drop_index_entry(thread_id)
-            return True
+            if _is_ephemeral_backend():
+                self._drop_index_entry(thread_id)
+                return True
+            raise
 
         checkpointer = getattr(graph, "checkpointer", None)
         if checkpointer is None:
-            self._drop_index_entry(thread_id)
-            return True
+            if _is_ephemeral_backend():
+                self._drop_index_entry(thread_id)
+                return True
+            raise RuntimeError("持久后端 checkpointer 缺失，拒绝删除索引")
 
         config = _checkpoint_config(thread_id, user_id)
         adelete = getattr(checkpointer, "adelete_thread", None)
@@ -383,6 +390,27 @@ class CaseMemory:
 # ---------------------------------------------------------------------------
 # 辅助函数：checkpoint config / 删除 / snapshot
 # ---------------------------------------------------------------------------
+def _is_ephemeral_backend() -> bool:
+    """当前部署的 checkpointer 后端是否为「重启即空」的内存态。
+
+    memory 后端重启后 checkpoint 确不存在，图未绑定时删 sidecar 索引是安全
+    的；postgres（或 auto 且配置了 DATABASE_URL）后端图未绑定只说明图还没
+    建好，checkpoint 行仍在数据库里，不允许「删索引即成功」。
+    """
+    import os
+
+    from lvyan.config import settings
+
+    backend = os.getenv("CHECKPOINTER_BACKEND", settings.checkpointer_backend)
+    backend = (backend or "").strip().lower()
+    if backend == "memory":
+        return True
+    if backend == "postgres":
+        return False
+    # auto：无数据库配置时实际必然回退 memory
+    return not bool(os.getenv("DATABASE_URL", settings.database_url or "").strip())
+
+
 def _checkpoint_config(thread_id: str, user_id: str | None = None) -> dict[str, Any]:
     configurable: dict[str, Any] = {"thread_id": thread_id}
     if user_id:

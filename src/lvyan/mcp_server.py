@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -66,20 +67,44 @@ def _uploaded_raw_path(file_id: str) -> Path:
     return raw
 
 
+def _client_identity_trusted() -> bool:
+    """部署方是否显式声明 MCP 传输层已带认证（MCP_TRUST_CLIENT_IDENTITY）。
+
+    仅接受 ``1 / true / yes / on``（大小写不敏感）作为真值；未设置或为其他
+    值时一律视为不可信。
+    """
+    return os.environ.get("MCP_TRUST_CLIENT_IDENTITY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def extract_uploaded_document(file_id: str, expected_user: str | None = None) -> dict[str, Any]:
     """按上传 ID 解析文档，拒绝 MCP 调用方提交任意本地路径。
 
-    归属校验：上传元数据记录了 ``user_id``，调用方必须以 ``expected_user``
-    声明身份且与文件属主一致，否则拒绝（PermissionError）。默认
-    ``expected_user=None`` 视为匿名调用方，只能读取匿名（未启用认证时）
-    上传的文件——启用多租户认证后，他人上传的文件 fail-closed。
+    归属校验（部署契约，issue #15 B）：
 
-    注意：MCP stdio 传输本身不携带身份，``expected_user`` 由可信的 MCP
-    客户端转发注入；部署时应确保 MCP 传输经过认证层，防止调用方伪造。
+    - 上传元数据记录了 ``user_id``（文件属主）；非匿名属主的文件只有属主
+      本人（或认证层确认的等价身份）可读，否则拒绝（PermissionError）。
+    - MCP stdio 传输本身不携带身份，``expected_user`` 只是**调用方的自我
+      声明**，默认不可信：任何客户端都能在工具入参里伪造任意属主。因此
+      默认（``MCP_TRUST_CLIENT_IDENTITY`` 未开启）忽略该声明，调用方一律
+      按 ``anonymous`` 处理——非匿名属主的文件 fail-closed 拒绝，匿名
+      （未启用认证时）上传的文件仍可读。
+    - 仅当部署方显式设置环境变量 ``MCP_TRUST_CLIENT_IDENTITY=true``（声明
+      MCP 传输前面已有认证层、客户端转发注入的身份可信）时，才采用
+      ``expected_user`` 做归属匹配。
     """
     meta = _uploaded_metadata(file_id)
     owner = str(meta.get("user_id") or "anonymous")
-    caller = str(expected_user) if expected_user else "anonymous"
+    if _client_identity_trusted():
+        # 可信部署：认证层已验证客户端身份，采用调用方声明的属主
+        caller = str(expected_user) if expected_user else "anonymous"
+    else:
+        # 默认 fail-closed：调用方身份声明不可信 → 一律按匿名处理
+        caller = "anonymous"
     if owner != caller:
         raise PermissionError("无权访问该上传文件（文件属主与调用方不一致）")
     markdown_ref = str(meta.get("markdown_path", ""))
@@ -141,8 +166,15 @@ def _registry() -> dict[str, Callable[..., dict[str, Any]]]:
             analyze_contract_clause(clause_text, clause_type=clause_type)
         ),
         "build_case_timeline": lambda events: _dump(build_case_timeline(events)),
-        "calculate_legal_deadline": lambda **kwargs: _dump(calculate_legal_deadline(**kwargs)),
-        "calculate_claim_amount": lambda **kwargs: _dump(calculate_claim_amount(**kwargs)),
+        # issue #15 A：不能用 ``lambda **kwargs``——mcp SDK 对 VAR_KEYWORD 参数
+        # 会把 kwargs 建成必填单字段（schema 误导且任何传参形式都无法通过校验），
+        # 必须与 tools/calculators.py 的真实签名对齐为显式参数。
+        "calculate_legal_deadline": lambda event_date, deadline_type, jurisdiction="中国大陆": _dump(
+            calculate_legal_deadline(event_date, deadline_type, jurisdiction)
+        ),
+        "calculate_claim_amount": lambda claim_type, principal, months=0, wage=None: _dump(
+            calculate_claim_amount(claim_type, principal, months=months, wage=wage)
+        ),
         "generate_evidence_checklist": lambda case_type, facts=None: _dump(
             generate_evidence_checklist(case_type, facts or [])
         ),

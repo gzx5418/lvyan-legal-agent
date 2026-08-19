@@ -212,17 +212,27 @@ class TenantAwareCheckpointer:
         thread_id: str,
         config: dict[str, Any] | None = None,
     ) -> None:
-        """删除 thread 的全部 checkpoint（带 RLS 上下文）。"""
+        """删除 thread 的全部 checkpoint（带 RLS 上下文）。
+
+        优先调用底层 saver 的**异步** ``adelete_thread``。禁止在事件循环
+        线程内直接调用 ``AsyncPostgresSaver.delete_thread``——它是同步桥接，
+        带「必须在非绑定循环线程调用」的守卫，在 loop 线程内调用必然抛
+        ``InvalidStateError``（历史上正是这个回归导致 Postgres 部署的删除
+        会话接口 100% 返回 503）。只有底层 saver 仅有同步实现时，才通过
+        ``asyncio.to_thread`` 在 worker 线程调用（worker 线程内合法）。
+        """
         user_id = self._extract_user_id(config)
         async with self._tenant_lock:
             await self._set_context(user_id)
             try:
+                adelete = getattr(self._inner, "adelete_thread", None)
+                if callable(adelete):
+                    await adelete(thread_id)
+                    return
                 delete = getattr(self._inner, "delete_thread", None)
                 if not callable(delete):
                     raise RuntimeError("checkpointer delete_thread unavailable")
-                result = delete(thread_id)
-                if hasattr(result, "__await__"):
-                    await result
+                await asyncio.to_thread(delete, thread_id)
             finally:
                 await self._clear_context()
 

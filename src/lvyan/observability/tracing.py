@@ -7,7 +7,13 @@
   返回无操作 tracer，装饰器照常运行、仅不产出 span —— 不报错。
 - ``Langfuse``：仅当环境变量 ``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY``
   同时存在且 ``langfuse`` 包可导入时启用；否则 ``record_llm_call`` /
-  ``record_evaluation`` 降级为 no-op，仅写 debug 日志。
+  ``record_evaluation`` 降级为 no-op，写 debug 日志。**上报失败**（如 SDK
+  版本不兼容、服务不可达）会以 warning 级记录——同类错误仅告警一次，避免
+  刷屏，同时保证遥测静默丢失时可在日志中发现。
+- ``Langfuse`` SDK 必须为 v2（``langfuse>=2.0,<3.0``）：本模块使用 v2 的
+  ``client.trace(id=...)`` / ``trace_obj.generation()`` / ``trace_obj.score()``
+  API，与 docker-compose 的 ``langfuse/langfuse:2`` 服务对齐；v3+ 已移除这些
+  方法。自建实例通过 ``LANGFUSE_HOST`` 指定（compose 默认映射到 3000 端口）。
 - 成本追踪（``CostTracker``）为纯内存实现，不依赖任何外部服务。
 
 P2-16 隐私脱敏
@@ -27,6 +33,7 @@ import hashlib
 import inspect
 import logging
 import os
+import reprlib
 import threading
 from contextvars import ContextVar
 from typing import Any, Callable, TypeVar
@@ -58,6 +65,19 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 # 摘要截断上限
 _SUMMARY_MAX_LEN = 200
+
+# 受限 repr 实例：限制递归层级与容器/字符串规模，避免先把整个 CaseState
+# 序列化成超大字符串再截断的开销（每个被追踪节点都会调用一次）。
+# reprlib.Repr 的配置属性在 repr 过程中只读，实例可全局共享（线程安全）。
+_REPR_LIMITS = reprlib.Repr()
+_REPR_LIMITS.maxlevel = 2  # 递归深度（CaseState → 列表 → 元素即止）
+_REPR_LIMITS.maxlist = 3
+_REPR_LIMITS.maxtuple = 3
+_REPR_LIMITS.maxdict = 3
+_REPR_LIMITS.maxset = 3
+_REPR_LIMITS.maxfrozenset = 3
+_REPR_LIMITS.maxstring = 60
+_REPR_LIMITS.maxother = 60
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +137,14 @@ def get_tracer(name: str) -> trace.Tracer:
 # 辅助：输入/输出摘要
 # ---------------------------------------------------------------------------
 def _summarize(value: Any, max_len: int = _SUMMARY_MAX_LEN) -> str:
-    """将任意值转为截断字符串，用于 span 属性，避免泄露过大载荷。"""
+    """将任意值转为受限 repr 字符串，用于 span 属性，避免泄露过大载荷。
+
+    使用 :mod:`reprlib` 受限实例（见 ``_REPR_LIMITS``）在 repr **过程中**就
+    限制递归层级与容器/字符串规模，而非先生成完整大字符串再截断——节点首参
+    往往是整个 CaseState，后者的每节点序列化开销不可接受。
+    """
     try:
-        text = repr(value)
+        text = _REPR_LIMITS.repr(value)
     except Exception:  # noqa: BLE001 repr 失败不应影响业务
         return "<unrepresentable>"
     if len(text) > max_len:
@@ -128,7 +153,7 @@ def _summarize(value: Any, max_len: int = _SUMMARY_MAX_LEN) -> str:
 
 
 def _input_summary(args: tuple, kwargs: dict) -> str:
-    """取首个位置参数或首个关键字参数值作为输入摘要。"""
+    """取首个位置参数或首个关键字参数值作为输入摘要（受限 repr，见 _summarize）。"""
     if args:
         return _summarize(args[0])
     if kwargs:
@@ -301,15 +326,30 @@ class CostSummary(BaseModel):
 
 
 class CostTracker:
-    """按 ``thread_id`` 累计 token 数与成本的内存追踪器（线程安全）。"""
+    """按 ``thread_id`` 累计 token 数与成本的内存追踪器（线程安全）。
 
-    def __init__(self) -> None:
+    内存防护：最多保留 ``max_threads`` 个 thread（默认 1000）的累计条目；
+    长驻进程中 thread 只增不减会导致内存无限增长，超限时淘汰最旧插入的
+    thread（dict 保持插入序，弹出首个键即可）。
+    """
+
+    # 最多保留的 thread 条目数；超出时淘汰最旧的（issue #16）
+    DEFAULT_MAX_THREADS = 1000
+
+    def __init__(self, max_threads: int = DEFAULT_MAX_THREADS) -> None:
         self._lock = threading.Lock()
         self._data: dict[str, dict[str, float]] = {}
+        self._max_threads = max(1, int(max_threads))
 
     def add(self, thread_id: str, tokens_in: int, tokens_out: int, cost: float) -> None:
-        """累加一次模型调用的 token 与成本。"""
+        """累加一次模型调用的 token 与成本；超出容量上限时淘汰最旧 thread。"""
         with self._lock:
+            if thread_id not in self._data and len(self._data) >= self._max_threads:
+                # dict 按插入序保序：弹出首个键即最旧插入的 thread。
+                # 已存在的 thread 更新时保持原位，不会被此次调用淘汰。
+                oldest = next(iter(self._data))
+                del self._data[oldest]
+                _logger.debug("CostTracker 达到容量上限（%d），淘汰最旧 thread：%s", self._max_threads, oldest)
             entry = self._data.setdefault(thread_id, {"in": 0, "out": 0, "cost": 0.0})
             entry["in"] += tokens_in
             entry["out"] += tokens_out
@@ -364,9 +404,29 @@ def get_cost_summary(thread_id: str) -> CostSummary:
 _langfuse_client: Any = None
 _langfuse_init_attempted = False
 
+# 上报失败告警去重集合：同类错误（调用点 + 异常类型）只 warning 一次，
+# 避免每次 LLM 调用失败都刷屏；后续同类失败仍静默吞掉（不阻断业务）。
+_langfuse_warned_keys: set[str] = set()
+_langfuse_warn_lock = threading.Lock()
+
+
+def _warn_langfuse_once(key: str, message: str, *args: Any) -> None:
+    """warning 级告警，但同一 ``key``（同类错误）只告警一次。"""
+    with _langfuse_warn_lock:
+        if key in _langfuse_warned_keys:
+            return
+        _langfuse_warned_keys.add(key)
+    _logger.warning(message, *args)
+
 
 def _ensure_langfuse() -> Any:
-    """惰性初始化 Langfuse 客户端；未配置时返回 ``None``。"""
+    """惰性初始化 Langfuse 客户端；未配置时返回 ``None``。
+
+    SDK v2 构造参数：``public_key`` / ``secret_key`` / ``host``。自建实例
+    （docker-compose 的 ``langfuse/langfuse:2`` 服务，默认映射 ``${LANGFUSE_PORT:-3000}``
+    端口）需设置 ``LANGFUSE_HOST``（如 ``http://localhost:3000``）；未设置时
+    SDK 默认连 Langfuse Cloud（``https://cloud.langfuse.com``）。
+    """
     global _langfuse_client, _langfuse_init_attempted
     if _langfuse_init_attempted:
         return _langfuse_client
@@ -384,10 +444,21 @@ def _ensure_langfuse() -> Any:
         _logger.debug("langfuse 包不可用（%s），降级为 no-op", exc)
         return None
 
+    # 自建 Langfuse v2 实例通过 LANGFUSE_HOST 指定（compose 默认 3000 端口）
+    host = os.getenv("LANGFUSE_HOST", "").strip()
     try:
-        _langfuse_client = Langfuse(public_key=public_key, secret_key=secret_key)
+        if host:
+            _langfuse_client = Langfuse(public_key=public_key, secret_key=secret_key, host=host)
+        else:
+            _langfuse_client = Langfuse(public_key=public_key, secret_key=secret_key)
     except Exception as exc:  # noqa: BLE001 初始化失败降级
-        _logger.debug("Langfuse 初始化失败（%s），降级为 no-op", exc)
+        # 初始化失败意味着后续所有遥测都会丢失，不能只留 debug 级静默
+        _warn_langfuse_once(
+            f"init:{type(exc).__name__}",
+            "Langfuse 初始化失败（%s），遥测将静默丢弃（同类错误仅告警一次）；"
+            "请检查 LANGFUSE_HOST / LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY 配置",
+            exc,
+        )
         _langfuse_client = None
     return _langfuse_client
 
@@ -450,16 +521,55 @@ def record_llm_call(
                 },
             )
     except Exception as exc:  # noqa: BLE001 上报失败不阻断业务
-        _logger.debug("Langfuse record_llm_call 失败：%s", exc)
+        # 上报失败 = 遥测丢失（常见原因：langfuse v3+ 移除了 client.trace() 等
+        # v2 API、服务不可达），必须 warning 级暴露；同类错误只告警一次防刷屏。
+        _warn_langfuse_once(
+            f"record_llm_call:{type(exc).__name__}",
+            "Langfuse record_llm_call 上报失败（同类错误仅告警一次）：%s。"
+            "请确认安装的是 langfuse>=2.0,<3.0（本模块使用 v2 API）",
+            exc,
+        )
 
 
-def record_evaluation(score_name: str, score_value: float, comment: str = "") -> None:
-    """记录一次评测分数到 Langfuse；未启用时降级为 no-op。"""
+def record_evaluation(
+    score_name: str,
+    score_value: float,
+    comment: str = "",
+    trace_id: str | None = None,
+) -> None:
+    """记录一次评测分数到 Langfuse；未启用时降级为 no-op。
+
+    Args:
+        score_name: 分数名称（如 ``citation_accuracy``）。
+        score_value: 分数值。
+        comment: 可选备注。
+        trace_id: 要挂载 score 的业务 trace / thread ID。传入时通过
+            ``client.trace(id=trace_id)`` 复用业务 trace，保证 score 与该次
+            运行的 generation 落在同一 trace 下；未传时回退到当前上下文的
+            cost thread（``set_cost_thread`` 设置的 thread_id，CLI/API 入口
+            均会设置）。两者都无时才新建匿名 trace（并 warning 提示 score
+            无法关联到业务 trace）。
+    """
     client = _ensure_langfuse()
     if client is None:
         return
+    effective_id = trace_id or _cost_thread_var.get()
     try:
-        trace_obj = client.trace()
+        if effective_id:
+            # 复用业务 trace：score 挂在真实运行轨迹上，而非每次新建空 trace
+            trace_obj = client.trace(id=effective_id)
+        else:
+            _warn_langfuse_once(
+                "record_evaluation:no_trace_id",
+                "record_evaluation 未提供 trace_id 且当前上下文未设置 cost thread，"
+                "score 将挂在新建的匿名 trace 上（无法关联业务 trace，仅告警一次）",
+            )
+            trace_obj = client.trace()
         trace_obj.score(name=score_name, value=score_value, comment=comment)
     except Exception as exc:  # noqa: BLE001 上报失败不阻断业务
-        _logger.debug("Langfuse record_evaluation 失败：%s", exc)
+        _warn_langfuse_once(
+            f"record_evaluation:{type(exc).__name__}",
+            "Langfuse record_evaluation 上报失败（同类错误仅告警一次）：%s。"
+            "请确认安装的是 langfuse>=2.0,<3.0（本模块使用 v2 API）",
+            exc,
+        )

@@ -62,7 +62,7 @@ def check_cost_budget(state: Any) -> bool:
 
     P0-10：优先使用 CostTracker 中该 thread 的真实累计成本（LLM 成功调用
     的 token 用量按单价表折算 USD）；无 ``thread_id`` 或尚无成本记录时回退
-    到按迭代次数的占位估算（``iteration * 0.5``）。返回 ``True`` 表示在
+    到按迭代次数的占位估算（总迭代数 * 0.5）。返回 ``True`` 表示在
     预算内，``False`` 表示超支。
     """
     thread_id = _get(state, "thread_id", None)
@@ -75,13 +75,19 @@ def check_cost_budget(state: Any) -> bool:
                 return real_cost <= settings.max_cost_budget_usd
         except Exception:  # noqa: BLE001 - 成本读取失败回退占位估算
             pass
-    reasoner_iteration = int(_get(state, "reasoner_iteration", 0) or 0)
-    retrieval_iteration = int(_get(state, "retrieval_iteration", 0) or 0)
-    # 旧 checkpoint 只有 iteration；仅在两个新字段都缺失/为零时回退旧值。
-    legacy_iteration = int(_get(state, "iteration", 0) or 0)
-    total_iterations = reasoner_iteration + retrieval_iteration
-    if total_iterations == 0:
-        total_iterations = legacy_iteration
+    # issue #16：改用 get_compat_counter 兼容旧 checkpoint（新计数器缺失时
+    # 回退 legacy ``iteration``）。注意旧 checkpoint 只有 iteration 时，两侧
+    # get_compat_counter 都会回退到同一 legacy 值，直接相加会双计占位成本；
+    # 仅在两个新计数器都未显式提供时取单侧回退值（等价于旧行为「回退一次
+    # legacy 值」），否则按新计数器求和。
+    reasoner_iteration = get_compat_counter(state, "reasoner_iteration")
+    retrieval_iteration = get_compat_counter(state, "retrieval_iteration")
+    reasoner_supplied = _get(state, "reasoner_iteration", None) is not None
+    retrieval_supplied = _get(state, "retrieval_iteration", None) is not None
+    if reasoner_supplied or retrieval_supplied:
+        total_iterations = reasoner_iteration + retrieval_iteration
+    else:
+        total_iterations = reasoner_iteration  # 即 legacy ``iteration`` 回退值
     estimated_cost = total_iterations * 0.5
     return estimated_cost <= settings.max_cost_budget_usd
 

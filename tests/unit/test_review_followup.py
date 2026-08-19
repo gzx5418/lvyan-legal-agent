@@ -1103,9 +1103,12 @@ async def test_cancel_run_stops_background_task_and_emits_event():
 
     status, _message = await manager.cancel_run(ctx.run_id, "anonymous")
 
+    # issue #16：create_run 生产路径构造 RunContext(legacy_queue=False)，
+    # 不再向旧 ctx.queue 投递事件；改用 SSE 订阅者队列读取广播事件
+    subscriber = ctx.subscribe()
     events = []
-    while not ctx.queue.empty():
-        event = ctx.queue.get_nowait()
+    while not subscriber.empty():
+        event = subscriber.get_nowait()
         if event is not None:
             events.append(event)
     assert status == "cancelled"

@@ -276,7 +276,7 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
        :func:`validate_grounding` 三个验证器。
     2. 对 ``reasoning_result`` 和 ``final_output`` 分别提取引用并合并校验。
     3. 汇总结果为 :class:`CitationAudit`，写入 ``state.citation_audit``。
-    4. 若 ``passed=False`` 且 ``iteration < settings.max_retrieval_iterations``：
+    4. 若 ``passed=False`` 且 ``retrieval_iteration < settings.max_retrieval_iterations``：
        - 调用 :func:`rewrite_for_reretrieval` 改写最后一条查询
        - 追加新的 :class:`RetrievalQuery` 到 ``retrieval_queries``
        - ``retrieval_iteration += 1``
@@ -449,7 +449,9 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
             "citation_audit": audit.model_dump(),
             "retrieval_queries": retrieval_queries,
             "retrieval_iteration": retrieval_iteration + 1,
-            "iteration": retrieval_iteration + 1,
+            # issue #16：停写 legacy ``iteration``（此前与 critic 的双写语义
+            # 不同、互相覆盖侵蚀对方预算）；旧 checkpoint 读取回退由
+            # get_compat_counter 处理，本节点只维护 retrieval_iteration。
         }
 
     # --- 4. 不通过且已达上限：强制通过，标记高风险 ---

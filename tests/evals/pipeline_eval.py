@@ -192,11 +192,16 @@ def run_pipeline_evaluation(
         answer_report: AnswerEvalReport = evaluate_answer_batch(items_for_answer_eval)
         report.avg_statute_accuracy = answer_report.avg_statute_accuracy
         report.avg_fabrication_rate = answer_report.avg_fabrication_rate
-        # 把指标回填到 per_query
-        for qr, ar in zip(report.per_query, answer_report.per_query):
-            if qr.query_id == ar.query_id:
-                qr.statute_accuracy = ar.statute_accuracy
-                qr.fabrication_rate = ar.fabrication_rate
+        # 把指标回填到 per_query（issue #16：answer_report.per_query 只含成功
+        # 用例，与 report.per_query 长度不一致——按位置 zip 会错位回填。改为
+        # 按 query_id 建索引对齐，失败的用例保持默认指标，缺失的直接跳过）。
+        answer_metrics = {ar.query_id: ar for ar in answer_report.per_query}
+        for qr in report.per_query:
+            ar = answer_metrics.get(qr.query_id)
+            if ar is None:
+                continue
+            qr.statute_accuracy = ar.statute_accuracy
+            qr.fabrication_rate = ar.fabrication_rate
 
     return report
 

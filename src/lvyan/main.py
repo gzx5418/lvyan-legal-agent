@@ -22,6 +22,7 @@ from typing import Any, Iterator
 from pydantic import BaseModel, Field
 
 from lvyan.common.constants import CLI_USER_ID
+from lvyan.common.helpers import _build_fallback_output
 from lvyan.runtime import get_shared_graph
 from lvyan.schemas import CaseState
 
@@ -75,14 +76,22 @@ def run_agent_with_state(
     config = {
         "configurable": {"thread_id": resolved_thread_id, "user_id": CLI_USER_ID}
     }
-    result = graph.invoke(initial.model_dump(), config)
+    # issue #16：CLI 路径成本入账——与 api/sse.py 的 default_runner 一致，
+    # 运行前把当前上下文关联到 thread_id（record_llm_call 据此累计成本），
+    # 运行后清除，避免泄漏到后续无关联调用。延迟导入便于测试 monkeypatch。
+    from lvyan.observability.tracing import set_cost_thread
+
+    set_cost_thread(resolved_thread_id)
+    try:
+        result = graph.invoke(initial.model_dump(), config)
+    finally:
+        set_cost_thread(None)
     state_dict = result if isinstance(result, dict) else {}
     final_output = state_dict.get("final_output") or ""
 
     # 图提前结束时（如 ask_user 路由），生成 fallback 输出
+    # issue #16：改从中性位置导入（此前反向依赖 API 层私有函数）
     if not final_output:
-        from lvyan.api.sse import _build_fallback_output
-
         final_output = _build_fallback_output(state_dict, query)
 
     return AgentResult(
@@ -133,6 +142,10 @@ def stream_agent(
     config = {
         "configurable": {"thread_id": resolved_thread_id, "user_id": CLI_USER_ID}
     }
+    # issue #16：CLI 流式路径成本入账（与 run_agent_with_state / API 路径一致）
+    from lvyan.observability.tracing import set_cost_thread
+
+    set_cost_thread(resolved_thread_id)
     final_output = ""
     try:
         for chunk in graph.stream(initial.model_dump(), config, stream_mode="updates"):
@@ -149,6 +162,8 @@ def stream_agent(
     except Exception as exc:  # noqa: BLE001 流式入口需宽口径捕获
         yield {"event": "error", "message": str(exc)}
         return
+    finally:
+        set_cost_thread(None)
     yield {"event": "final_output", "output": final_output}
 
 

@@ -236,3 +236,85 @@ def test_sync_delete_thread_rejects_missing_tenant_when_enforced(monkeypatch):
     saver = SyncTenantAwareCheckpointer(_FakeSyncSaver())
     with pytest.raises(ValueError, match="user_id"):
         saver.delete_thread("thread-a")
+
+
+class _RealShapedSaver(_FakeSaver):
+    """模拟真实 AsyncPostgresSaver 形状：
+
+    - 有异步 adelete_thread（生产应走这条路径）
+    - 同步 delete_thread 带线程守卫：在事件循环线程内调用抛 InvalidStateError
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.adelete_called = False
+        import asyncio
+
+        self._loop = asyncio.get_running_loop() if _has_running_loop() else None
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        self.adelete_called = True
+        self.configs.append({"configurable": {"thread_id": thread_id}})
+
+    def delete_thread(self, thread_id: str):
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is self._loop:
+            raise asyncio.InvalidStateError(
+                "Synchronous calls to AsyncPostgresSaver are only allowed "
+                "from a different thread."
+            )
+        return None
+
+
+def _has_running_loop() -> bool:
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
+@pytest.mark.asyncio
+async def test_adelete_thread_uses_async_path_not_sync_bridge(monkeypatch):
+    """回归：adelete_thread 必须走底层异步实现，禁止在事件循环线程内
+    调同步桥接（AsyncPostgresSaver.delete_thread 会抛 InvalidStateError）。"""
+    monkeypatch.setenv("RLS_ENFORCED", "true")
+    from lvyan.db.tenant_saver import TenantAwareCheckpointer
+
+    inner = _RealShapedSaver()
+    saver = TenantAwareCheckpointer(inner)
+
+    await saver.adelete_thread(_config()["configurable"]["thread_id"], _config())
+
+    assert inner.adelete_called is True
+
+
+class _SyncOnlyDeleteSaver(_FakeSaver):
+    """仅有同步 delete_thread 的 saver（无异步实现）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.deleted: list[str] = []
+
+    def delete_thread(self, thread_id: str) -> None:
+        self.deleted.append(thread_id)
+
+
+@pytest.mark.asyncio
+async def test_adelete_thread_falls_back_to_worker_thread_for_sync_only_saver(monkeypatch):
+    """仅有同步 delete_thread 的 saver：应经 to_thread 在 worker 线程调用。"""
+    monkeypatch.setenv("RLS_ENFORCED", "true")
+    from lvyan.db.tenant_saver import TenantAwareCheckpointer
+
+    inner = _SyncOnlyDeleteSaver()
+    saver = TenantAwareCheckpointer(inner)
+
+    await saver.adelete_thread("thread-a", _config())
+    assert inner.deleted == ["thread-a"]

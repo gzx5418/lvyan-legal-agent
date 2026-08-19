@@ -222,8 +222,9 @@ def test_citation_verifier_node_flags_fabricated_and_reretrieval(
     audit = result["citation_audit"]
     assert audit["passed"] is False
     assert audit["fabricated"] >= 1
-    # 触发重检索：iteration +1，retrieval_queries 追加
-    assert result["iteration"] == 1
+    # 触发重检索：retrieval_iteration +1，retrieval_queries 追加
+    # issue #16：节点停写 legacy ``iteration``，只维护 retrieval_iteration
+    assert result["retrieval_iteration"] == 1
     assert len(result["retrieval_queries"]) == 2  # 原 1 条 + 改写 1 条
     # reretrieval_count 已更新
     assert audit["reretrieval_count"] == 1
@@ -294,23 +295,23 @@ def test_reretrieval_count_capped(
     rr = make_reasoning_result(key_factors=["依据《中华人民共和国虚构法》第一条"])
     statutes = [make_authority(article_number="第五百七十七条")]
 
-    # iteration=0 → 触发重检索，返回 iteration=1
+    # iteration=0 → 触发重检索，返回 retrieval_iteration=1
     state_0 = _state(rr, statutes, iteration=0)
     result_0 = citation_verifier(state_0)
     assert result_0["citation_audit"]["reretrieval_count"] == 1
-    assert result_0["iteration"] == 1
+    assert result_0["retrieval_iteration"] == 1
 
-    # iteration=1 → 仍触发重检索，返回 iteration=2
+    # iteration=1 → 仍触发重检索，返回 retrieval_iteration=2
     state_1 = _state(rr, statutes, iteration=1)
     result_1 = citation_verifier(state_1)
     assert result_1["citation_audit"]["reretrieval_count"] == 2
-    assert result_1["iteration"] == 2
+    assert result_1["retrieval_iteration"] == 2
 
     # iteration=2 → 强制通过，reretrieval_count 不再增加
     state_2 = _state(rr, statutes, iteration=2)
     result_2 = citation_verifier(state_2)
     assert result_2["citation_audit"]["reretrieval_count"] == 2
-    assert "iteration" not in result_2
+    assert "retrieval_iteration" not in result_2  # issue #16：停写 legacy iteration
     assert result_2.get("risk_level") == "high"
 
 

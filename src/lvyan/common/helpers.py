@@ -59,7 +59,60 @@ def deduplicate_authorities(authorities: list[Any]) -> list[Any]:
     return [bucket[key] for key in order]
 
 
+def _build_fallback_output(state: dict[str, Any], query: str) -> str:
+    """当图提前结束（如 ask_user 路由）时，生成用户友好的 fallback 输出。
+
+    issue #16：自 ``lvyan.api.sse`` 下沉到中性位置——核心入口
+    （``lvyan.main``）此前反向依赖 API 层私有函数。仅依赖 dict/getattr
+    读取状态字段，无 API 层依赖；``lvyan.api.sse`` 保留同名再导出以兼容
+    现有导入。``query`` 参数保留以兼容既有签名（当前未参与拼接）。
+    """
+    parts: list[str] = []
+
+    case_type = state.get("case_type")
+    if case_type:
+        parts.append(f"**案件类型识别**：{case_type}\n")
+
+    missing_facts = state.get("missing_facts", [])
+    if missing_facts:
+        parts.append("为了提供更准确的法律分析，请补充以下信息：\n")
+        for i, mf in enumerate(missing_facts, 1):
+            if isinstance(mf, dict):
+                question = mf.get("question", "")
+                reason = mf.get("reason", "")
+            else:
+                question = getattr(mf, "question", "")
+                reason = getattr(mf, "reason", "")
+            parts.append(f"{i}. **{question}**")
+            if reason:
+                parts.append(f"   _原因：{reason}_")
+            parts.append("")
+
+    facts = state.get("facts", [])
+    if facts:
+        parts.append("**已了解的事实**：")
+        for f in facts:
+            if isinstance(f, dict):
+                content = f.get("content", "")
+            else:
+                content = getattr(f, "content", "")
+            if content:
+                parts.append(f"- {content}")
+        parts.append("")
+
+    if not parts:
+        return (
+            "我已收到您的问题，但在当前分析模式下无法生成完整回复。\n"
+            "请尝试切换到**深度**模式，或提供更多细节信息。"
+        )
+
+    parts.append("---")
+    parts.append("_以上为初步分析，补充信息后可获得更完整的法律意见。_")
+    return "\n".join(parts)
+
+
 __all__ = [
+    "_build_fallback_output",
     "authority_score",
     "count_satisfied_elements",
     "deduplicate_authorities",

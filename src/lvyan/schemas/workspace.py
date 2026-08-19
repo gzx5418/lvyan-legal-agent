@@ -49,10 +49,17 @@ class LegalDocument(BaseModel):
 
 
 class DocumentVersion(BaseModel):
+    """文书版本。
+
+    ``content`` 为文书全量正文，是 workspace 中最大的文本入口；issue #16
+    加 2,000,000 字符上限（约数百万汉字级文书全量 cap），防止无界超大
+    payload 写入版本存储。
+    """
+
     version_id: str
     document_id: str
     version_number: int
-    content: str
+    content: str = Field(max_length=2_000_000)
     change_summary: str = ""
     source_run_id: str | None = None
     created_by: str

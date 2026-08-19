@@ -27,6 +27,15 @@ os.environ["PERSISTENCE_REQUIRED"] = os.environ.get("LVYAN_TEST_PERSISTENCE_REQU
 os.environ["CASE_VAULT_ALLOW_INSECURE"] = os.environ.get(
     "LVYAN_TEST_CASE_VAULT_ALLOW_INSECURE", "true"
 )
+# 单元测试默认封闭：禁用真实 LLM 网关（无论来自 shell 环境变量还是项目 .env），
+# 否则 critic 等节点的测试会真实调用 API——结果不确定、烧配额且本地必然失败
+# （CI 无网关所以是绿的，掩盖了问题）。需要真实网关的测试用
+# LVYAN_TESTS_ALLOW_LLM=1 显式 opt-in。
+# 注意：必须在任何 lvyan 模块 import 之前执行（settings 单例在 import 时冻结）。
+if os.environ.get("LVYAN_TESTS_ALLOW_LLM") not in {"1", "true", "yes", "on"}:
+    os.environ["MODEL_GATEWAY_URL"] = ""
+    os.environ["MODEL_GATEWAY_API_KEY"] = ""
+
 # P2: 测试默认关闭认证 / 不强制 RLS / 使用内存限流，避免 shell 残留
 # 生产配置导致 create_app() 模块级调用时 401 / 启动失败。
 os.environ.setdefault("AUTH_ENABLED", "false")

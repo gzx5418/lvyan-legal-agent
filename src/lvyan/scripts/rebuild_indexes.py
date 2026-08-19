@@ -25,8 +25,19 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 _logger = logging.getLogger(__name__)
 
 
-def rebuild_article_index(manifests_dir: Path, *, force: bool = False) -> bool:
+def rebuild_article_index(
+    manifests_dir: Path,
+    *,
+    force: bool = False,
+    lawtext_dir: Path | None = None,
+) -> bool:
     """重建 article_index LVIX 文件。
+
+    Args:
+        manifests_dir: 索引输出目录。
+        force: 忽略现有有效索引，强制重建。
+        lawtext_dir: 现场构建时的法规源目录；None 时用默认 ``LAWTEXT_DIR``
+            （供 sync_sources 等入口把用户参数传递到重建流程）。
 
     Returns:
         True 表示成功重建, False 表示跳过或失败。
@@ -41,13 +52,17 @@ def rebuild_article_index(manifests_dir: Path, *, force: bool = False) -> bool:
         _logger.info("article_index LVIX 已存在且有效，跳过（使用 --force 强制重建）")
         return True
 
-    # 优先从 JSON 缓存读取
+    # 优先从 JSON 缓存读取（损坏/不可读时告警并降级走现场构建，而非裸崩）
     if json_path.is_file():
         import json
 
         _logger.info("从 JSON 缓存转换: %s", json_path)
-        with open(json_path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            _logger.warning("JSON 缓存读取失败 (%s)，降级从法规源现场构建", exc)
+            raw = None
         if isinstance(raw, dict) and isinstance(raw.get("chunks"), list):
             chunks_data = raw["chunks"]
             corpus_hash = _compute_chunk_signature(chunks_data)
@@ -62,11 +77,11 @@ def rebuild_article_index(manifests_dir: Path, *, force: bool = False) -> bool:
             return True
 
     # 从法规源现场构建
-    _logger.info("JSON 缓存不存在，从法规源现场构建 ...")
+    _logger.info("JSON 缓存不存在或不可用，从法规源现场构建 ...")
     try:
         from lvyan.scripts.ingest_laws import build_article_index, save_index_json
 
-        chunks = build_article_index()
+        chunks = build_article_index(lawtext_dir)
         if not chunks:
             _logger.warning("构建结果为空（法规源可能不可用）")
             return False
@@ -81,7 +96,9 @@ def rebuild_article_index(manifests_dir: Path, *, force: bool = False) -> bool:
             lvix_path,
             {
                 "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
-                "chunks": [c.model_dump() for c in chunks],
+                # mode="json"：date 字段转 ISO 字符串，避免 msgpack 无法序列化
+                # datetime.date（issue #11）
+                "chunks": [c.model_dump(mode="json") for c in chunks],
             },
             corpus_hash=corpus_hash,
             schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
@@ -94,8 +111,18 @@ def rebuild_article_index(manifests_dir: Path, *, force: bool = False) -> bool:
         return False
 
 
-def rebuild_bm25_index(manifests_dir: Path, *, force: bool = False) -> bool:
+def rebuild_bm25_index(
+    manifests_dir: Path,
+    *,
+    force: bool = False,
+    lawtext_dir: Path | None = None,
+) -> bool:
     """重建 bm25_index LVIX 文件。
+
+    Args:
+        manifests_dir: 索引输出目录（同时作为 article chunks 缓存的读取目录）。
+        force: 忽略现有有效索引，强制重建。
+        lawtext_dir: 现场构建时的法规源目录；None 时用默认 ``LAWTEXT_DIR``。
 
     Returns:
         True 表示成功重建, False 表示跳过或失败。
@@ -110,13 +137,17 @@ def rebuild_bm25_index(manifests_dir: Path, *, force: bool = False) -> bool:
         _logger.info("bm25_index LVIX 已存在且有效，跳过（使用 --force 强制重建）")
         return True
 
-    # 从 JSON 缓存转换
+    # 从 JSON 缓存转换（损坏/不可读时告警并降级，而非裸崩）
     if json_path.is_file():
         import json
 
         _logger.info("从 JSON 缓存转换: %s", json_path)
-        with open(json_path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            _logger.warning("JSON 缓存读取失败 (%s)，降级从 article chunks 构建", exc)
+            raw = None
         if isinstance(raw, dict) and raw.get("n_docs"):
             corpus_hash = str(raw.get("signature", ""))
             SafeIndexStore.save(
@@ -141,7 +172,8 @@ def rebuild_bm25_index(manifests_dir: Path, *, force: bool = False) -> bool:
             _compute_chunk_signature,
         )
 
-        chunks = _load_article_chunks()
+        # 显式传入 manifests_dir：不再固定读 AGENT_DIR 默认目录下的缓存
+        chunks = _load_article_chunks(manifests_dir, lawtext_dir=lawtext_dir)
         if not chunks:
             _logger.warning("article chunks 为空，无法构建 bm25 索引")
             return False
@@ -173,26 +205,51 @@ def rebuild_bm25_index(manifests_dir: Path, *, force: bool = False) -> bool:
         return False
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="重建律言安全索引文件 (LVIX)")
-    parser.add_argument(
-        "--manifests-dir",
-        type=Path,
-        default=None,
-        help="索引文件目录（默认: AGENT/knowledge/manifests）",
-    )
-    parser.add_argument("--force", action="store_true", help="强制重建（忽略现有有效索引）")
-    args = parser.parse_args()
+def main(args: argparse.Namespace | None = None) -> int:
+    """重建入口。
+
+    Args:
+        args: 可选的已解析参数对象（``sync_sources --rebuild`` 复用自身 args
+            时传入，避免用户参数被静默忽略）；None 时从 CLI 解析，保持
+            ``python -m lvyan.scripts.rebuild_indexes`` 的兼容用法。
+
+    Returns:
+        进程退出码：0 全部成功，1 部分失败。
+    """
+    if args is None:
+        parser = argparse.ArgumentParser(description="重建律言安全索引文件 (LVIX)")
+        parser.add_argument(
+            "--manifests-dir",
+            type=Path,
+            default=None,
+            help="索引文件目录（默认: AGENT/knowledge/manifests）",
+        )
+        parser.add_argument("--force", action="store_true", help="强制重建（忽略现有有效索引）")
+        args = parser.parse_args()
 
     from lvyan.config import AGENT_DIR
 
-    manifests_dir = args.manifests_dir or (AGENT_DIR / "knowledge" / "manifests")
+    # 外部传入的 Namespace 可能缺字段（如 sync_sources 无 --manifests-dir/--force），
+    # 缺省时回退 CLI 默认值
+    manifests_dir = getattr(args, "manifests_dir", None) or (AGENT_DIR / "knowledge" / "manifests")
+    force = bool(getattr(args, "force", False))
+    lawtext_dir = getattr(args, "lawtext_dir", None)
+
     _logger.info("索引目录: %s", manifests_dir)
-    _logger.info("强制重建: %s", args.force)
+    _logger.info("强制重建: %s", force)
 
     t0 = time.monotonic()
-    ok_article = rebuild_article_index(manifests_dir, force=args.force)
-    ok_bm25 = rebuild_bm25_index(manifests_dir, force=args.force)
+    # 两个 rebuild 独立捕获异常：第一条失败不阻断第二条（issue #16）
+    try:
+        ok_article = rebuild_article_index(manifests_dir, force=force, lawtext_dir=lawtext_dir)
+    except Exception as exc:  # noqa: BLE001 - CLI rebuild boundary
+        _logger.error("article_index 重建异常: %s", exc)
+        ok_article = False
+    try:
+        ok_bm25 = rebuild_bm25_index(manifests_dir, force=force, lawtext_dir=lawtext_dir)
+    except Exception as exc:  # noqa: BLE001 - CLI rebuild boundary
+        _logger.error("bm25_index 重建异常: %s", exc)
+        ok_bm25 = False
     elapsed = time.monotonic() - t0
 
     _logger.info("完成 (%.1fs): article=%s, bm25=%s", elapsed, ok_article, ok_bm25)

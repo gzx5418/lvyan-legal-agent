@@ -262,13 +262,23 @@ _GLOBAL_CHUNKS_CACHE: list[Any] | None = None
 _GLOBAL_BM25_INDEX: dict[str, Any] | None = None
 
 
-def _load_article_chunks() -> list[Any]:
+def _load_article_chunks(
+    directory: Path | None = None,
+    *,
+    lawtext_dir: Path | None = None,
+) -> list[Any]:
     """加载全库 ArticleChunk 列表。
 
     优先读取 ``AGENT/knowledge/manifests/article_index_v3.lvix``（MsgPack 安全
     索引格式，比 JSON 快 3-5x）；其次读取 ``article_index_v2.json``（由
     ``ingest_laws.py`` CLI 预生成）；不存在时调用 ``build_article_index``
     现场构建并落盘，便于后续运行复用。
+
+    Args:
+        directory: 索引缓存目录（默认 ``AGENT/knowledge/manifests``）。传入时
+            从该目录读写缓存，供 ``rebuild_indexes.py --manifests-dir`` 等脚本
+            复用；不传保持模块级默认路径行为。
+        lawtext_dir: 现场构建时的法规源目录；None 时用默认 ``LAWTEXT_DIR``。
 
     P0-B：加载缓存前先校验 ``corpus_manifest.json`` 中的 ``corpus_hash`` 是否
     与当前 ``LAWTEXT_DIR`` 一致。法库已更新（submodule 升级 / 挂载卷覆盖）
@@ -286,6 +296,14 @@ def _load_article_chunks() -> list[Any]:
         save_index_json,
     )
 
+    # 显式传入目录时改用该目录下的缓存文件（不影响模块级默认路径）
+    if directory is not None:
+        article_lvix = Path(directory) / "article_index_v3.lvix"
+        article_json = Path(directory) / "article_index_v2.json"
+    else:
+        article_lvix = _ARTICLE_INDEX_LVIX
+        article_json = _ARTICLE_INDEX_FILE
+
     # P0-B：校验法库/索引一致性。不一致则跳过缓存、现场重建。
     # 延迟导入避免循环依赖（manifest → lexical 会循环，但 manifest 内部
     # 用函数内 import 解 lexical._compute_chunk_signature，此处安全）。
@@ -296,7 +314,11 @@ def _load_article_chunks() -> list[Any]:
 
         # P0-3：自愈入口。索引不一致时自动原子重建（含重新生成 manifest），
         # 避免「readyz=503 → 无流量 → 永不修复」的恶性循环。
-        check = ensure_corpus_ready()
+        if directory is not None or lawtext_dir is not None:
+            # 显式目录/法库源场景：校验也要指向对应目录，而不是全局默认路径
+            check = ensure_corpus_ready(lawtext_dir, directory)
+        else:
+            check = ensure_corpus_ready()
         if not check["consistent"]:
             cache_trusted = False
             log(
@@ -307,12 +329,12 @@ def _load_article_chunks() -> list[Any]:
         log(f"[BM25] manifest 校验异常（忽略，按原逻辑加载）：{exc}")
 
     # 1) 优先尝试 MsgPack 安全索引（LVIX 格式）—— 仅在 manifest 一致时信任
-    if cache_trusted and _ARTICLE_INDEX_LVIX.is_file():
+    if cache_trusted and article_lvix.is_file():
         try:
             from lvyan.retrieval.safe_index import SafeIndexStore, IndexVersionMismatchError
 
             result = SafeIndexStore.load(
-                _ARTICLE_INDEX_LVIX,
+                article_lvix,
                 expected_schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
                 expected_corpus_hash=str(
                     (check.get("manifest") or {}).get("chunks_signature") or ""
@@ -324,7 +346,7 @@ def _load_article_chunks() -> list[Any]:
                 if isinstance(cached_data, dict) and isinstance(cached_data.get("chunks"), list):
                     chunks = [ArticleChunk.model_validate(item) for item in cached_data["chunks"]]
                     _GLOBAL_CHUNKS_CACHE = chunks
-                    log(f"[BM25] 命中 LVIX chunks：{_ARTICLE_INDEX_LVIX} (n={len(chunks)})")
+                    log(f"[BM25] 命中 LVIX chunks：{article_lvix} (n={len(chunks)})")
                     return chunks
         except IndexVersionMismatchError:
             log("[BM25] LVIX article index schema 版本不匹配，重建 ...")
@@ -332,9 +354,9 @@ def _load_article_chunks() -> list[Any]:
             log(f"[BM25] LVIX article index 读取失败 ({exc})，尝试 JSON ...")
 
     # 2) 回退到 JSON 缓存 —— 同样仅在 manifest 一致时信任
-    if cache_trusted and _ARTICLE_INDEX_FILE.is_file():
+    if cache_trusted and article_json.is_file():
         try:
-            with open(_ARTICLE_INDEX_FILE, "r", encoding="utf-8") as f:
+            with open(article_json, "r", encoding="utf-8") as f:
                 raw = json.load(f)
             if (
                 not isinstance(raw, dict)
@@ -350,13 +372,13 @@ def _load_article_chunks() -> list[Any]:
                     from lvyan.retrieval.safe_index import SafeIndexStore
 
                     SafeIndexStore.save(
-                        _ARTICLE_INDEX_LVIX,
+                        article_lvix,
                         {"schema_version": ARTICLE_INDEX_SCHEMA_VERSION, "chunks": raw["chunks"]},
                         corpus_hash=_compute_chunk_signature(chunks),
                         schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
                         item_count=len(chunks),
                     )
-                    log(f"[BM25] 已写入 LVIX chunks -> {_ARTICLE_INDEX_LVIX}")
+                    log(f"[BM25] 已写入 LVIX chunks -> {article_lvix}")
                 except Exception:  # noqa: BLE001 boundary-exception: 缓存写入可选
                     pass
                 return chunks
@@ -366,25 +388,27 @@ def _load_article_chunks() -> list[Any]:
 
     # 3) 现场构建（较慢，仅首次运行）
     log("[BM25] article_index 缓存不存在或损坏，现场构建全库 chunks ...")
-    chunks = build_article_index()
+    chunks = build_article_index(lawtext_dir)
     try:
-        save_index_json(chunks, _ARTICLE_INDEX_FILE)
-        log(f"[BM25] 已写入 {len(chunks)} chunks -> {_ARTICLE_INDEX_FILE}")
+        save_index_json(chunks, article_json)
+        log(f"[BM25] 已写入 {len(chunks)} chunks -> {article_json}")
         # 写入 LVIX 安全索引
         try:
             from lvyan.retrieval.safe_index import SafeIndexStore
 
             SafeIndexStore.save(
-                _ARTICLE_INDEX_LVIX,
+                article_lvix,
                 {
                     "schema_version": ARTICLE_INDEX_SCHEMA_VERSION,
-                    "chunks": [c.model_dump() for c in chunks],
+                    # mode="json"：date 字段转 ISO 字符串，避免 msgpack 无法
+                    # 序列化 datetime.date（issue #11）
+                    "chunks": [c.model_dump(mode="json") for c in chunks],
                 },
                 corpus_hash=_compute_chunk_signature(chunks),
                 schema_version=ARTICLE_INDEX_SCHEMA_VERSION,
                 item_count=len(chunks),
             )
-            log(f"[BM25] 已写入 LVIX chunks -> {_ARTICLE_INDEX_LVIX}")
+            log(f"[BM25] 已写入 LVIX chunks -> {article_lvix}")
         except Exception:  # noqa: BLE001 boundary-exception: 缓存写入可选
             pass
     except OSError as exc:

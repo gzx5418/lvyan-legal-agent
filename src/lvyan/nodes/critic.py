@@ -362,7 +362,9 @@ def critic(state: CaseState) -> dict[str, Any]:
             "critic_report": report.model_dump(),
             "critic_feedback": new_feedback,
             "reasoner_iteration": reasoner_iteration + 1,
-            "iteration": reasoner_iteration + 1,
+            # issue #16：停写 legacy ``iteration``（此前与 citation_verifier 的
+            # 双写语义不同、互相覆盖侵蚀对方预算）；旧 checkpoint 读取回退
+            # 由 get_compat_counter 处理，本节点只维护 reasoner_iteration。
         }
 
     # 已达最大迭代次数：强制通过，标记高风险

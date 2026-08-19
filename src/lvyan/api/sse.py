@@ -25,6 +25,7 @@ from typing import Any, Awaitable
 
 from fastapi import HTTPException
 
+from lvyan.common.helpers import _build_fallback_output  # noqa: F401 再导出，兼容既有导入
 from lvyan.memory.run_metadata import (
     RunMetadataStore,
     RunMetadataUnavailable,
@@ -366,6 +367,9 @@ class RunManager:
                 attachment_refs=attachment_refs,
                 user_preferences=user_preferences,
                 load_history=self._make_history_loader(resolved_thread_id, user_id),
+                # issue #16：SSE stream 路由只消费 subscribe() 订阅队列，
+                # 关闭旧 queue 投递避免事件双份保留
+                legacy_queue=False,
             )
         )
         ctx.created_at = _time.time()
@@ -689,7 +693,10 @@ class RunManager:
                 if is_auth_enabled() and user_id != current_user_id:
                     return ("forbidden", f"run {run_id} 不属于当前用户（owner={user_id}）")
 
-                ctx = self._bind_context(RunContext(run_id, thread_id, user_id=user_id))
+                # issue #16：同上，HITL 恢复路径也无需旧 queue 投递
+                ctx = self._bind_context(
+                    RunContext(run_id, thread_id, user_id=user_id, legacy_queue=False)
+                )
                 ctx.status = "awaiting_hitl"
                 ctx.hitl_interrupt = interrupt_info
                 ctx.created_at = meta.get("created_at", 0.0)
@@ -1214,52 +1221,6 @@ async def _check_interrupt_async(graph: Any, config: dict[str, Any]) -> dict[str
     if result.status == "pending":
         return result.payload
     return None
-
-
-def _build_fallback_output(state: dict[str, Any], query: str) -> str:
-    """当图提前结束（如 ask_user 路由）时，生成用户友好的 fallback 输出。"""
-    parts: list[str] = []
-
-    case_type = state.get("case_type")
-    if case_type:
-        parts.append(f"**案件类型识别**：{case_type}\n")
-
-    missing_facts = state.get("missing_facts", [])
-    if missing_facts:
-        parts.append("为了提供更准确的法律分析，请补充以下信息：\n")
-        for i, mf in enumerate(missing_facts, 1):
-            if isinstance(mf, dict):
-                question = mf.get("question", "")
-                reason = mf.get("reason", "")
-            else:
-                question = getattr(mf, "question", "")
-                reason = getattr(mf, "reason", "")
-            parts.append(f"{i}. **{question}**")
-            if reason:
-                parts.append(f"   _原因：{reason}_")
-            parts.append("")
-
-    facts = state.get("facts", [])
-    if facts:
-        parts.append("**已了解的事实**：")
-        for f in facts:
-            if isinstance(f, dict):
-                content = f.get("content", "")
-            else:
-                content = getattr(f, "content", "")
-            if content:
-                parts.append(f"- {content}")
-        parts.append("")
-
-    if not parts:
-        return (
-            "我已收到您的问题，但在当前分析模式下无法生成完整回复。\n"
-            "请尝试切换到**深度**模式，或提供更多细节信息。"
-        )
-
-    parts.append("---")
-    parts.append("_以上为初步分析，补充信息后可获得更完整的法律意见。_")
-    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

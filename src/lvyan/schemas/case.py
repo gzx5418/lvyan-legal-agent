@@ -107,7 +107,9 @@ class CaseState(BaseModel):
     run_id: str
     thread_id: str
     current_date: date
-    user_goal: str
+    # issue #16：用户目标为无界大文本入口，限制 4000 字符（超长输入直接
+    # 校验失败），防止把超大 payload 塞进状态/checkpoint/LLM 上下文。
+    user_goal: str = Field(max_length=4000)
     # P0 性能：附件按需检索后的紧凑上下文（覆盖语义）
     relevant_attachment_context: str = ""
     # 多轮记忆：本 thread 此前若干轮的紧凑摘要

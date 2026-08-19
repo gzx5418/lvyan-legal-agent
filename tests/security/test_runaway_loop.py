@@ -380,19 +380,22 @@ def test_citation_verifier_reretrieval_count_capped(
     rr = _make_reasoning_result_fabricated()
     statutes = [make_authority(article_number="第五百七十七条")]
 
-    # 模拟连续多次调用：iteration 0 → 1 → 2 → 强制通过
+    # 模拟连续多次调用：retrieval_iteration 0 → 1 → 2 → 强制通过
+    # （state 只带 legacy ``iteration``，验证 get_compat_counter 读取回退）
     for start_iter in [0, 1]:
         state = _citation_state(rr, statutes, iteration=start_iter)
         result = citation_verifier(state)
         assert result["citation_audit"]["reretrieval_count"] == start_iter + 1
-        assert result["iteration"] == start_iter + 1
+        # issue #16：停写 legacy ``iteration``，只维护 retrieval_iteration
+        assert result["retrieval_iteration"] == start_iter + 1
+        assert "iteration" not in result
         assert result["citation_audit"]["passed"] is False
 
-    # iteration=2 → 强制通过，reretrieval_count 不再增加
+    # retrieval_iteration=2 → 强制通过，reretrieval_count 不再增加
     state = _citation_state(rr, statutes, iteration=2)
     result = citation_verifier(state)
     assert result["citation_audit"]["reretrieval_count"] == 2
-    assert "iteration" not in result  # 不再重检索
+    assert "retrieval_iteration" not in result  # 不再重检索
     assert result.get("risk_level") == "high"
     assert result.get("confidence") == "insufficient"
 
@@ -412,22 +415,23 @@ def test_citation_verifier_never_exceeds_two_reretrievals(
     rr = _make_reasoning_result_fabricated()
     statutes = [make_authority(article_number="第五百七十七条")]
 
-    # 连续流程：iteration 从 0 开始，每次用上一步返回的 iteration 继续调用
+    # 连续流程：从 legacy ``iteration`` 起步（读取回退），逐步推进
+    # retrieval_iteration：0→1→2→强制通过。
     current_iter = 0
     max_reretrieval = 0
-    for _ in range(5):  # 最多模拟 5 步，应在 iteration=2 处终止
+    for _ in range(5):  # 最多模拟 5 步，应在 retrieval_iteration=2 处终止
         state = _citation_state(rr, statutes, iteration=current_iter)
         result = citation_verifier(state)
         max_reretrieval = max(max_reretrieval, result["citation_audit"]["reretrieval_count"])
-        # 强制通过路径不返回 iteration → 流程终止
-        if "iteration" not in result:
+        # 强制通过路径不返回 retrieval_iteration → 流程终止
+        if "retrieval_iteration" not in result:
             # 已强制通过，risk_level=high
             assert result.get("risk_level") == "high"
             break
-        current_iter = result["iteration"]
+        current_iter = result["retrieval_iteration"]
 
     assert max_reretrieval <= 2
-    assert current_iter <= 2  # iteration 不超过 2
+    assert current_iter <= 2  # retrieval_iteration 不超过 2
 
 
 # ---------------------------------------------------------------------------
@@ -442,22 +446,26 @@ def test_critic_iteration_capped(monkeypatch: pytest.MonkeyPatch):
     assert _max_iter == 2
 
     # reasoning_result=None → critic 必然不通过
+    # （state 只带 legacy ``iteration``，验证 get_compat_counter 读取回退）
     state_0 = _critic_state(reasoning_result=None, iteration=0)
     result_0 = critic(state_0)
     assert result_0["critic_report"]["passed"] is False
-    assert result_0["iteration"] == 1
+    # issue #16：停写 legacy ``iteration``，只维护 reasoner_iteration
+    assert result_0["reasoner_iteration"] == 1
+    assert "iteration" not in result_0
 
     state_1 = _critic_state(reasoning_result=None, iteration=1)
     result_1 = critic(state_1)
     assert result_1["critic_report"]["passed"] is False
-    assert result_1["iteration"] == 2
+    assert result_1["reasoner_iteration"] == 2
+    assert "iteration" not in result_1
 
-    # iteration=2 >= MAX → 强制通过，不再 +1
+    # reasoner_iteration=2 >= MAX → 强制通过，不再 +1
     state_2 = _critic_state(reasoning_result=None, iteration=2)
     result_2 = critic(state_2)
     assert result_2["critic_report"]["passed"] is True  # 强制通过
     assert result_2["critic_report"]["forced_pass"] is True
-    assert "iteration" not in result_2  # 不再回退
+    assert "reasoner_iteration" not in result_2  # 不再回退
     assert result_2.get("risk_level") == "high"
 
 
@@ -470,9 +478,9 @@ def test_critic_iteration_never_exceeds_max(monkeypatch: pytest.MonkeyPatch):
     for start_iter in range(5):
         state = _critic_state(reasoning_result=None, iteration=start_iter)
         result = critic(state)
-        if "iteration" in result:
-            max_iteration = max(max_iteration, result["iteration"])
-        # 强制通过时不返回 iteration，说明已达上限
+        if "reasoner_iteration" in result:
+            max_iteration = max(max_iteration, result["reasoner_iteration"])
+        # 强制通过时不返回 reasoner_iteration，说明已达上限
     assert max_iteration <= _max_iter
 
 

@@ -24,7 +24,7 @@ dependencies = [
     "msgpack>=1.0",                    # 安全索引序列化（替代 Pickle）
     "python-docx",                     # DOCX 导出，复用现有能力
     "pyyaml",                          # 解析法规 front matter
-    "langfuse",                        # 可观测性
+    "langfuse>=2.0,<3.0",              # 可观测性（v2 API：client.trace()/generation()/score()，与 compose 的 langfuse:2 服务对齐；v3+ 已移除这些方法）
     "opentelemetry-api",               # 追踪 API
     "opentelemetry-sdk",               # 追踪 SDK
     "mcp>=1.10,<2.0",                  # 标准法律工具 MCP Server

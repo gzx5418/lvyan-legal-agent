@@ -347,7 +347,8 @@ def test_critic_iteration_increments_on_failure():
     state = _make_state(reasoning_result=rr, iteration=0)
     result = critic(state)
 
-    assert result["iteration"] == 1
+    assert result["reasoner_iteration"] == 1
+    assert "iteration" not in result  # issue #16：停写 legacy iteration
     assert result["critic_report"]["passed"] is False
     assert len(result["critic_feedback"]) > 0
 
@@ -368,7 +369,8 @@ def test_critic_feedback_accumulates(monkeypatch: pytest.MonkeyPatch):
     )
     result = critic(state)
 
-    assert result["iteration"] == 2
+    assert result["reasoner_iteration"] == 2
+    assert "iteration" not in result  # issue #16：停写 legacy iteration
     assert "之前的反馈" in result["critic_feedback"]
     # 新 issue 也应被追加
     assert any("遗漏反方论点" in fb for fb in result["critic_feedback"])
@@ -498,4 +500,5 @@ def test_critic_fails_when_no_reasoning_result():
     report = result["critic_report"]
     assert report["passed"] is False
     assert any("reasoning_result" in issue for issue in report["issues"])
-    assert result["iteration"] == 1  # iteration +1
+    assert result["reasoner_iteration"] == 1  # 新计数器 +1
+    assert "iteration" not in result  # issue #16：停写 legacy iteration

@@ -25,21 +25,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        # 依赖统一按 uv.lock 锁定安装（--frozen），保证 CI 测的依赖集
+        # 与 uv.lock / Docker 镜像完全一致（langfuse 4.x 事故的根治点）。
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
-          cache: pip
+          enable-cache: true
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          pip install python-multipart markitdown
+      - name: Install dependencies (uv.lock)
+        # documents extra 覆盖原 markitdown 单独安装；python-multipart 为核心依赖
+        run: uv sync --frozen --extra dev --extra documents
 
       - name: Run tests (exclude slow tests needing law DB)
         run: |
-          python -m pytest tests/ -q \
+          uv run python -m pytest tests/ -q \
             --tb=short \
             -m "not slow" \
             -p no:cacheprovider \
@@ -78,29 +78,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
-          cache: pip
+          enable-cache: true
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+      - name: Install dependencies (uv.lock)
+        run: uv sync --frozen --extra dev
 
       - name: Run regression evaluation
         run: |
-          python tests/evals/run_regression.py --json regression-report.json
+          uv run python tests/evals/run_regression.py --json regression-report.json
 
       - name: Verify degrade mode triggers failure
+        # run_regression.py 退出码约定：0=通过，1=阈值违反（--degrade 的预期结果），
+        # 2=阈值解析失败；未捕获异常（ImportError / golden 损坏）同样非 0 且不会
+        # 写出报告 JSON。因此必须同时满足：退出码恰为 1 且报告的
+        # threshold_violations 非空——只看「非零即 OK」会把真实故障也判为通过。
         run: |
-          if python tests/evals/run_regression.py --limit 3 --degrade; then
-            echo "ERROR: degrade 模式应失败但通过了"
+          set +e
+          uv run python tests/evals/run_regression.py --limit 3 --degrade --json degrade-report.json
+          code=$?
+          set -e
+          if [ "$code" -ne 1 ]; then
+            echo "ERROR: degrade 模式期望退出码 1（阈值失败），实际退出码 $code"
             exit 1
-          else
-            echo "OK: degrade 模式正确触发阈值失败"
           fi
+          uv run python -c '
+          import json, sys
+          with open("degrade-report.json", encoding="utf-8") as f:
+              report = json.load(f)
+          violations = report.get("threshold_violations") or []
+          if not violations:
+              print("ERROR: degrade 报告 threshold_violations 为空，阈值未被触发")
+              sys.exit(1)
+          print(f"OK: degrade 模式正确触发阈值失败（{len(violations)} 项）")
+          '
 
       - name: Upload regression report
         if: always()
@@ -126,16 +140,14 @@ jobs:
           # 法规版本质量门禁依赖该子模块中的官方法规全文。
           submodules: recursive
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
-          cache: pip
+          enable-cache: true
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+      - name: Install dependencies (uv.lock)
+        run: uv sync --frozen --extra dev
 
       - name: Run full pipeline evaluation
         # 图的降级路径是此评测的目标；官方库质量由下一步单独验证。
@@ -143,11 +155,11 @@ jobs:
         env:
           LAWTEXT_DIR: ${{ runner.temp }}/lvyan-ci-empty-lawtext
         run: |
-          python tests/evals/pipeline_eval.py --json pipeline-report.json
+          uv run python tests/evals/pipeline_eval.py --json pipeline-report.json
 
       - name: Verify statute metadata does not regress
         run: |
-          python -m lvyan.scripts.sync_sources \
+          uv run python -m lvyan.scripts.sync_sources \
             --baseline knowledge/version_quality_baseline.json \
             --report version-quality-report.json
 
@@ -176,22 +188,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        # ruff 版本也来自 uv.lock（dev extra），避免 pip 解析到与本地/镜像不同的
+        # 版本导致格式化规则差异
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
-          cache: pip
+          enable-cache: true
 
-      - name: Install ruff
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff
+      - name: Install dependencies (uv.lock)
+        run: uv sync --frozen --extra dev
 
       - name: Run ruff check
-        run: ruff check src/ tests/
+        run: uv run ruff check src/ tests/
 
       - name: Run ruff format check
-        run: ruff format --check src/ tests/
+        run: uv run ruff format --check src/ tests/
 
       - name: Verify no pickle.load in source
         run: |
@@ -244,22 +256,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
-          cache: pip
+          enable-cache: true
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          pip install PyJWT cryptography
+      - name: Install dependencies (uv.lock)
+        # PyJWT[crypto] 与 cryptography 均为核心依赖，由锁定安装覆盖
+        run: uv sync --frozen --extra dev
 
       - name: Run PostgreSQL integration tests
         run: |
           # 记录总数与通过数；若全部被 skip 则失败。
-          python -m pytest tests/integration/test_run_metadata_postgres.py \
+          uv run python -m pytest tests/integration/test_run_metadata_postgres.py \
             -v --tb=short -p no:cacheprovider \
             -rA 2>&1 | tee pg_out.txt
           # 校验至少有一条非 skip 的通过项
@@ -306,17 +316,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
-          cache: pip
+          enable-cache: true
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev,production]"
+      - name: Install dependencies (uv.lock)
+        run: uv sync --frozen --extra dev --extra production
 
       - name: Run external service integration tests
         run: |
-          python -m pytest tests/integration/test_external_services.py -v --tb=short -rA
+          uv run python -m pytest tests/integration/test_external_services.py -v --tb=short -rA

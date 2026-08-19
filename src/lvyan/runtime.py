@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -29,6 +30,12 @@ _logger = logging.getLogger("lvyan.runtime")
 _shared_graph: Any = None
 # 异步图单例（API 路径用，AsyncPostgresSaver 绑定到 uvicorn 事件循环）
 _shared_graph_async: Any = None
+# issue #16：异步建图锁。惰性创建（而非 import 时创建）：asyncio.Lock 会
+# 绑定首次 await 它的事件循环，模块级创建会把单例锁钉死在「第一个碰巧
+# import 本模块的 loop」上，多事件循环的测试环境（每个用例新 loop）会在
+# 第二个 loop 上直接 RuntimeError。惰性创建 + reset_shared_graph 时一并
+# 置空，保证锁总是绑定当前活跃 loop。
+_shared_graph_async_lock: asyncio.Lock | None = None
 _case_memory: CaseMemory | None = None
 # P0-1：记录实际 checkpointer 类型，readyz 据此判断是否处于「半持久化」状态
 _checkpointer_kind: str = "unknown"
@@ -66,21 +73,44 @@ async def get_shared_graph_async() -> Any:
 
     与同步 :func:`get_shared_graph` 使用独立的单例，因为 ``AsyncPostgresSaver``
     和 ``PostgresSaver`` 不可互换（前者不实现 sync ``get``，后者不实现 async ``aput``）。
+
+    issue #16：加双重检查锁，防止并发首请求各自建图——此前无锁时后完成者
+    会覆盖前者发布的单例，先完成者持有的 AsyncConnection 池就此泄漏。
+    锁惰性创建存在一个极窄竞态窗口（两个协程同时通过 None 检查各建一把
+    锁、各拿各的锁并发建图），可容忍：由锁内的二次检查 + 「仅当仍无单例
+    才写入」兜底，先完成者成为单例，后完成者只是丢弃自己刚建的图返回
+    单例，不再发生覆盖。
     """
-    global _shared_graph_async, _checkpointer_kind
+    global _shared_graph_async, _checkpointer_kind, _shared_graph_async_lock
     if _shared_graph_async is not None:
         return _shared_graph_async
 
-    from lvyan.graph import build_graph_with_postgres_async
+    if _shared_graph_async_lock is None:
+        _shared_graph_async_lock = asyncio.Lock()
+    async with _shared_graph_async_lock:
+        # 双重检查：等锁期间可能已有并发请求完成建图
+        if _shared_graph_async is not None:
+            return _shared_graph_async
 
-    _shared_graph_async = await build_graph_with_postgres_async()
-    _checkpointer_kind = _detect_checkpointer_kind(_shared_graph_async.checkpointer)
-    _logger.warning(
-        "共享图实例已创建 (async, checkpointer=%s, kind=%s)",
-        type(_shared_graph_async.checkpointer).__name__,
-        _checkpointer_kind,
-    )
-    return _shared_graph_async
+        from lvyan.graph import build_graph_with_postgres_async
+
+        built = await build_graph_with_postgres_async()
+        # 仅当仍无单例时写入，避免慢请求覆盖快请求已发布的单例
+        # （慢请求刚建的图被丢弃，等价于本就丢弃而非泄漏覆盖）。
+        if _shared_graph_async is None:
+            _shared_graph_async = built
+            _checkpointer_kind = _detect_checkpointer_kind(built.checkpointer)
+            _logger.warning(
+                "共享图实例已创建 (async, checkpointer=%s, kind=%s)",
+                type(built.checkpointer).__name__,
+                _checkpointer_kind,
+            )
+        else:
+            _logger.warning(
+                "并发建图竞态：单例已被其他请求发布，丢弃本次构建结果 (%s)",
+                type(built.checkpointer).__name__,
+            )
+        return _shared_graph_async
 
 
 def _detect_checkpointer_kind(checkpointer: Any) -> str:
@@ -146,10 +176,17 @@ def get_case_memory() -> CaseMemory:
 
 
 def reset_shared_graph() -> None:
-    """重置共享图和 CaseMemory（测试隔离用）。"""
+    """重置共享图和 CaseMemory（测试隔离用）。
+
+    一并置空异步建图锁：锁绑定创建它的事件循环，跨 loop 的下一个测试
+    用例若复用旧锁会触发 ``bound to a different event loop``；置空后由
+    :func:`get_shared_graph_async` 在当前 loop 惰性重建。
+    """
     global _shared_graph, _shared_graph_async, _case_memory, _checkpointer_kind
+    global _shared_graph_async_lock
     _shared_graph = None
     _shared_graph_async = None
+    _shared_graph_async_lock = None
     _case_memory = None
     _checkpointer_kind = "unknown"
 

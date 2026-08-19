@@ -12,8 +12,10 @@
 # 仅启动应用 + PostgreSQL（最小化部署，不需要检索/对象存储）：
 #   docker compose up -d postgres app
 #
-# 注意：本文件带弱默认密码仅方便本地试用；生产部署必须通过 .env 覆盖所有密码，
-#       并按需关闭对外的 5432/9200/9000/9001/3000 端口映射。
+# 注意：本文件带弱默认密码仅方便本地试用；生产部署必须通过 .env 覆盖所有密码。
+#       端口默认仅绑定宿主机回环地址（127.0.0.1）：postgres/opensearch/minio/redis
+#       不对外网卡暴露；应用 8000 与 langfuse 3000 仍对外发布，跨主机访问时应置于
+#       反向代理 / 防火墙之后。
 
 services:
   # ---------------------------------------------------------------------------
@@ -29,7 +31,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lvyan}
       POSTGRES_DB: ${POSTGRES_DB:-lvyan}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # 默认仅绑定宿主机回环地址，避免无防护的 PostgreSQL 暴露到外网卡
+      # （与下方 opensearch 的做法一致）
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - lvyan-postgres-data:/var/lib/postgresql/data
       # 首次初始化时自动执行迁移脚本（仅数据卷为空时触发）
@@ -78,8 +82,10 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-lvyan}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-lvyan_dev_password}
     ports:
-      - "${MINIO_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      # 默认仅绑定宿主机回环地址（与 opensearch 做法一致），需要跨主机
+      # 访问时应置于反向代理 / 防火墙之后
+      - "${MINIO_BIND_HOST:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+      - "${MINIO_BIND_HOST:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - lvyan-minio-data:/data
     networks:
@@ -97,20 +103,29 @@ services:
     image: redis:7-alpine
     container_name: lvyan-redis
     restart: unless-stopped
+    # 认证：默认仅弱开发密码；生产必须通过 .env 的 REDIS_PASSWORD 覆盖为强随机值，
+    # 且 REDIS_URL 需同步带密码（redis://:<REDIS_PASSWORD>@redis:6379/0）。
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-lvyan-dev-only}"]
+    environment:
+      # 供 healthcheck 通过 redis-cli 认证探测使用
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-lvyan-dev-only}
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      # 默认仅绑定宿主机回环地址（与 opensearch 做法一致）
+      - "${REDIS_BIND_HOST:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     volumes:
       - lvyan-redis-data:/data
     networks:
       - lvyan-net
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   # ---------------------------------------------------------------------------
   # Langfuse：可观测性（可选，未配置 key 时应用自动关闭 trace 上报）
+  # v2 依赖 Redis（bullmq 队列），且自带 prisma 迁移——必须使用独立数据库，
+  # 不能与业务库 lvyan 混用（langfuse 建表会与业务表互相污染）。
   # ---------------------------------------------------------------------------
   langfuse:
     image: langfuse/langfuse:2
@@ -120,8 +135,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-lvyan}:${POSTGRES_PASSWORD:-lvyan}@postgres:5432/lvyan"
+      # 独立 langfuse 库：由 migrations/000_langfuse_database.sh 在 postgres
+      # 数据卷首次初始化时创建（沿用 POSTGRES_USER/PASSWORD 连接）。
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-lvyan}:${POSTGRES_PASSWORD:-lvyan}@postgres:5432/langfuse"
+      # v2 的 bullmq 队列依赖 Redis，与上方 redis 服务共用实例与密码
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-lvyan-dev-only}
       NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3000}
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-lvyan-dev-nextauth-secret-change-me}
       SALT: ${LANGFUSE_SALT:-lvyan-dev-salt-change-me}
@@ -219,7 +242,9 @@ services:
       CASE_VAULT_ALLOW_INSECURE: ${CASE_VAULT_ALLOW_INSECURE:-true}
 
       # —— 多租户与限流（P2: 生产必须 redis + RLS）——
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      # Redis 已启用 requirepass：连接串必须带密码（redis://:<密码>@redis:6379/0），
+      # 默认值与 redis 服务的 REDIS_PASSWORD 默认值一致；生产必须同时替换两者。
+      REDIS_URL: ${REDIS_URL:-redis://:lvyan-dev-only@redis:6379/0}
       RATE_LIMIT_BACKEND: ${RATE_LIMIT_BACKEND:-redis}
       RLS_ENFORCED: ${RLS_ENFORCED:-true}
 
