@@ -789,6 +789,69 @@ def test_readyz_returns_503_when_dependency_not_ready(monkeypatch):
     assert response.json()["status"] == "not-ready"
 
 
+def test_readyz_observability_ok_when_components_registered(monkeypatch):
+    """正常环境：三个观测组件全部激活 → observability.status == ok。"""
+    from fastapi.testclient import TestClient
+    from lvyan.api import server
+    from lvyan.observability import metrics as obs_metrics
+
+    # 测试 venv 未必安装 production extra（prometheus_client）：
+    # 显式打开可用性标志与 METRICS_ENABLED，模拟组件齐全的生产镜像环境。
+    monkeypatch.setattr(obs_metrics, "_PROM_AVAILABLE", True)
+    monkeypatch.setenv("METRICS_ENABLED", "true")
+    monkeypatch.setattr(server, "_check_database_ready", lambda: "ok")
+    monkeypatch.setattr(server, "_check_retrieval", lambda: "ok")
+    monkeypatch.setattr(server, "_check_model_gateway_ready", lambda: "ok")
+
+    app = server.create_app(
+        runner=lambda *_args, **_kwargs: None,
+        memory=_ApiMemory(),
+    )
+
+    assert app.state.observability_components == [
+        "http_metrics",
+        "request_id",
+        "metrics_endpoint",
+    ]
+
+    body = TestClient(app).get("/readyz").json()
+    assert body["observability"]["status"] == "ok"
+    assert body["observability"]["components"] == [
+        "http_metrics",
+        "request_id",
+        "metrics_endpoint",
+    ]
+
+
+def test_readyz_observability_degraded_when_component_registration_fails(monkeypatch):
+    """组件注册失败（依赖缺失/开关关闭）→ observability.status == degraded。"""
+    from fastapi.testclient import TestClient
+    from lvyan.api import server
+    from lvyan.observability import http_metrics as obs_http_metrics
+    from lvyan.observability import metrics as obs_metrics
+
+    # metrics 端点注册失败（等价于依赖缺失或 METRICS_ENABLED=false）
+    monkeypatch.setattr(obs_metrics, "register_metrics_endpoint", lambda _app: False)
+    # http_metrics 中间件不会真正激活
+    monkeypatch.setattr(obs_http_metrics, "is_http_metrics_active", lambda: False)
+    monkeypatch.setattr(server, "_check_database_ready", lambda: "ok")
+    monkeypatch.setattr(server, "_check_retrieval", lambda: "ok")
+    monkeypatch.setattr(server, "_check_model_gateway_ready", lambda: "ok")
+
+    body = TestClient(
+        server.create_app(
+            runner=lambda *_args, **_kwargs: None,
+            memory=_ApiMemory(),
+        )
+    ).get("/readyz").json()
+
+    assert body["observability"]["status"] == "degraded"
+    components = body["observability"]["components"]
+    assert "request_id" in components
+    assert "metrics_endpoint" not in components
+    assert "http_metrics" not in components
+
+
 def test_checkpoint_delete_failure_returns_503_without_deleting_metadata():
     from fastapi.testclient import TestClient
     from lvyan.api.server import create_app

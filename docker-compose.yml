@@ -249,6 +249,9 @@ services:
       RLS_ENFORCED: ${RLS_ENFORCED:-true}
 
       # —— 可观测性（P4）——
+      # 结构化日志迁移：应用镜像已内置 structlog，容器日志默认 LOG_FORMAT=json
+      # （JSON 行格式），docker compose logs / Loki / ELK 均按行解析；如需
+      # 人类可读的彩色控制台输出，显式设置 LOG_FORMAT=text。
       LOG_FORMAT: ${LOG_FORMAT:-json}
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
       METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:-}

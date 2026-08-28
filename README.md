@@ -34,7 +34,7 @@
 
 | 能力 | 实现 |
 |---|---|
-| 12 节点 Agent 图 | 预检、管辖、事实提取、缺失评估、规划、检索、权威解析、推理、评审、生成、引用校验、输出护栏 |
+| 15 节点 Agent 图 | 预检、附件检索、管辖分流、事实提取、缺失评估、规划、并行检索、权威解析、证据分析、推理、评审、生成、引用校验、输出护栏、答案定稿 |
 | 混合检索 | BM25、Dense、规则匹配、版本过滤与 Reranker |
 | 历史法规 | 请求级 `law_as_of_date` 贯穿检索与完整引用审计 |
 | 三种输出模式 | `light` 快答、`deep` 深度分析、`document` 文书生成 |
@@ -69,6 +69,8 @@ flowchart LR
     L -->|重写| J
     L -->|完成| M[最终输出]
 ```
+
+> 上图为主链简化示意；完整 15 节点清单以 `src/lvyan/graph/builder.py` 的 `NODE_NAMES` 为准。
 
 ## 快速开始
 
@@ -221,6 +223,9 @@ docker compose --profile full up -d --build
 - 持久化卷：`lvyan-app-data`（上传与线程索引）、`lvyan-app-outputs`（文书导出）、
   `lvyan-app-manifests`（检索索引缓存）
 - 端口映射可通过 `.env` 的 `APP_PORT` / `POSTGRES_PORT` 等覆盖
+- 日志格式迁移：应用镜像内置 structlog，容器日志默认 `LOG_FORMAT=json`（JSON 行），
+  `docker compose logs` 与 Loki/ELK 直接解析；本地开发默认彩色文本，需要时可在
+  `.env` 显式设置 `LOG_FORMAT=text`
 
 > ⚠️ `.env.example` 中的默认密码仅方便本地试用，生产部署前必须替换为强随机值，
 > OpenSearch 默认只绑定 `127.0.0.1`；生产环境还应启用其安全插件与 TLS，
@@ -350,6 +355,7 @@ CI 会阻止未知状态、缺失生效日期、废止但无失效日期、缺�
 - 已完成 run 的最终输出可从其他实例恢复。
 - **运行中的实时 SSE 仍需要负载均衡器开启 sticky session / session affinity。** 如需任意实例订阅实时事件，应接入 Redis Streams、Pub/Sub 或独立事件表。
 - 生产环境应在 API Gateway / OIDC Proxy 完成身份验证，并可信注入 `X-User-ID`。
+- **限流语义变化（更正）**：此前生产镜像未安装 redis 包，compose 默认的 `RATE_LIMIT_BACKEND=redis` 下后端持续不健康——高成本 POST（run/upload/hitl）返回 503，其余受限 POST 因 fail-open 实际不受限流；当时**并非**"各实例进程内计数"（该行为仅在显式 `RATE_LIMIT_BACKEND=memory` 或未配置 `REDIS_URL` 时出现）。production extra 修复后 redis 包已随镜像安装，redis 后端真正生效：限流配额成为跨实例的全局配额。Redis 不可达时仍会按请求记录重连错误日志；单实例部署可显式设置 `RATE_LIMIT_BACKEND=memory` 回退进程内限流。
 
 ## 项目结构
 
@@ -358,7 +364,7 @@ CI 会阻止未知状态、缺失生效日期、废止但无失效日期、缺�
 ├── src/lvyan/
 │   ├── api/              # FastAPI、SSE、认证与内置前端
 │   ├── graph/            # LangGraph 图与路由策略
-│   ├── nodes/            # 12 个 Agent 节点
+│   ├── nodes/            # 15 个注册 Agent 节点（含共享实现模块，注册清单见 src/lvyan/graph/builder.py 的 NODE_NAMES）
 │   ├── retrieval/        # 混合检索、重排与法规版本解析
 │   ├── validators/       # 引用、权威状态、接地与输出验证
 │   ├── memory/           # Checkpoint、run metadata 与案件记忆
@@ -389,6 +395,8 @@ python -m pytest tests/ -q -m "not slow"
 # 静态检查
 python -m ruff check src/ tests/
 ```
+
+默认按离线运行：测试根 conftest 会强制将 `MODEL_GATEWAY_URL` 置空，测试不访问真实 LLM 网关（避免结果不确定与配额消耗）。需要真实网关的用例请设置 `LVYAN_TESTS_ALLOW_LLM=1` 显式 opt-in。
 
 CI 包含单元与集成测试、金标集回归、Agent Pipeline 回归和 Ruff 检查。
 

@@ -46,6 +46,7 @@ const PROBATIVE_FORCE_CN = { key: '关键', strong: '较强', medium: '一般', 
 const MATERIAL_COMPLETENESS_CN = { complete: '材料较完整', partial: '材料部分完整', insufficient: '材料不足' };
 const CITATION_STATUS_CN = { effective: '现行有效', repealed: '已废止', not_yet_effective: '尚未生效', unknown: '状态未知' };
 const CITATION_LEVEL_CN = { law: '法律', regulation: '行政法规', judicial_interpretation: '司法解释', guiding_case: '指导案例', reference_case: '参考案例', normative: '规范性文件' };
+const ANALYSIS_MODE_CN = { light: '轻量分析', deep: '深度分析', document: '文书分析' };
 
 function esc(text) {
   if (text == null) return '';
@@ -79,9 +80,11 @@ function renderReportHeader(meta) {
   if (!meta) return '';
   const risk = RISK_RATING_META[meta.risk_level] || RISK_RATING_META.medium;
   const completeness = MATERIAL_COMPLETENESS_CN[meta.material_completeness] || meta.material_completeness || '';
+  const modeLabel = ANALYSIS_MODE_CN[meta.analysis_mode];
+  const modeBadge = modeLabel ? `<span class="la-rule-chip">${esc(modeLabel)}</span>` : '';
   return `
     <div class="la-report-header">
-      <div class="la-report-eyebrow">法律分析报告 <span class="risk-badge ${risk.cls}">${risk.label}</span></div>
+      <div class="la-report-eyebrow">法律分析报告 <span class="risk-badge ${risk.cls}">${risk.label}</span>${modeBadge}</div>
       <h2 class="la-report-title">${esc(meta.title || '法律分析意见')}</h2>
       <div class="la-meta-grid">
         <span>${esc(meta.case_type || '')} · ${esc(meta.jurisdiction || '')}</span>
@@ -123,7 +126,7 @@ function renderSummaryGrid(summary, risks, meta) {
 function renderImmediateActions(plan) {
   const immediate = (plan || []).filter(a => a.phase === 'immediate').slice(0, 3);
   if (!immediate.length) return '';
-  const items = immediate.map(a => `<li><strong>${esc(a.description)}</strong></li>`).join('');
+  const items = immediate.map(a => `<li><strong>${esc(a.description)}</strong>${a.target ? `<br><small>执行对象：${esc(a.target)}</small>` : ''}${a.risk ? `<br><small>风险提示：${esc(a.risk)}</small>` : ''}</li>`).join('');
   return `
     <section class="la-section">
       <h3>立即行动</h3>
@@ -137,7 +140,8 @@ function renderFacts(facts) {
     const m = FACT_STATUS_META[f.status] || FACT_STATUS_META.claimed;
     return `<li class="la-fact ${m.cls}">
       <span class="la-fact-tag">${m.label}</span>
-      <span class="la-fact-content">${esc(f.content)}</span>
+      <span class="la-fact-content">${esc(f.content)}${f.detail ? `<br><small>${esc(f.detail)}</small>` : ''}</span>
+      ${f.source_ref ? `<span class="la-rule-chip">${esc(f.source_ref)}</span>` : ''}
     </li>`;
   }).join('');
   return `<section class="la-section"><h3>事实基础</h3><ul class="la-facts">${items}</ul></section>`;
@@ -204,7 +208,7 @@ function renderFullActionPlan(plan) {
   const grouped = {};
   nonImmediate.forEach(a => { const p = a.phase || 'short_term'; if (!grouped[p]) grouped[p] = []; grouped[p].push(a); });
   const blocks = Object.keys(grouped).map(p => {
-    const items = grouped[p].map(a => `<li><strong>${esc(a.description)}</strong>${a.required_materials && a.required_materials.length ? `<br><small>所需材料：${a.required_materials.map(esc).join('、')}</small>` : ''}${a.deadline ? `<br><small>截止：${esc(a.deadline)}</small>` : ''}</li>`).join('');
+    const items = grouped[p].map(a => `<li><strong>${esc(a.description)}</strong>${a.target ? `<br><small>执行对象：${esc(a.target)}</small>` : ''}${a.required_materials && a.required_materials.length ? `<br><small>所需材料：${a.required_materials.map(esc).join('、')}</small>` : ''}${a.deadline ? `<br><small>截止：${esc(a.deadline)}</small>` : ''}${a.risk ? `<br><small>风险提示：${esc(a.risk)}</small>` : ''}</li>`).join('');
     return `<div class="la-action-phase"><h4>${phaseLabel[p] || p}</h4><ol>${items}</ol></div>`;
   }).join('');
   return `<section class="la-section"><h3>完整行动时间线</h3>${blocks}</section>`;
@@ -216,16 +220,18 @@ function renderCitations(citations) {
     const levelLabel = CITATION_LEVEL_CN[c.level] || c.level || '';
     const statusLabel = CITATION_STATUS_CN[c.status] || c.status || '';
     const role = c.role_in_analysis ? `<p><small>本案作用：${esc(c.role_in_analysis)}</small></p>` : '';
-    const sourceText = c.official_source || '官方数据库';
-    const source = /^https?:\/\//i.test(sourceText)
-      ? `<a href="${esc(sourceText)}" target="_blank" rel="noopener noreferrer">查看官方来源</a>`
-      : esc(sourceText);
+    const effective = c.effective_date ? `　生效日期：${esc(c.effective_date)}` : '';
+    // 与 renderOnlineSources 一致：仅白名单 https 官方域名渲染链接，其余按转义纯文本回退
+    const officialUrl = safeOfficialUrl(c.official_source || '');
+    const source = officialUrl
+      ? `<a href="${esc(officialUrl)}" target="_blank" rel="noopener noreferrer">查看官方来源</a>`
+      : esc(c.official_source || '官方数据库');
     return `<details class="la-citation">
       <summary><span class="la-citation-level level-${esc(c.level)}">${esc(levelLabel)}</span>《${esc(c.full_name)}》${esc(c.article_number)}</summary>
       <div class="la-citation-detail">
         <p>${esc(c.article_text)}</p>
         ${role}
-        <p><small>效力状态：${esc(statusLabel)}　来源：${source}</small></p>
+        <p><small>效力状态：${esc(statusLabel)}${effective}　来源：${source}</small></p>
       </div>
     </details>`;
   }).join('');

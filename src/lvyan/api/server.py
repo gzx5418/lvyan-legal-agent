@@ -96,6 +96,13 @@ setup_logging()
 
 _logger = logging.getLogger("lvyan.api.server")
 
+# /readyz 观测披露的期望组件集合：与 create_app 内三处注册点保持一致
+# （http_metrics / request_id / metrics_endpoint）。新增观测组件注册点时
+# 必须同步更新此集合，否则组件齐全的实例会被 /readyz 误报为 degraded。
+_EXPECTED_OBSERVABILITY_COMPONENTS = frozenset(
+    {"http_metrics", "request_id", "metrics_endpoint"}
+)
+
 # 文件上传相关常量
 _UPLOAD_DIR = AGENT_DIR / "data" / "uploads"
 _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -960,22 +967,45 @@ def create_app(
             response.headers["Cache-Control"] = "no-cache"
         return response
 
+    # 观测组件登记：production extra（prometheus-client/structlog）缺失或
+    # METRICS_ENABLED=false 时，这些组件不会真正激活；注册结果显式记录到
+    # app.state 并由 /readyz 披露 degraded 状态，避免交付镜像内指标/请求 ID
+    # 关联失效却无健康信号（不再静默跳过）。
+    observability_components: list[str] = []
+
     # P4：HTTP 请求指标中间件（在 RateLimitMiddleware 之后添加 → 更外层，
     # 确保被限流的 429 响应也被指标覆盖）
     try:
-        from lvyan.observability.http_metrics import HTTPMetricsMiddleware
+        from lvyan.observability.http_metrics import (
+            HTTPMetricsMiddleware,
+            is_http_metrics_active,
+        )
 
-        app.add_middleware(HTTPMetricsMiddleware)
+        # 仅当中间件运行时会真正采集指标（prometheus_client 可用）时才登记；
+        # 否则报 warning 并由 /readyz 披露 degraded。
+        if is_http_metrics_active():
+            app.add_middleware(HTTPMetricsMiddleware)
+            observability_components.append("http_metrics")
+        else:
+            _logger.warning(
+                "观测组件未激活：http_metrics"
+                "（prometheus_client 缺失或指标依赖不可用，/readyz 将披露 degraded）"
+            )
     except ImportError:
-        pass
+        _logger.warning("观测组件不可用：http_metrics（依赖缺失，/readyz 将披露 degraded）")
 
     # P4：请求 ID 中间件（在指标之后添加 → 更外层，所有日志携带 request_id）
     try:
         from lvyan.observability.request_id import RequestIDMiddleware
 
         app.add_middleware(RequestIDMiddleware)
+        observability_components.append("request_id")
     except ImportError:
-        pass
+        _logger.warning("观测组件不可用：request_id（依赖缺失，/readyz 将披露 degraded）")
+    # 注意：这里存入的是同一个 list 对象——本函数后续注册 /metrics 端点时
+    # 还会继续向它 append，/readyz 读取的也是它。不要替换成副本，否则
+    # metrics_endpoint 永远不会出现在披露清单中。
+    app.state.observability_components = observability_components
 
     # P2-13：CORS 白名单；通过 CORS_ALLOWED_ORIGINS 环境变量覆盖。
     # 最后添加 → 最外层，429/503 等中间件短路响应也带 CORS 头。
@@ -1018,6 +1048,9 @@ def create_app(
         - ``checkpointer``：P0-1 新增。实际 checkpointer 后端（postgres/memory）。
           生产模式下若为 memory（静默降级）→ not-ready。
         - ``object_storage``：保留位（当前未实现）
+        - ``observability``：指标/请求 ID/metrics 端点注册状态。注册时显式
+          校验可用性（依赖缺失或 METRICS_ENABLED=false 的组件不会登记），
+          未全部激活时为 degraded，仅披露不阻断 ready。
         """
         # P1-1/P2：DB / retrieval / gateway 均为同步网络或磁盘 I/O，
         # 全部卸载到线程池并**并发**执行（asyncio.gather），避免 event loop
@@ -1079,6 +1112,21 @@ def create_app(
         )
         # P0-4：法律语料库详细状态（透明披露「完整库」vs「精编子集」+ 规模统计）
         legal_corpus = await asyncio.to_thread(_legal_corpus_status)
+
+        # 观测组件披露：注册时已显式校验可用性（依赖缺失/METRICS_ENABLED=false
+        # 的组件不会登记），此处列出实际激活清单（披露不阻断 ready，避免把
+        # 可服务的实例摘除）。
+        obs_components = list(getattr(app.state, "observability_components", []))
+        # 显式与期望集合比较（而非硬编码数量）：注册点增减时口径自动同步，
+        # 重复登记也不会误判为 ok。
+        observability = {
+            "status": (
+                "ok"
+                if set(obs_components) == _EXPECTED_OBSERVABILITY_COMPONENTS
+                else "degraded"
+            ),
+            "components": obs_components,
+        }
         # model_gateway 不可用不阻断 ready（可降级到规则路径）
         return JSONResponse(
             status_code=200 if ready else 503,
@@ -1093,6 +1141,7 @@ def create_app(
                 "authentication": auth_status,
                 "object_storage": "unknown",
                 "legal_corpus": legal_corpus,
+                "observability": observability,
             },
         )
 
@@ -1988,9 +2037,18 @@ def create_app(
     try:
         from lvyan.observability.metrics import register_metrics_endpoint
 
-        register_metrics_endpoint(app)
+        # 仅当路由实际注册成功（依赖可用且 METRICS_ENABLED=true）时才登记；
+        # 否则报 warning 并由 /readyz 披露 degraded。
+        if register_metrics_endpoint(app):
+            observability_components.append("metrics_endpoint")
+        else:
+            _logger.warning(
+                "观测组件未激活：metrics_endpoint"
+                "（prometheus_client/fastapi 缺失或 METRICS_ENABLED=false，"
+                "/readyz 将披露 degraded）"
+            )
     except ImportError:
-        pass
+        _logger.warning("观测组件不可用：metrics_endpoint（依赖缺失，/readyz 将披露 degraded）")
 
     if _static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")

@@ -38,17 +38,20 @@ let uiPreferences = { ...DEFAULT_UI_PREFERENCES };
 // --- 节点中文名映射（仅用于 node_error toast 展示，不参与进度统计） ---
 const NODE_LABELS = {
   preflight: '预检',
+  attachment_retriever: '附件检索',
   jurisdiction_triage: '管辖分流',
   fact_extractor: '事实抽取',
   missing_fact_assessor: '缺失评估',
   planner: '规划',
   parallel_retrieval: '法条检索',
   authority_resolver: '权威解析',
+  evidence_analyzer: '证据分析',
   legal_reasoner: '法律推理',
   critic: '评审',
   citation_verifier: '引用校验',
   composer: '生成',
   output_guardrail: '安全护栏',
+  legal_answer_finalizer: '答案定稿',
 };
 
 // =========================================================================
@@ -922,7 +925,9 @@ function handleSSEEvent(event) {
       break;
 
     case 'node_error':
-      updateNodeChip(event.node, 'error');
+      // 后端在 node_error 事件附带 phase_key（语义阶段键；未映射节点可能缺省或为 null）。
+      // 有值时点亮对应阶段 chip；缺省时保持仅 toast 提示，不得抛错。
+      if (event.phase_key) updateNodeChip(event.phase_key, 'error');
       showToast(`${NODE_LABELS[event.node] || event.node}执行失败`, 'error');
       break;
 
@@ -1029,32 +1034,11 @@ function handlePhaseProgress(event) {
   els.progressBar.setAttribute('aria-valuenow', String(Math.round(pct)));
 }
 
-function updateNodeChip(node, status) {
-  // node_error 时点亮对应语义阶段 chip（尽力而为；未知节点忽略）
-  const phase = nodeToPhaseKey(node);
-  if (!phase) return;
-  const chip = $(`phase-${phase}`);
+function updateNodeChip(phaseKey, status) {
+  // node_error 时点亮对应语义阶段 chip（phase_key 由后端事件下发；缺省或未知阶段忽略）
+  if (!phaseKey) return;
+  const chip = $(`phase-${phaseKey}`);
   if (chip) chip.className = 'node-chip error';
-}
-
-function nodeToPhaseKey(node) {
-  const map = {
-    preflight: 'comprehension',
-    jurisdiction_triage: 'comprehension',
-    fact_extractor: 'comprehension',
-    missing_fact_assessor: 'comprehension',
-    attachment_retriever: 'preparation',
-    planner: 'preparation',
-    parallel_retrieval: 'retrieval',
-    authority_resolver: 'retrieval',
-    legal_reasoner: 'analysis',
-    critic: 'verification',
-    citation_verifier: 'verification',
-    output_guardrail: 'verification',
-    composer: 'generation',
-    legal_answer_finalizer: 'generation',
-  };
-  return map[node] || null;
 }
 
 // =========================================================================

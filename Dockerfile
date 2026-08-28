@@ -35,10 +35,12 @@ COPY src ./src
 # （langfuse 4.x 事故的根治点）。uv 版本与生成 uv.lock 的本地版本钉死一致。
 # --no-editable 保持与原 pip install 一致的普通安装（非 editable），
 # venv 产物进 /opt/venv（见上方 UV_PROJECT_ENVIRONMENT），runtime 阶段直接复制。
-# documents extra 支持 Office/PDF 转 Markdown（markitdown）。
+# documents extra 支持 Office/PDF 转 Markdown；production extra 提供
+# prometheus-client/structlog（HTTP 指标、请求 ID、/metrics 端点依赖，
+# 缺失时应用会静默降级并在 /readyz 披露 degraded）。
 COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /uvx /bin/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-editable --extra documents
+    uv sync --frozen --no-dev --no-editable --extra documents --extra production
 
 # P0-2：构建期预热法律检索索引，避免首个用户请求触发 10-30s 冷启动。
 # 复制官方法律库 submodule 内容（构建前需 git submodule update --init --recursive）。
@@ -72,7 +74,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PERSISTENCE_REQUIRED=true \
     CHECKPOINTER_BACKEND=postgres \
     # 应用容器内数据目录（与 compose 卷挂载点一致）
-    AGENT_DIR=/app
+    AGENT_DIR=/app \
+    # 结构化日志迁移：production extra 已安装 structlog，生产镜像内默认
+    # 输出 JSON 结构化日志（LOG_FORMAT=json），供 Loki/ELK 及日志采集器
+    # 按行解析；本地开发不受影响（代码默认 LOG_FORMAT=text，彩色控制台）。
+    LOG_FORMAT=json \
+    # Prometheus 指标默认开启：prometheus_client 与带 token 保护的 /metrics
+    # 端点已随 production extra 打入镜像，独立 docker run（不经 compose）
+    # 也应暴露指标并在 /readyz 报告 observability "ok"。生产抓取建议配置
+    # METRICS_AUTH_TOKEN（可选；未设置时端点无认证，需靠网络层隔离）。
+    METRICS_ENABLED=true
 
 WORKDIR /app
 

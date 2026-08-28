@@ -8,6 +8,13 @@
 4. Agent 运行：agent_run_total, agent_run_duration_seconds
 5. 系统健康：active_connections, rate_limit_hits_total
 
+HTTP 指标语义变化（纯 ASGI 中间件起）
+--------
+``lvyan_http_request_duration_seconds`` 统计到响应体发送完毕为止：SSE 流式
+响应计时到流结束，且受当前 10s 桶上限影响，长流通常落入 +Inf 桶；
+``lvyan_http_requests_total`` 与 ``lvyan_active_connections`` 的语义随之同步
+调整。依赖 p99 / 均值看板或告警阈值的消费方应复核流式流量的桶配置。
+
 保护
 ----
 /metrics 端点在生产环境通过 Bearer token 保护（METRICS_AUTH_TOKEN）。
@@ -227,15 +234,21 @@ class MetricsRecorder:
         return {"nodes": dict(self._nodes), "tools": dict(self._tools)}
 
 
-def register_metrics_endpoint(app: Any) -> None:
-    """注册 /metrics 端点到 FastAPI app。"""
+def register_metrics_endpoint(app: Any) -> bool:
+    """注册 /metrics 端点到 FastAPI app。
+
+    Returns:
+        True 仅当 /metrics 路由实际注册成功；prometheus_client / fastapi
+        缺失或 METRICS_ENABLED=false 时返回 False（不抛异常，由调用方
+        决定是否在 /readyz 披露 degraded）。
+    """
     if not _PROM_AVAILABLE:
         _logger.info("prometheus_client 未安装，/metrics 端点未注册")
-        return
+        return False
 
     if not _FASTAPI_AVAILABLE:
         _logger.info("fastapi 未安装，/metrics 端点未注册")
-        return
+        return False
 
     metrics_enabled = os.getenv("METRICS_ENABLED", "false").strip().lower() in {
         "1",
@@ -245,7 +258,7 @@ def register_metrics_endpoint(app: Any) -> None:
     }
     if not metrics_enabled:
         _logger.info("METRICS_ENABLED=false，/metrics 端点未注册")
-        return
+        return False
 
     auth_token = os.getenv("METRICS_AUTH_TOKEN", "").strip()
 
@@ -267,3 +280,4 @@ def register_metrics_endpoint(app: Any) -> None:
         )
 
     _logger.info("/metrics 端点已注册")
+    return True

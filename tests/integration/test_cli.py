@@ -135,12 +135,17 @@ def test_cli_no_query_returns_error(capsys):
 # ---------------------------------------------------------------------------
 def test_python_m_lvyan_help_works():
     env = {**os.environ, "PYTHONPATH": str(_SRC_DIR)}
+    # Windows 管道下子进程默认按 locale（GBK）写 stdout，强制 UTF-8 以匹配
+    # 下方 encoding="utf-8" 的读取端，否则中文会变成 mojibake。
+    env["PYTHONIOENCODING"] = "utf-8"
     result = subprocess.run(
         [sys.executable, "-m", "lvyan", "--help"],
         cwd=str(_AGENT_DIR),
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
     assert result.returncode == 0
@@ -155,12 +160,16 @@ def test_python_m_lvyan_query_outputs_nonempty():
     env = {**os.environ, "PYTHONPATH": str(_SRC_DIR)}
     # 确保子进程走降级路径（无 LLM 网关），避免真实 API 调用拖慢测试
     env["MODEL_GATEWAY_URL"] = ""
+    # 同上：强制子进程 stdio 用 UTF-8，保证中文输出可被读取端正确解码
+    env["PYTHONIOENCODING"] = "utf-8"
     result = subprocess.run(
         [sys.executable, "-m", "lvyan", "押金不退"],
         cwd=str(_AGENT_DIR),
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
     )
     # run_agent 捕获异常并返回友好串，故 stdout 必非空

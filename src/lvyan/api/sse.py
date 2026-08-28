@@ -966,13 +966,25 @@ PHASE_MAP: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         ("jurisdiction_triage", "fact_extractor", "missing_fact_assessor", "planner"),
     ),
     ("retrieval", "检索法律", ("parallel_retrieval", "authority_resolver")),
-    ("analysis", "分析争点", ("legal_reasoner", "critic")),
+    (
+        "analysis",
+        "分析争点",
+        # evidence_analyzer 在主链上位于 authority_resolver 与 legal_reasoner
+        # 之间（见 graph/builder.py），语义上属于证据/争点分析阶段。
+        ("evidence_analyzer", "legal_reasoner", "critic"),
+    ),
     ("drafting_validation", "起草与校验", ("composer", "citation_verifier", "output_guardrail")),
     ("generation", "生成结果", ("legal_answer_finalizer",)),
 )
 _NODE_PHASE_IDX: dict[str, int] = {
     node: idx for idx, (_key, _label, nodes) in enumerate(PHASE_MAP) for node in nodes
 }
+
+
+def _node_phase_key(node: str) -> str | None:
+    """节点名 → 语义阶段 key（与 _NODE_PHASE_IDX 同一映射；未知节点返回 None）。"""
+    idx = _NODE_PHASE_IDX.get(node)
+    return PHASE_MAP[idx][0] if idx is not None else None
 
 
 async def _publish_phase_progress(ctx: "RunContext", completed_index: int) -> None:
@@ -1085,13 +1097,17 @@ async def _stream_graph_events(
                 )
                 error = payload.get("error")
                 if error is not None:
-                    await ctx.publish(
-                        {
-                            "event": "node_error",
-                            "node": task_name,
-                            "error": str(error),
-                        }
-                    )
+                    # phase_key：与 phase_start/phase_progress 同源的语义阶段标识，
+                    # 前端可将节点级错误归属到对应阶段；未知节点省略该字段。
+                    error_event: dict[str, Any] = {
+                        "event": "node_error",
+                        "node": task_name,
+                        "error": str(error),
+                    }
+                    node_phase_key = _node_phase_key(task_name)
+                    if node_phase_key is not None:
+                        error_event["phase_key"] = node_phase_key
+                    await ctx.publish(error_event)
 
         elif mode == "updates" and isinstance(payload, dict):
             for _node_name, update in payload.items():

@@ -403,12 +403,16 @@ def test_create_app_production_raises_on_metadata_store_failure(monkeypatch):
 
     # P1-3 测试问题修复：import 放在 pytest.raises 内，避免模块级
     # ``app = create_app()`` 在 import 时就因其他测试残留环境而失败
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(RuntimeError) as exc:
         from lvyan.api.server import create_app
 
         create_app()
-    # 可能是 PersistenceUnavailable 或 RuntimeError（validate_runtime_config）
-    assert "PersistenceUnavailable" in type(exc.value).__name__ or isinstance(exc.value, Exception)
+    # 两种合法错因：PersistenceUnavailable（持久化不可达，RuntimeError 子类）
+    # 或 RuntimeError（validate_runtime_config 配置校验）；其他异常类型视为回归
+    assert type(exc.value).__name__ in {"PersistenceUnavailable", "RuntimeError"}, (
+        f"生产启动应抛 PersistenceUnavailable/RuntimeError，实际为 "
+        f"{type(exc.value).__name__}: {exc.value}"
+    )
 
 
 # ---------------------------------------------------------------------------

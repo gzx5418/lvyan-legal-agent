@@ -10,6 +10,8 @@ import sys
 if sys.platform == "win32":
     _loop = asyncio.SelectorEventLoop(selectors.SelectSelector())
     asyncio.set_event_loop(_loop)
+else:
+    raise SystemExit("run_server_win.py 仅用于 Windows；其他平台请直接运行 uvicorn")
 
 import uvicorn
 
