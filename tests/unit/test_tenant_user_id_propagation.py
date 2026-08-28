@@ -26,9 +26,7 @@ class _RecordingAsyncGraph:
         self.listed.append(config)
         yield SimpleNamespace(config={"configurable": {"thread_id": "thread-1"}})
 
-    async def adelete_thread(
-        self, thread_id: str, config: dict[str, Any] | None = None
-    ) -> None:
+    async def adelete_thread(self, thread_id: str, config: dict[str, Any] | None = None) -> None:
         self.deleted.append((thread_id, config))
 
 

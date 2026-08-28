@@ -349,7 +349,9 @@ class CostTracker:
                 # 已存在的 thread 更新时保持原位，不会被此次调用淘汰。
                 oldest = next(iter(self._data))
                 del self._data[oldest]
-                _logger.debug("CostTracker 达到容量上限（%d），淘汰最旧 thread：%s", self._max_threads, oldest)
+                _logger.debug(
+                    "CostTracker 达到容量上限（%d），淘汰最旧 thread：%s", self._max_threads, oldest
+                )
             entry = self._data.setdefault(thread_id, {"in": 0, "out": 0, "cost": 0.0})
             entry["in"] += tokens_in
             entry["out"] += tokens_out

@@ -60,6 +60,8 @@ def _embedding_retry_delay() -> float:
         _REAL_EMBEDDING_RETRY_BASE_SECONDS * (2 ** (failures - 1)),
         _REAL_EMBEDDING_RETRY_MAX_SECONDS,
     )
+
+
 _ST_MODEL_CACHE: Any = None
 _DOC_VEC_CACHE: dict[str, list[float]] = {}
 _DENSE_CANDIDATE_FLOOR = 100

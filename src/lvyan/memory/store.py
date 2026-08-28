@@ -280,9 +280,7 @@ class CaseMemory:
             _logger.debug("异步加载 thread %s 状态失败: %s", thread_id, exc)
             return None
 
-    async def aload_strict(
-        self, thread_id: str, user_id: str | None = None
-    ) -> CaseState | None:
+    async def aload_strict(self, thread_id: str, user_id: str | None = None) -> CaseState | None:
         """异步严格加载会话状态（API 用），将 checkpointer 故障传播给调用方。
 
         使用 ``await graph.aget_state()``。当 ``graph_resolver`` 返回的图未实现

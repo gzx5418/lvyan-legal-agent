@@ -592,9 +592,9 @@ def _assert_no_numeric_probability(result: ReasoningResult) -> None:
     for name in type(result).model_fields.keys():
         low = name.lower()
         for sub in forbidden_field_substrings:
-            assert (
-                sub not in low
-            ), f"ReasoningResult 字段 {name} 含敏感子串 {sub}，违反「禁止数字概率」约束"
+            assert sub not in low, (
+                f"ReasoningResult 字段 {name} 含敏感子串 {sub}，违反「禁止数字概率」约束"
+            )
 
     # 2. 序列化文本检查：百分比/概率关键词模式
     payload = result.model_dump_json()

@@ -53,14 +53,15 @@ _DEADLINE_RULES: dict[str, DeadlineRule] = {
     "labor_arbitration": DeadlineRule(
         "years", 1, "劳动仲裁时效（1 年）", "《劳动争议调解仲裁法》第27条"
     ),
-    "civil_litigation": DeadlineRule(
-        "years", 3, "民事诉讼时效（3 年）", "《民法典》第188条"
-    ),
+    "civil_litigation": DeadlineRule("years", 3, "民事诉讼时效（3 年）", "《民法典》第188条"),
     "civil_litigation_short": DeadlineRule(
         "years", 1, "民事诉讼短期时效（1 年）", "《民法典》第188条（特别法另有短期规定的从其规定）"
     ),
     "civil_litigation_long": DeadlineRule(
-        "years", 20, "民事诉讼最长权利保护期（20 年）", "《民法典》第188条第2款：自权利受到损害之日起超过二十年的，法院不予保护"
+        "years",
+        20,
+        "民事诉讼最长权利保护期（20 年）",
+        "《民法典》第188条第2款：自权利受到损害之日起超过二十年的，法院不予保护",
     ),
     "administrative_reconsideration": DeadlineRule(
         "days", 60, "行政复议申请期限（60 日）", "《行政复议法》"
@@ -84,10 +85,16 @@ _DEADLINE_RULES: dict[str, DeadlineRule] = {
         "years", 3, "消费者投诉时效（3 年）", "参照《民法典》第188条"
     ),
     "insurance_claim": DeadlineRule(
-        "years", 2, "保险理赔时效（非人寿保险 2 年）", "《保险法》第26条：非人寿保险自知道保险事故发生之日起二年"
+        "years",
+        2,
+        "保险理赔时效（非人寿保险 2 年）",
+        "《保险法》第26条：非人寿保险自知道保险事故发生之日起二年",
     ),
     "insurance_claim_life": DeadlineRule(
-        "years", 5, "保险理赔时效（人寿保险 5 年）", "《保险法》第26条：人寿保险自知道保险事故发生之日起五年"
+        "years",
+        5,
+        "保险理赔时效（人寿保险 5 年）",
+        "《保险法》第26条：人寿保险自知道保险事故发生之日起五年",
     ),
 }
 """期限类型 -> 规则表。"""
@@ -113,6 +120,7 @@ def _shift_by_rule(start: date, rule: DeadlineRule) -> date:
         month = start.month
     day = min(start.day, calendar.monthrange(year, month)[1])
     return date(year, month, day)
+
 
 # 案类型 -> 证据清单（每项为 (name, purpose, status) 三元组）
 _EVIDENCE_CHECKLIST: dict[str, list[tuple[str, str, str]]] = {
@@ -357,11 +365,11 @@ def calculate_legal_deadline(
     if remaining < 0:
         warning = f"⚠️ {label} 已于 {deadline.isoformat()} 经过（已超期 {-remaining} 天），可能丧失胜诉权。依据：{rule.basis}。"
     elif expires_soon:
-        warning = (
-            f"⚠️ {label} 将于 {deadline.isoformat()} 到期（仅剩 {remaining} 天），请尽快主张权利。依据：{rule.basis}。"
-        )
+        warning = f"⚠️ {label} 将于 {deadline.isoformat()} 到期（仅剩 {remaining} 天），请尽快主张权利。依据：{rule.basis}。"
     else:
-        warning = f"{label} 截止日 {deadline.isoformat()}（剩余 {remaining} 天）。依据：{rule.basis}。"
+        warning = (
+            f"{label} 截止日 {deadline.isoformat()}（剩余 {remaining} 天）。依据：{rule.basis}。"
+        )
 
     return DeadlineResult(
         tool_name="calculate_legal_deadline",
@@ -745,9 +753,7 @@ def _calc_consumer_triple(
         "amount": amount,
     }
     if raw < 500.0:
-        formula = (
-            f"max(商品价款 × 3, 500) = max({principal} × 3, 500) = {amount}（不足 500 元按 500 元计）"
-        )
+        formula = f"max(商品价款 × 3, 500) = max({principal} × 3, 500) = {amount}（不足 500 元按 500 元计）"
     else:
         formula = f"商品价款 × 3 = {principal} × 3 = {amount}"
     notes = (
@@ -770,9 +776,7 @@ def _calc_consumer_tenfold(
         "amount": amount,
     }
     if raw < 1000.0:
-        formula = (
-            f"max(商品价款 × 10, 1000) = max({principal} × 10, 1000) = {amount}（不足 1000 元按 1000 元计）"
-        )
+        formula = f"max(商品价款 × 10, 1000) = max({principal} × 10, 1000) = {amount}（不足 1000 元按 1000 元计）"
     else:
         formula = f"商品价款 × 10 = {principal} × 10 = {amount}"
     notes = "依据《食品安全法》第148条，生产不符合食品安全标准的食品赔偿 = 价款 × 10，不足 1000 元按 1000 元计。"

@@ -399,9 +399,9 @@ def test_authority_resolver_hierarchy_conflict():
     hierarchy_conflicts = [
         c for c in result.get("conflicts", []) if getattr(c, "conflict_type", "") == "hierarchy"
     ]
-    assert (
-        len(hierarchy_conflicts) >= 1
-    ), f"应至少有 1 个 hierarchy 冲突，实际：{result.get('conflicts', [])}"
+    assert len(hierarchy_conflicts) >= 1, (
+        f"应至少有 1 个 hierarchy 冲突，实际：{result.get('conflicts', [])}"
+    )
 
 
 # ---------------------------------------------------------------------------

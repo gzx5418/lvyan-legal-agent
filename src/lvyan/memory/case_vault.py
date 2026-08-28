@@ -98,9 +98,7 @@ class CaseVault:
             if "ttl_seconds" not in manifest:
                 manifest["ttl_seconds"] = DEFAULT_TTL_SECONDS
                 manifest["created_at"] = now.isoformat()
-                manifest["expires_at"] = (
-                    now + timedelta(seconds=DEFAULT_TTL_SECONDS)
-                ).isoformat()
+                manifest["expires_at"] = (now + timedelta(seconds=DEFAULT_TTL_SECONDS)).isoformat()
             # 记录 / 覆盖该 doc
             doc_entry = {
                 "doc_id": doc_id,

@@ -99,9 +99,7 @@ _logger = logging.getLogger("lvyan.api.server")
 # /readyz 观测披露的期望组件集合：与 create_app 内三处注册点保持一致
 # （http_metrics / request_id / metrics_endpoint）。新增观测组件注册点时
 # 必须同步更新此集合，否则组件齐全的实例会被 /readyz 误报为 degraded。
-_EXPECTED_OBSERVABILITY_COMPONENTS = frozenset(
-    {"http_metrics", "request_id", "metrics_endpoint"}
-)
+_EXPECTED_OBSERVABILITY_COMPONENTS = frozenset({"http_metrics", "request_id", "metrics_endpoint"})
 
 # 文件上传相关常量
 _UPLOAD_DIR = AGENT_DIR / "data" / "uploads"
@@ -257,9 +255,7 @@ async def _mem_aload_strict(mem: Any, thread_id: str, user_id: str | None = None
     return _call_with_optional_user_id(mem.load_strict, thread_id, user_id)
 
 
-async def _mem_adelete_strict(
-    mem: Any, thread_id: str, user_id: str | None = None
-) -> bool:
+async def _mem_adelete_strict(mem: Any, thread_id: str, user_id: str | None = None) -> bool:
     """异步严格删除会话，兼容异步 / 同步 CaseMemory 实现。
 
     生产 ``CaseMemory`` 提供 ``adelete_strict``（通过 ``asyncio.to_thread``
@@ -1121,9 +1117,7 @@ def create_app(
         # 重复登记也不会误判为 ok。
         observability = {
             "status": (
-                "ok"
-                if set(obs_components) == _EXPECTED_OBSERVABILITY_COMPONENTS
-                else "degraded"
+                "ok" if set(obs_components) == _EXPECTED_OBSERVABILITY_COMPONENTS else "degraded"
             ),
             "components": obs_components,
         }

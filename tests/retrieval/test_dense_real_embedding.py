@@ -132,7 +132,9 @@ def test_dense_real_path_skips_bm25_prefilter(monkeypatch):
     monkeypatch.setattr(dense, "_probe_real_embedding", lambda: True)
     monkeypatch.setattr(dense, "_try_real_embedding", lambda text, model=None: [1.0, 0.0, 0.0])
     monkeypatch.setattr(
-        dense, "_try_real_embedding_batch", lambda texts, model=None: [[1.0, 0.0, 0.0] for _ in texts]
+        dense,
+        "_try_real_embedding_batch",
+        lambda texts, model=None: [[1.0, 0.0, 0.0] for _ in texts],
     )
 
     def forbid_bm25(*args, **kwargs):

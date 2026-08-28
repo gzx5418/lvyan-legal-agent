@@ -73,9 +73,7 @@ def run_agent_with_state(
     # P1-5 修复：CLI / Python API 改用共享图实例（同一 checkpointer），
     # 与 API 入口保持单一状态源，支持 interrupt resume
     graph = get_shared_graph()
-    config = {
-        "configurable": {"thread_id": resolved_thread_id, "user_id": CLI_USER_ID}
-    }
+    config = {"configurable": {"thread_id": resolved_thread_id, "user_id": CLI_USER_ID}}
     # issue #16：CLI 路径成本入账——与 api/sse.py 的 default_runner 一致，
     # 运行前把当前上下文关联到 thread_id（record_llm_call 据此累计成本），
     # 运行后清除，避免泄漏到后续无关联调用。延迟导入便于测试 monkeypatch。
@@ -139,9 +137,7 @@ def stream_agent(
     initial = _build_initial_state(run_id, resolved_thread_id, query, complexity, case_type)
     # P1-5 修复：CLI 流式入口同样使用共享图实例
     graph = get_shared_graph()
-    config = {
-        "configurable": {"thread_id": resolved_thread_id, "user_id": CLI_USER_ID}
-    }
+    config = {"configurable": {"thread_id": resolved_thread_id, "user_id": CLI_USER_ID}}
     # issue #16：CLI 流式路径成本入账（与 run_agent_with_state / API 路径一致）
     from lvyan.observability.tracing import set_cost_thread
 

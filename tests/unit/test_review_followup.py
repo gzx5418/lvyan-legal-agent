@@ -838,12 +838,16 @@ def test_readyz_observability_degraded_when_component_registration_fails(monkeyp
     monkeypatch.setattr(server, "_check_retrieval", lambda: "ok")
     monkeypatch.setattr(server, "_check_model_gateway_ready", lambda: "ok")
 
-    body = TestClient(
-        server.create_app(
-            runner=lambda *_args, **_kwargs: None,
-            memory=_ApiMemory(),
+    body = (
+        TestClient(
+            server.create_app(
+                runner=lambda *_args, **_kwargs: None,
+                memory=_ApiMemory(),
+            )
         )
-    ).get("/readyz").json()
+        .get("/readyz")
+        .json()
+    )
 
     assert body["observability"]["status"] == "degraded"
     components = body["observability"]["components"]

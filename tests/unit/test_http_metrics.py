@@ -52,7 +52,9 @@ class _FakeCounter:
         self.increments.append((dict(self._last_labels), amount))
 
 
-def _make_middleware(app: Any) -> tuple[HTTPMetricsMiddleware, _FakeGauge, _FakeHistogram, _FakeCounter]:
+def _make_middleware(
+    app: Any,
+) -> tuple[HTTPMetricsMiddleware, _FakeGauge, _FakeHistogram, _FakeCounter]:
     """构造已启用的中间件（注入假指标，不依赖 prometheus_client）。"""
     mw = HTTPMetricsMiddleware(app)
     active, duration, total = _FakeGauge(), _FakeHistogram(), _FakeCounter()

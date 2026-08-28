@@ -265,8 +265,7 @@ class _RealShapedSaver(_FakeSaver):
             loop = None
         if loop is self._loop:
             raise asyncio.InvalidStateError(
-                "Synchronous calls to AsyncPostgresSaver are only allowed "
-                "from a different thread."
+                "Synchronous calls to AsyncPostgresSaver are only allowed from a different thread."
             )
         return None
 

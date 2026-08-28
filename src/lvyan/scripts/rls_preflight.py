@@ -82,7 +82,7 @@ def main() -> int:
     # 转换 SQLAlchemy URL 为 psycopg URL（覆盖常见驱动前缀）
     for prefix in ("postgresql+psycopg://", "postgresql+psycopg2://", "postgresql+asyncpg://"):
         if dsn.startswith(prefix):
-            dsn = "postgresql://" + dsn[len(prefix):]
+            dsn = "postgresql://" + dsn[len(prefix) :]
             break
 
     try:

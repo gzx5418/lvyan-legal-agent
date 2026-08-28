@@ -47,7 +47,7 @@ def test_development_no_key_no_insecure_fails(monkeypatch):
     """开发环境 + 无 key + CASE_VAULT_ALLOW_INSECURE 未设置 → 失败。"""
     monkeypatch.setenv("RUNTIME_MODE", "development")
     # 「未设置」需要同时清环境变量与 settings 默认值
-    #（conftest 为整个测试套件启用了 base64 降级）
+    # （conftest 为整个测试套件启用了 base64 降级）
     monkeypatch.delenv("CASE_VAULT_ALLOW_INSECURE", raising=False)
     from lvyan.config import settings
 

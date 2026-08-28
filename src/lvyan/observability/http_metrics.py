@@ -112,9 +112,7 @@ class HTTPMetricsMiddleware:
             if message["type"] == "http.response.start":
                 headers_sent = True
                 status = str(message.get("status", 500))
-            elif message["type"] == "http.response.body" and not message.get(
-                "more_body", False
-            ):
+            elif message["type"] == "http.response.body" and not message.get("more_body", False):
                 # 响应体发送完毕（含 SSE 流结束）才记录耗时并归还 gauge；
                 # 幂等保护：病态的重复 final body 消息不得二次记录，
                 # 否则会重复 observe/increment 并把 gauge 打成负数。
@@ -146,6 +144,4 @@ class HTTPMetricsMiddleware:
                 self._duration.labels(
                     method=method, path=normalized_path, status_code=status
                 ).observe(duration)
-                self._total.labels(
-                    method=method, path=normalized_path, status_code=status
-                ).inc()
+                self._total.labels(method=method, path=normalized_path, status_code=status).inc()

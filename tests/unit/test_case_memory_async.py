@@ -133,8 +133,16 @@ def test_c2_adelete_strict_uses_to_thread(tmp_path):
     assert graph.deleted == ["thread-1"]
 
 
-def test_adelete_strict_unbound_graph_still_drops_index(tmp_path):
-    """服务重启后图尚未绑定：删除应清掉 sidecar，而不是 503。"""
+def test_adelete_strict_unbound_graph_still_drops_index(tmp_path, monkeypatch):
+    """服务重启后图尚未绑定：删除应清掉 sidecar，而不是 503。
+
+    本测试场景是「内存后端重启后 checkpoint 确不存在，删 sidecar 索引即成功」，
+    因此显式固定 ``CHECKPOINTER_BACKEND=memory``：``_is_ephemeral_backend()``
+    实时读取环境（CI 的 Tests job 会注入非空 ``DATABASE_URL`` 且无本变量，
+    auto 后端据此判为持久后端并拒绝删索引），不固定则测试结果依赖运行环境
+    （CI 失败 / 本地 .env 通过），见 CI run 33160728299。
+    """
+    monkeypatch.setenv("CHECKPOINTER_BACKEND", "memory")
     mem = CaseMemory(index_path=tmp_path / "idx.json", graph_resolver=lambda: None)
     mem.register("thread-1", title="t", user_id="alice")
 

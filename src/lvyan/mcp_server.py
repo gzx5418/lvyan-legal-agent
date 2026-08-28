@@ -169,8 +169,8 @@ def _registry() -> dict[str, Callable[..., dict[str, Any]]]:
         # issue #15 A：不能用 ``lambda **kwargs``——mcp SDK 对 VAR_KEYWORD 参数
         # 会把 kwargs 建成必填单字段（schema 误导且任何传参形式都无法通过校验），
         # 必须与 tools/calculators.py 的真实签名对齐为显式参数。
-        "calculate_legal_deadline": lambda event_date, deadline_type, jurisdiction="中国大陆": _dump(
-            calculate_legal_deadline(event_date, deadline_type, jurisdiction)
+        "calculate_legal_deadline": lambda event_date, deadline_type, jurisdiction="中国大陆": (
+            _dump(calculate_legal_deadline(event_date, deadline_type, jurisdiction))
         ),
         "calculate_claim_amount": lambda claim_type, principal, months=0, wage=None: _dump(
             calculate_claim_amount(claim_type, principal, months=months, wage=wage)

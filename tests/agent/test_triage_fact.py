@@ -259,9 +259,9 @@ def test_missing_fact_assessor_also_detects_blocking():
 
     # 再调用 missing_fact_assessor，应返回 {}（不重复追加）
     result = missing_fact_assessor(state)
-    assert (
-        result == {} or "missing_facts" not in result
-    ), "missing_fact_assessor 不应重复追加 missing_facts"
+    assert result == {} or "missing_facts" not in result, (
+        "missing_fact_assessor 不应重复追加 missing_facts"
+    )
 
 
 # ---------------------------------------------------------------------------
