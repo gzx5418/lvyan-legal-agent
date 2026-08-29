@@ -465,6 +465,19 @@ def warm_corpus_in_background(
                 "法律索引启动预热完成（chunks=%s）",
                 result["manifest"].get("chunks_count") if result.get("manifest") else "?",
             )
+            # 把 BM25 索引也加载进内存：否则首个用户查询要承担冷加载
+            # （LVIX chunks + 85k postings 反序列化）+ reranker 尝试的叠加延迟，
+            # 容易触发检索 job 的 30s 超时（真实环境交互测试发现）
+            try:
+                from lvyan.retrieval.lexical import (
+                    _load_article_chunks,
+                    _load_or_build_global_bm25_index,
+                )
+
+                _load_or_build_global_bm25_index(_load_article_chunks())
+                _logger.info("BM25 索引预热完成")
+            except Exception:  # noqa: BLE001 预热失败不阻断启动，首个查询会兜底加载
+                _logger.warning("BM25 索引预热失败（首个查询将现场加载）", exc_info=True)
     except Exception:  # noqa: BLE001 预热失败不阻断应用启动，readyz 会如实报告
         _logger.exception("法律索引启动预热异常（忽略，/readyz 将如实报告）")
 

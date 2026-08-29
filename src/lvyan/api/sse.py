@@ -1123,6 +1123,11 @@ async def _stream_graph_events(
                         final_output = update["final_output"]
                     if "legal_answer" in update:
                         legal_answer = update["legal_answer"]
+                        _logger.debug(
+                            "SSE 捕获 legal_answer 更新（node=%s）：%s",
+                            _node_name,
+                            "None" if legal_answer is None else f"{len(legal_answer)} keys",
+                        )
                     if "document_file" in update:
                         document_file = update["document_file"]
 

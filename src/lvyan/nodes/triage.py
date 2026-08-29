@@ -206,6 +206,16 @@ def _try_llm_triage(user_goal: str, conversation_summary: str) -> dict[str, str 
         complexity = None
     if risk_level not in {"low", "medium", "high"}:
         risk_level = None
+    # document 交叉校验（真实环境交互测试发现）：LLM 见到"根据我上传的合同
+    # 分析押金"这类**分析类**请求时倾向误判为 document（文书生成），导致
+    # composer/finalizer 不构建 legal_answer、用户拿不到结构化分析页。document
+    # 模式成本高且用户预期差异大，必须以明确的文书动作意图为准：规则引擎
+    # （_detect_complexity，基于文书动词白名单）判非 document 时，一律降级为
+    # deep（保留 LLM 判断的"需要深入分析"信号，但不进入文书生成）。
+    if complexity == "document" and _detect_complexity(user_goal) != "document":
+        complexity = "deep"
+    if risk_level not in {"low", "medium", "high"}:
+        risk_level = None
     if not any((jurisdiction, case_type, complexity, risk_level)):
         record_llm_fallback("jurisdiction_triage", "invalid_schema")
         return None

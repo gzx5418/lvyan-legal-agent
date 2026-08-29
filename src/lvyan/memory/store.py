@@ -358,15 +358,27 @@ class CaseMemory:
         alist = getattr(checkpointer, "alist", None)
         if callable(alist):
             try:
-                list_config = {"configurable": {"user_id": user_id}} if user_id else None
+                # 列表场景只能传 None（全量扫描）：langgraph 的 InMemorySaver.list
+                # 对非 None config 强制取 config["configurable"]["thread_id"]，
+                # 传只含 user_id 的 config 会 KeyError('thread_id')（真实环境
+                # 交互测试发现，导致历史会话列表恒为空）。user_id 维度的归属
+                # 过滤由 sidecar 索引 meta 完成（server 层再做二次过滤）。
                 thread_ids: set[str] = set()
-                async for checkpoint in alist(list_config):
+                async for checkpoint in alist(None):
                     config = getattr(checkpoint, "config", None) or {}
                     thread_id = config.get("configurable", {}).get("thread_id")
                     if thread_id:
                         thread_ids.add(str(thread_id))
                 return [(tid, meta) for tid, meta in index_snapshot if tid in thread_ids]
-            except (NotImplementedError, TypeError, AttributeError) as exc:
+            except (
+                NotImplementedError,
+                TypeError,
+                AttributeError,
+                ValueError,
+                KeyError,
+            ) as exc:
+                # ValueError/KeyError：RLS 包装器对 None config 的拒绝、或
+                # checkpointer 内部对 config 形状的假设失败 → 回退逐项校验
                 _logger.debug("checkpointer alist 不可用，回退逐项校验: %s", exc)
 
         recoverable: list[tuple[str, dict[str, Any]]] = []

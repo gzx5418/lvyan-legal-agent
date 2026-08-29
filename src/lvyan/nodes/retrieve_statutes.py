@@ -220,10 +220,9 @@ def _parallel_search_statutes(
         except Exception:  # noqa: BLE001
             return []
 
-    if len(valid_queries) == 1:
-        return _safe_search(valid_queries[0])
-
-    # 多个查询：用独立的子任务线程池并行
+    # 单查询与多查询统一走子任务线程池 + 超时保护：单查询直接执行时，
+    # 冷启动索引加载 + reranker/网关慢响应可超过外层 job 的 30s 预算，
+    # statutes 被整体超时静默清空（真实环境交互测试发现的回归路径）。
     executor = _get_query_executor()
 
     try:
@@ -372,7 +371,14 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
 
     try:
         statutes = stat_future.result(timeout=30.0)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # 法规检索 job 整体超时/失败必须留痕：静默清空会让下游以
+        # 「暂未检索到适用法条」呈现给用户，无从排查
+        _logger.warning(
+            "法规检索 job 超时/失败，降级为空结果：%s: %s",
+            type(exc).__name__,
+            exc,
+        )
         statutes = []
     try:
         cases = case_future.result(timeout=30.0)

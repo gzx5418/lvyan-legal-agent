@@ -149,6 +149,28 @@ def legal_answer_finalizer(state: CaseState) -> dict[str, Any]:
     if complexity == "document":
         result = _render_document_file(state)
         result["legal_answer"] = None
+        # 文书渲染失败时的兜底（真实环境交互测试发现）：渲染失败时
+        # document_file.success=False，用户既拿不到 DOCX 也拿不到结构化分析页，
+        # 只剩 Markdown。此时回退构建 legal_answer，让前端的分析页仍可用。
+        # document_file=None 表示本就无文书载荷（非渲染失败），维持原语义。
+        doc_file = result.get("document_file")
+        if isinstance(doc_file, dict) and not doc_file.get("success"):
+            try:
+                from lvyan.nodes.answer_builder import build_legal_answer
+                from lvyan.nodes.answer_validator import (
+                    ValidationError as AVError,
+                    validate_legal_answer,
+                )
+
+                cs = state if isinstance(state, CaseState) else CaseState.model_validate(state)
+                answer = build_legal_answer(cs)
+                final_risk = _get(state, "risk_level", cs.risk_level)
+                if final_risk in ("low", "medium", "high"):
+                    answer.meta.risk_level = final_risk  # type: ignore[assignment]
+                validate_legal_answer(answer)
+                result["legal_answer"] = _redact_string_fields(answer.model_dump(mode="json"))
+            except Exception as exc:  # noqa: BLE001 兜底仍失败则维持 Markdown 回退
+                _logger.warning("document 渲染失败且 legal_answer 兜底失败: %s", exc)
         return result
 
     # 非 document 模式：清空 document_file，重建结构化 legal_answer

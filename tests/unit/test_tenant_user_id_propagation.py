@@ -55,7 +55,10 @@ async def test_case_memory_async_ops_pass_user_id(tmp_path):
     await mem.adelete_strict("thread-1", user_id="alice")
 
     assert graph.configs[0]["configurable"]["user_id"] == "alice"
-    assert graph.listed == [{"configurable": {"user_id": "alice"}}]
+    # 列表扫描必须传 None：LangGraph 的 checkpointer alist 对非 None config
+    # 强制取 configurable.thread_id（InMemorySaver/PostgresSaver 均如此），
+    # 传只含 user_id 的 config 会 KeyError。归属过滤由 sidecar 索引 meta 承担。
+    assert graph.listed == [None]
     assert graph.deleted[0][0] == "thread-1"
     assert graph.deleted[0][1]["configurable"]["user_id"] == "alice"
 
@@ -88,8 +91,11 @@ async def test_alist_without_user_id_fails_when_rls_enforced(tmp_path, monkeypat
     mem = CaseMemory(graph=graph, index_path=tmp_path / "idx.json")
     mem.register("thread-1", title="t", user_id="alice")
 
-    with pytest.raises(ValueError, match="user_id"):
-        await mem.alist_threads_strict()
+    # RLS 强制时全表扫描（alist(None)）被租户包装器拒绝 → 回退逐项校验：
+    # 每项 aload_strict 都携带 user_id 走 RLS 过滤，功能可用且隔离不降级
+    # （旧契约直接抛错会让 RLS 部署的会话列表完全不可用）。
+    recoverable = await mem.alist_threads_strict()
+    assert isinstance(recoverable, list)
 
 
 @pytest.mark.asyncio

@@ -70,3 +70,8 @@ outputs/
 # LangGraph checkpoint 数据
 checkpoints.db
 *.db-journal
+
+# 本地工具产物与测试残留
+.qoder/
+hitl_req.json
+*.log
