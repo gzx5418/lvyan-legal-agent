@@ -1,49 +1,35 @@
-"""LangGraph checkpoint 表的行级安全策略。"""
+"""LangGraph checkpoint 表的行级安全策略。
+
+单一事实源：策略 SQL 统一维护在 ``migrations/010_checkpoint_rls.sql``。
+- Docker 首次初始化：postgres 的 ``docker-entrypoint-initdb.d`` 直接执行该文件；
+- 应用运行时：本模块在 ``AsyncPostgresSaver.setup()`` 建表后**加载同一文件**执行。
+
+两处执行的是字节级相同的 SQL，杜绝"迁移文件与运行时代码各自维护一份策略
+文本"的漂移风险（策略语义变更只需改 010 一个文件）。
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from psycopg import sql
+from lvyan.config import AGENT_DIR
 
 __all__ = ["ensure_checkpoint_rls", "ensure_checkpoint_rls_sync"]
 
+_CHECKPOINT_RLS_MIGRATION = AGENT_DIR / "migrations" / "010_checkpoint_rls.sql"
 
-_CHECKPOINT_TABLES = ("checkpoints", "checkpoint_blobs", "checkpoint_writes")
 
+def _load_checkpoint_rls_sql() -> str:
+    """读取 checkpoint RLS 的唯一策略 SQL（DO 块，单语句）。
 
-def _checkpoint_rls_statements() -> list[Any]:
-    """生成全部 checkpoint 表的 RLS 安装语句（异步/同步共用）。"""
-    statements: list[Any] = []
-    for table_name in _CHECKPOINT_TABLES:
-        table = sql.Identifier(table_name)
-        policy = sql.Identifier(f"tenant_{table_name}")
-        statements.append(sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(table))
-        statements.append(sql.SQL("ALTER TABLE {} FORCE ROW LEVEL SECURITY").format(table))
-        statements.append(sql.SQL("DROP POLICY IF EXISTS {} ON {}").format(policy, table))
-        statements.append(
-            sql.SQL(
-                """
-                CREATE POLICY {} ON {}
-                FOR ALL
-                USING (
-                    EXISTS (
-                        SELECT 1 FROM agent_threads
-                        WHERE agent_threads.thread_id = {}.thread_id
-                          AND agent_threads.user_id = current_setting('app.user_id', true)
-                    )
-                )
-                WITH CHECK (
-                    EXISTS (
-                        SELECT 1 FROM agent_threads
-                        WHERE agent_threads.thread_id = {}.thread_id
-                          AND agent_threads.user_id = current_setting('app.user_id', true)
-                    )
-                )
-                """
-            ).format(policy, table, table, table)
+    文件缺失属于部署损坏：fail-closed 抛错，禁止静默以未隔离状态运行。
+    """
+    if not _CHECKPOINT_RLS_MIGRATION.is_file():
+        raise RuntimeError(
+            f"checkpoint RLS 迁移文件缺失：{_CHECKPOINT_RLS_MIGRATION}，"
+            "拒绝在无租户隔离的情况下安装 checkpoint 访问"
         )
-    return statements
+    return _CHECKPOINT_RLS_MIGRATION.read_text(encoding="utf-8")
 
 
 async def ensure_checkpoint_rls(conn: Any) -> None:
@@ -51,14 +37,13 @@ async def ensure_checkpoint_rls(conn: Any) -> None:
 
     LangGraph 在应用首次启动时才创建 checkpoint 表，因此这一步不能只依赖
     PostgreSQL 初始化目录中的静态迁移；必须在 ``AsyncPostgresSaver.setup()``
-    成功后执行。缺少 ``agent_threads`` 或无法安装策略时让异常向上传播，避免
-    ``RLS_ENFORCED=true`` 的生产实例静默以未隔离状态运行。
+    成功后执行同一份策略 SQL（见模块 docstring）。缺少 ``agent_threads`` 或
+    无法安装策略时让异常向上传播，避免 ``RLS_ENFORCED=true`` 的生产实例
+    静默以未隔离状态运行。
     """
-    for statement in _checkpoint_rls_statements():
-        await conn.execute(statement)
+    await conn.execute(_load_checkpoint_rls_sql())
 
 
 def ensure_checkpoint_rls_sync(conn: Any) -> None:
     """同步 PostgresSaver 使用的 RLS 安装入口。"""
-    for statement in _checkpoint_rls_statements():
-        conn.execute(statement)
+    conn.execute(_load_checkpoint_rls_sql())

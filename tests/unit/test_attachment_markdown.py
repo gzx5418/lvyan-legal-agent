@@ -223,7 +223,9 @@ def test_upload_encrypts_content_and_json_has_no_markdown(monkeypatch, tmp_path)
     assert meta["markdown_path"].startswith("vault://")
     assert meta["text_preview"] == ""
     thread_id, doc_id = meta["markdown_path"][len("vault://") :].split("/", 1)
-    encrypted_markdown = app.state.case_vault.retrieve(thread_id, doc_id)
+    encrypted_markdown = app.state.case_vault.retrieve(
+        thread_id, doc_id, expected_thread_id=thread_id
+    )
     assert encrypted_markdown is not None
     assert "hello world" in encrypted_markdown.decode("utf-8")
 
@@ -266,7 +268,9 @@ def test_upload_uses_encrypted_pending_vault_when_enabled(monkeypatch, tmp_path)
     assert not (upload_dir / f"{file_id}.txt").exists()
     assert not (upload_dir / f"{file_id}.md").exists()
     thread_id, doc_id = meta["markdown_path"][len("vault://") :].split("/", 1)
-    assert b"encrypted body" in (vault.retrieve(thread_id, doc_id) or b"")
+    assert b"encrypted body" in (
+        vault.retrieve(thread_id, doc_id, expected_thread_id=thread_id) or b""
+    )
 
 
 # ---------------------------------------------------------------------------

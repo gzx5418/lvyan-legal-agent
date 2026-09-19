@@ -92,9 +92,14 @@ async def test_setup_installs_checkpoint_rls_when_enforced(monkeypatch):
     await TenantAwareCheckpointer(inner).setup()
 
     assert inner.setup_called is True
-    assert any(
-        "CREATE POLICY" in query and "tenant_checkpoints" in query for query, _ in inner.conn.calls
+    # 单一事实源：运行时安装的正是 migrations/010_checkpoint_rls.sql 的原文，
+    # 与 docker-entrypoint-initdb.d 执行的策略字节级一致（防双源漂移）。
+    from lvyan.config import AGENT_DIR
+
+    migration_sql = (AGENT_DIR / "migrations" / "010_checkpoint_rls.sql").read_text(
+        encoding="utf-8"
     )
+    assert any(query == migration_sql for query, _ in inner.conn.calls)
 
 
 class _NoConnSaver(_FakeSaver):

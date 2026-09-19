@@ -113,7 +113,9 @@ def extract_uploaded_document(file_id: str, expected_user: str | None = None) ->
             thread_id, doc_id = markdown_ref[len("vault://") :].split("/", 1)
         except ValueError as exc:
             raise ValueError("上传文件的加密引用无效") from exc
-        content = CaseVault().retrieve(thread_id, doc_id)
+        # 暂存区按用户（upload-{sha256(user_id)}）存储，归属已由上方 owner 校验保证；
+        # 此处做同 thread 自校验，满足 vault 必填 expected_thread_id 的契约。
+        content = CaseVault().retrieve(thread_id, doc_id, expected_thread_id=thread_id)
         if content is None:
             raise FileNotFoundError("上传文件不存在或已过期")
         return {

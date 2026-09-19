@@ -6,8 +6,9 @@
     支持 ``as_of`` 时间点过滤与 ``only_effective`` 状态过滤。
   - ``get_statute_article(source_id, article_number)``：从条文级索引中查询
     指定法规的指定条文。
-  - ``verify_statute_status(source_id, as_of=...)``：用 ``version_resolver`` 查询
-    法规当前有效性，含被取代关系。
+  - ``verify_statute_status(source_id, as_of=...)``：委托
+    ``retrieval.version_aware.verify_statute_status`` 的统一实现，
+    按时间窗口判定历史有效性，含被取代关系。
 
 注：``search_statutes`` 后端可切换到 ``retrieval.hybrid_search``，
 当前保留 lexical 搜索作为稳定后端。
@@ -24,13 +25,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from lvyan.config import AGENT_DIR, LAWTEXT_DIR
-from lvyan.retrieval import lexical
-from lvyan.retrieval.version_resolver import (
-    LawMetadata,
-    build_version_groups,
-    parse_law_metadata,
-    scan_all_laws,
-)
+from lvyan.retrieval import lexical, version_aware
+from lvyan.retrieval.version_resolver import parse_law_metadata
 from lvyan.scripts.ingest_laws import ArticleChunk, build_article_index
 from lvyan.tools.base import ToolResult
 
@@ -110,14 +106,6 @@ def _cached_article_index() -> tuple[ArticleChunk, ...]:
     if not LAWTEXT_DIR.is_dir():
         return ()
     return tuple(build_article_index())
-
-
-@lru_cache(maxsize=1)
-def _cached_metadata_by_source() -> dict[str, LawMetadata]:
-    """构建 source_id -> LawMetadata 的映射缓存。"""
-    if not LAWTEXT_DIR.is_dir():
-        return {}
-    return {m.source_id: m for m in scan_all_laws(LAWTEXT_DIR)}
 
 
 def _parse_as_of(as_of: str | None) -> date | None:
@@ -334,15 +322,21 @@ def get_statute_article(source_id: str, article_number: str) -> StatuteArticleRe
 
 
 def verify_statute_status(source_id: str, as_of: str | None = None) -> StatuteStatusResult:
-    """核验指定法规的当前有效性。
+    """核验指定法规的有效性（委托 retrieval 层统一实现）。
+
+    判定语义与 ``retrieval.version_aware.verify_statute_status`` 保持单一来源：
+      - ``as_of`` 给定：按时间窗口（``effective_date`` / ``expiry_date``）判断，
+        不要求当前 ``status == "effective"``，从而识别「现已废止但在目标日期
+        仍有效」的历史法规；已废止且无失效日期时保守视为失效。
+      - ``as_of`` 缺省：``status == "effective"`` 且未被取代。
 
     Args:
         source_id: 法规标识（官方法律库的文件 stem）
         as_of: 时间点（"YYYY-MM-DD"），用于判断「在该日期是否有效」。
 
     Returns:
-        StatuteStatusResult：含 current_status / effective_date / is_effective_as_of /
-        superseded_by 等。
+        StatuteStatusResult：含 current_status / effective_date / expiry_date /
+        is_effective_as_of / superseded_by 等。
     """
     if not source_id:
         return StatuteStatusResult(
@@ -353,7 +347,7 @@ def verify_statute_status(source_id: str, as_of: str | None = None) -> StatuteSt
         )
 
     try:
-        meta_map = _cached_metadata_by_source()
+        verification = version_aware.verify_statute_status(source_id, as_of=as_of)
     except Exception as exc:  # noqa: BLE001
         return StatuteStatusResult(
             tool_name="verify_statute_status",
@@ -362,58 +356,17 @@ def verify_statute_status(source_id: str, as_of: str | None = None) -> StatuteSt
             source_id=source_id,
         )
 
-    meta = meta_map.get(source_id)
-    if meta is None:
-        return StatuteStatusResult(
-            tool_name="verify_statute_status",
-            success=True,
-            source_id=source_id,
-            current_status="unknown",
-            is_effective_as_of=False,
-            error=None,
-        )
-
-    as_of_date = _parse_as_of(as_of)
-
-    # 判断 as_of 时间点是否有效：status=effective 且 effective_date <= as_of（若提供）
-    if as_of_date is not None:
-        if meta.effective_date is not None and meta.effective_date > as_of_date:
-            is_effective = False
-        else:
-            is_effective = meta.status == "effective"
-    else:
-        is_effective = meta.status == "effective"
-
-    # 查找取代关系：同标题下是否有更新的 effective 版本
-    superseded_by: str | None = None
-    try:
-        same_title_metas = [m for m in meta_map.values() if m.title == meta.title]
-        if len(same_title_metas) > 1:
-            groups = build_version_groups(same_title_metas)
-            if groups:
-                current = groups[0].current_effective
-                if (
-                    current is not None
-                    and current.source_id != source_id
-                    and meta.status == "effective"
-                ):
-                    superseded_by = current.source_id
-    except Exception:  # noqa: BLE001 - version enrichment is best-effort
-        pass
-
-    official_source = meta.official_urls[0] if meta.official_urls else None
-
     return StatuteStatusResult(
         tool_name="verify_statute_status",
         success=True,
-        source_id=meta.source_id,
-        title=meta.title,
-        current_status=meta.status,
-        effective_date=meta.effective_date,
-        expiry_date=None,  # 当前未从 front matter 解析 expiry
-        is_effective_as_of=is_effective,
-        superseded_by=superseded_by,
-        official_source=official_source,
+        source_id=verification.source_id,
+        title=verification.title,
+        current_status=verification.current_status,
+        effective_date=verification.effective_date,
+        expiry_date=verification.expiry_date,
+        is_effective_as_of=bool(verification.is_effective_as_of),
+        superseded_by=verification.superseded_by,
+        official_source=verification.official_source,
     )
 
 

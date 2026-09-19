@@ -121,21 +121,17 @@ class CaseVault:
         self,
         thread_id: str,
         doc_id: str,
-        expected_thread_id: str | None = None,
+        expected_thread_id: str,
     ) -> bytes | None:
         """读取案件材料；不存在或跨 thread 访问时返回 ``None``。
 
-        跨 thread 隔离：``retrieve`` 内部先做 ``check_access``。
-        注意：隔离校验依赖调用方传入正确的 ``expected_thread_id``——
-        不传（默认 None）时仅做自比校验（兼容旧行为，恒通过非空 thread_id）；
-        调用方应传入当前请求归属的 thread_id，与材料所属 ``thread_id``
-        不一致时返回 ``None``。
+        跨 thread 隔离：``retrieve`` 内部强制执行 ``check_access``——
+        ``expected_thread_id``（请求方归属 thread）为必填参数，与材料所属
+        ``thread_id`` 不一致（或为空）时一律返回 ``None``，不存在"不传即放行"
+        的旁路。
         """
-        # 隔离校验：retrieve 只允许同 thread 访问
-        if expected_thread_id is not None:
-            if not self.check_access(thread_id, doc_id, expected_thread_id):
-                return None
-        elif not self.check_access(thread_id, doc_id, thread_id):
+        # 隔离校验：retrieve 只允许同 thread 访问（expected_thread_id 必填，fail-closed）
+        if not self.check_access(thread_id, doc_id, expected_thread_id):
             return None
         # 过期则视为不存在
         if self._is_expired(thread_id):

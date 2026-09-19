@@ -28,6 +28,7 @@ __all__ = [
     "route_after_missing_fact",
     "route_after_citation",
     "route_after_critic",
+    "route_after_legal_reasoner",
     "route_after_output_guardrail",
     "route_by_complexity",
 ]
@@ -72,6 +73,23 @@ def route_after_citation(state: Any) -> str:
     if not passed and retrieval_iteration < max_iterations:
         return "reretrieve"
     return "output_guardrail"
+
+
+def route_after_legal_reasoner(state: Any) -> str:
+    """法律推理后的路由（light 模式跳过 Critic 评审）。
+
+    - ``complexity == "light"``：快答模式直接进入 ``composer``。Critic 评审
+      （LLM 调用 + 可能触发 legal_reasoner 重试回路）对快答咨询是主要算力
+      放大源；引用校验与输出守卫对全部模式仍全量执行，安全性不受影响。
+    - 其他模式（deep / document）：进入 ``critic``，由
+      :func:`route_after_critic` 决定回退 legal_reasoner 还是组装初稿。
+
+    ``complexity`` 由 jurisdiction_triage 在主链前段写入，此后不再变化，
+    因此本路由在重检索回炉（citation → parallel_retrieval → …）时判定稳定。
+    """
+    if route_by_complexity(state) == "light":
+        return "composer"
+    return "critic"
 
 
 def route_after_critic(state: Any) -> str:

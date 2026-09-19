@@ -1,12 +1,16 @@
 -- P2: 创建受 RLS 约束的 runtime role。
 -- 应用运行时使用此角色连接，无 BYPASSRLS 权限，强制受策略约束。
 -- 迁移仍由 owner role (lvyan) 执行。
+--
+-- 安全语义（fail-closed）：角色以**无密码**状态创建——在部署方显式设置密码
+-- 之前（见 migrations/012_runtime_role_password.sh 或手动 ALTER ROLE），
+-- 任何人都无法用它登录，不存在"已知默认密码"的旁路。
 
 -- 幂等创建：若已存在则跳过
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lvyan_runtime') THEN
-        CREATE ROLE lvyan_runtime LOGIN PASSWORD 'CHANGE_ME_IN_PRODUCTION'
+        CREATE ROLE lvyan_runtime LOGIN PASSWORD NULL
             NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
     END IF;
 END

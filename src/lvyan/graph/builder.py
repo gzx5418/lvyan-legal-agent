@@ -6,7 +6,10 @@
         → (route_after_missing_fact)
             ├─ "ask_user"   → END（中断提问，等待用户补充）
             └─ "continue"   → planner → parallel_retrieval → authority_resolver
-                              → legal_reasoner → critic
+                              → evidence_analyzer → legal_reasoner
+        → (route_after_legal_reasoner)
+            ├─ "light"（快答）→ composer（跳过 Critic 评审，降低算力放大）
+            └─ "deep"/"document" → critic
         → (route_after_critic)
             ├─ "legal_reasoner"    → legal_reasoner（回退重试，iteration+1）
             └─ "composer"         → composer（先组装初稿）
@@ -23,9 +26,10 @@ P1-9b 修复：composer 移到 citation_verifier 之前。
 reasoning_result 而非用户看到的最终文本。新流程先让 composer 组装初稿，
 再对完整输出做引用校验，确保验证的是用户实际看到的内容。
 
-``route_by_complexity`` 不作为主链条件边，而由 ``composer`` 内部读取
-``state.complexity`` 选择输出模板（light / deep / document）；该函数亦可用于
-未来在 ``jurisdiction_triage`` 之后跳过深度节点的扩展。
+``route_by_complexity`` 由 ``composer`` 内部读取 ``state.complexity`` 选择输出
+模板（light / deep / document）；``route_after_legal_reasoner``（light 模式条件边）
+同时让快答模式跳过 Critic 评审：light 直达 composer，deep/document 经
+critic 评审回路。引用校验与输出守卫对所有模式全量执行。
 
 checkpointer 策略
 -----------------
@@ -90,6 +94,7 @@ from lvyan.nodes.triage import jurisdiction_triage
 from .routing import (
     route_after_citation,
     route_after_critic,
+    route_after_legal_reasoner,
     route_after_missing_fact,
     route_after_output_guardrail,
 )
@@ -174,12 +179,18 @@ def _wire_edges(graph: StateGraph) -> None:
     )
 
     # planner → parallel_retrieval → authority_resolver → evidence_analyzer
-    # → legal_reasoner → critic
+    # → legal_reasoner
     graph.add_edge("planner", "parallel_retrieval")
     graph.add_edge("parallel_retrieval", "authority_resolver")
     graph.add_edge("authority_resolver", "evidence_analyzer")
     graph.add_edge("evidence_analyzer", "legal_reasoner")
-    graph.add_edge("legal_reasoner", "critic")
+
+    # legal_reasoner → critic（deep/document 评审）或 composer（light 快答直通）
+    graph.add_conditional_edges(
+        "legal_reasoner",
+        route_after_legal_reasoner,
+        {"critic": "critic", "composer": "composer"},
+    )
 
     # P1-9b：Critic 评审后 → composer（先组装初稿）或回退 legal_reasoner
     graph.add_conditional_edges(

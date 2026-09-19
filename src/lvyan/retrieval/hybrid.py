@@ -201,9 +201,10 @@ def hybrid_search(
             reranked = rerank(query, pool_results, top_k=top_k)
             if reranked:
                 return reranked
-        except RuntimeError:
-            # 生产强制模式拒绝桩（ALLOW_HEURISTIC_RERANKER_FALLBACK=false），
-            # 或 reranker 内部其它运行时错误 → 降级 RRF 排序
+        except Exception:  # noqa: BLE001 - rerank 失败不阻断检索
+            # RuntimeError：生产强制模式拒绝桩（ALLOW_HEURISTIC_RERANKER_FALLBACK=false）；
+            # 其它异常（网络/解析/依赖缺失等）同样只应降级 RRF 排序，由上游节点
+            # 的 _safe_search 统一兜底，而非在 hybrid 层向上穿透中断整次检索。
             pass
 
     # with_rerank=False 或 rerank 失败：返回 RRF 排序

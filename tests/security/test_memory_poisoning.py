@@ -37,12 +37,15 @@ def test_cross_thread_retrieve_denied(tmp_vault: CaseVault):
     content = b"secret contract content for thread A"
     tmp_vault.store("thread_A", "doc_1", content)
 
-    # thread_B 尝试读取 thread_A 的材料 → 拒绝
-    result = tmp_vault.retrieve("thread_B", "doc_1")
+    # thread_B 尝试读取 thread_A 的材料 → check_access 拒绝
+    result = tmp_vault.retrieve("thread_A", "doc_1", expected_thread_id="thread_B")
     assert result is None
 
+    # 伪装 owner 槽位（"thread_B", doc）→ thread_B 目录下无此文件，同样 None
+    assert tmp_vault.retrieve("thread_B", "doc_1", expected_thread_id="thread_B") is None
+
     # thread_A 自身可读取
-    own = tmp_vault.retrieve("thread_A", "doc_1")
+    own = tmp_vault.retrieve("thread_A", "doc_1", expected_thread_id="thread_A")
     assert own == content
 
 
@@ -54,15 +57,15 @@ def test_cross_thread_retrieve_with_fabricated_thread_id(tmp_vault: CaseVault):
     """
     tmp_vault.store("legit_thread", "doc_x", b"sensitive")
 
-    # 各种伪造尝试（与 legit_thread 明确不同）
+    # 各种伪造 requesting 身份的尝试（owner 槽位固定为 legit_thread）
     for fake_thread in ["other_thread", "fake", "spoofed", "thread_B", "impostor"]:
-        result = tmp_vault.retrieve(fake_thread, "doc_x")
-        assert result is None, f"伪造 thread_id={fake_thread!r} 不应读取成功"
+        result = tmp_vault.retrieve("legit_thread", "doc_x", expected_thread_id=fake_thread)
+        assert result is None, f"伪造 requesting_thread_id={fake_thread!r} 不应读取成功"
 
     # 合法 thread 自身可读
-    assert tmp_vault.retrieve("legit_thread", "doc_x") == b"sensitive"
+    assert tmp_vault.retrieve("legit_thread", "doc_x", expected_thread_id="legit_thread") == b"sensitive"
     # 空字符串同样不可读
-    assert tmp_vault.retrieve("", "doc_x") is None
+    assert tmp_vault.retrieve("legit_thread", "doc_x", expected_thread_id="") is None
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +99,7 @@ def test_cross_thread_delete_denied(tmp_vault: CaseVault):
     assert deleted is False
 
     # thread_A 的材料仍在
-    assert tmp_vault.retrieve("thread_A", "doc_1") == b"important"
+    assert tmp_vault.retrieve("thread_A", "doc_1", expected_thread_id="thread_A") == b"important"
 
 
 # ---------------------------------------------------------------------------
@@ -136,9 +139,9 @@ def test_cleanup_expired_does_not_affect_others(tmp_vault: CaseVault):
     assert cleaned >= 1
 
     # thread_A 材料不受影响
-    assert tmp_vault.retrieve("thread_A", "doc_a") == b"keep me"
+    assert tmp_vault.retrieve("thread_A", "doc_a", expected_thread_id="thread_A") == b"keep me"
     # thread_B 已被清理
-    assert tmp_vault.retrieve("thread_B", "doc_b") is None
+    assert tmp_vault.retrieve("thread_B", "doc_b", expected_thread_id="thread_B") is None
 
 
 def test_cleanup_expired_with_no_expired_threads(tmp_vault: CaseVault):
@@ -148,8 +151,8 @@ def test_cleanup_expired_with_no_expired_threads(tmp_vault: CaseVault):
 
     cleaned = tmp_vault.cleanup_expired()
     assert cleaned == 0
-    assert tmp_vault.retrieve("thread_A", "doc_a") == b"keep"
-    assert tmp_vault.retrieve("thread_B", "doc_b") == b"keep"
+    assert tmp_vault.retrieve("thread_A", "doc_a", expected_thread_id="thread_A") == b"keep"
+    assert tmp_vault.retrieve("thread_B", "doc_b", expected_thread_id="thread_B") == b"keep"
 
 
 # ---------------------------------------------------------------------------
@@ -158,12 +161,12 @@ def test_cleanup_expired_with_no_expired_threads(tmp_vault: CaseVault):
 def test_self_retrieve_after_expiry(tmp_vault: CaseVault):
     """set_ttl(thread, 0) 立即过期后，thread 自身 retrieve → None。"""
     tmp_vault.store("thread_A", "doc_a", b"data")
-    assert tmp_vault.retrieve("thread_A", "doc_a") == b"data"
+    assert tmp_vault.retrieve("thread_A", "doc_a", expected_thread_id="thread_A") == b"data"
 
     tmp_vault.set_ttl("thread_A", 0)
     time.sleep(0.01)
     # 过期后自身亦不可读
-    assert tmp_vault.retrieve("thread_A", "doc_a") is None
+    assert tmp_vault.retrieve("thread_A", "doc_a", expected_thread_id="thread_A") is None
 
 
 def test_default_ttl_is_seven_days():

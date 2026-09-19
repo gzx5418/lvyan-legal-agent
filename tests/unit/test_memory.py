@@ -243,7 +243,7 @@ def test_case_vault_store_retrieve_list(tmp_path):
     assert "t1" in path
 
     # retrieve 内容一致（加密占位为 base64，应可逆）
-    retrieved = vault.retrieve("t1", "doc1")
+    retrieved = vault.retrieve("t1", "doc1", expected_thread_id="t1")
     assert retrieved is not None
     assert retrieved == content
 
@@ -257,7 +257,7 @@ def test_case_vault_store_retrieve_list(tmp_path):
 
 def test_case_vault_retrieve_missing_returns_none(tmp_path):
     vault = CaseVault(base_dir=tmp_path / "vault")
-    assert vault.retrieve("t1", "nope") is None
+    assert vault.retrieve("t1", "nope", expected_thread_id="t1") is None
 
 
 # ===========================================================================
@@ -273,16 +273,17 @@ def test_case_vault_cross_thread_isolation(tmp_path):
     # t1 自己访问自己 → True
     assert vault.check_access("t1", "secret-doc", "t1") is True
 
-    # retrieve 跨 thread → None（隔离：retrieve 内部用 requesting=thread_id 自身）
-    # 这里用 t2 视角：retrieve("t2", "secret-doc")，check_access("t2","secret-doc","t2")=True，
-    # 但 t2 目录下根本没有该文件 → 返回 None，达到隔离效果。
-    assert vault.retrieve("t2", "secret-doc") is None
+    # retrieve 跨 thread → None（两条路径都隔离）：
+    # a) expected_thread_id 为他人 thread → check_access 直接拒绝；
+    assert vault.retrieve("t1", "secret-doc", expected_thread_id="t2") is None
+    # b) 伪装 owner 槽位（"t2", doc）→ t2 目录下没有该文件 → 返回 None。
+    assert vault.retrieve("t2", "secret-doc", expected_thread_id="t2") is None
 
     # t2 list_documents 不应看到 t1 的材料
     assert vault.list_documents("t2") == []
 
     # t1 自身仍可正常读取
-    assert vault.retrieve("t1", "secret-doc") == "敏感材料".encode("utf-8")
+    assert vault.retrieve("t1", "secret-doc", expected_thread_id="t1") == "敏感材料".encode("utf-8")
 
 
 def test_case_vault_check_access_rules(tmp_path):
@@ -310,7 +311,7 @@ def test_case_vault_ttl_cleanup(tmp_path):
     assert cleaned >= 1
 
     # 再次 retrieve → None（材料已清理）
-    assert vault.retrieve("t1", "ephemeral") is None
+    assert vault.retrieve("t1", "ephemeral", expected_thread_id="t1") is None
     # list_documents 也为空
     assert vault.list_documents("t1") == []
 
@@ -321,7 +322,7 @@ def test_case_vault_default_ttl_not_expired(tmp_path):
     vault.store("t1", "doc", b"x")
     # 不调用 set_ttl，默认 7 天
     assert vault.cleanup_expired() == 0
-    assert vault.retrieve("t1", "doc") == b"x"
+    assert vault.retrieve("t1", "doc", expected_thread_id="t1") == b"x"
 
 
 # ===========================================================================
@@ -333,7 +334,7 @@ def test_case_vault_delete_and_delete_thread(tmp_path):
 
     # delete 单个文件 → retrieve 返回 None
     assert vault.delete("t1", "doc1") is True
-    assert vault.retrieve("t1", "doc1") is None
+    assert vault.retrieve("t1", "doc1", expected_thread_id="t1") is None
 
     # delete 不存在的文件 → False
     assert vault.delete("t1", "doc1") is False

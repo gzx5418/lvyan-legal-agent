@@ -137,7 +137,11 @@ def test_case_vault_uri_is_read_by_attachment_node(tmp_path, monkeypatch):
     vault = CaseVault(base_dir=tmp_path / "vault")
     vault.store("thread-1", "doc-1", "证据正文".encode(), {})
     monkeypatch.setattr("lvyan.memory.case_vault.CaseVault", lambda: vault)
-    assert _load_markdown("vault://thread-1/doc-1") == "证据正文"
+    # expected_thread_id 与 vault 引用一致 → 正常读取
+    assert _load_markdown("vault://thread-1/doc-1", expected_thread_id="thread-1") == "证据正文"
+    # 与 vault 引用不一致（跨 thread / 空）→ 返回空串，不读取他人材料
+    assert _load_markdown("vault://thread-1/doc-1", expected_thread_id="thread-2") == ""
+    assert _load_markdown("vault://thread-1/doc-1") == ""
 
 
 def test_mcp_registry_exposes_bounded_legal_tools():

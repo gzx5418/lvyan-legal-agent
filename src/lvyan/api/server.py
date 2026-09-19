@@ -784,7 +784,10 @@ def _load_attachment_markdown(meta: dict[str, Any], fid: str, case_vault: Any = 
                 thread_id, doc_id = vault_ref.split("/", 1)
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail="附件加密引用无效") from exc
-            content = case_vault.retrieve(thread_id, doc_id)
+            # 上传暂存区按用户（upload-{sha256(user_id)}）而非 run 线程存储，
+            # 用户归属已由上方的 P0-5 ownership 校验保证；此处做同 thread 自校验，
+            # 满足 vault 必填 expected_thread_id 的 fail-closed 契约。
+            content = case_vault.retrieve(thread_id, doc_id, expected_thread_id=thread_id)
             if content is None:
                 raise HTTPException(status_code=404, detail=f"附件 {fid} 不存在或已过期")
             return content.decode("utf-8", errors="replace")

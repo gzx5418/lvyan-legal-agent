@@ -55,7 +55,8 @@ __all__ = ["output_guardrail", "MAX_OUTPUT_ITERATIONS"]
 _logger = logging.getLogger("lvyan.nodes.output_guardrail")
 
 
-# 输出回退最大重试次数（建议 2）
+# 输出回退最大重试次数的默认值；实际上限以 settings.max_output_iterations 为准
+# （可用环境变量 MAX_OUTPUT_ITERATIONS 覆盖）。保留常量供旧调用方/测试引用。
 MAX_OUTPUT_ITERATIONS: int = 2
 
 # 不可逆操作关键词（命中即触发 Human-in-the-loop）
@@ -192,7 +193,9 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
             # fail-closed 的人工确认，不能因新增章节要求绕过或丢失审批状态。
             if irreversible_ops and settings.hitl_enabled:
                 notes.append(f"兼容旧版待审批输出，保留结构提示：{err.detail}")
-            elif output_iteration < MAX_OUTPUT_ITERATIONS:
+            elif output_iteration < max(0, settings.max_output_iterations):
+                # 注意：composer 当前为确定性模板，重试输入不变时输出也不变，
+                # 该回路主要用于 composer 未来引入非确定性生成时的安全上限。
                 retry_needed = True
                 retry_reasons.append(err.detail)
             else:

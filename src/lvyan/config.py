@@ -218,6 +218,11 @@ class Settings(BaseModel):
     max_retrieval_iterations: int = Field(
         default=1, description="Citation Verifier 最大重检索次数（降低以减少 LLM 调用放大）"
     )
+    max_output_iterations: int = Field(
+        default=2,
+        description="Output Guardrail 最大回退 composer 重写次数（composer 为确定性模板，"
+        "重试无信息增益时会在上限内快速空转，调低可缩短无效回路）",
+    )
     max_cost_budget_usd: float = Field(default=2.0, description="单次 run 最大成本预算（美元）")
     hitl_enabled: bool = Field(
         default=True, description="是否启用 Human-in-the-loop 不可逆操作审批"
@@ -376,6 +381,7 @@ def _build_settings() -> Settings:
         knowledge_dir=KNOWLEDGE_DIR,
         lawtext_dir=LAWTEXT_DIR,
         max_retrieval_iterations=_get_int("MAX_RETRIEVAL_ITERATIONS", 1),
+        max_output_iterations=_get_int("MAX_OUTPUT_ITERATIONS", 2),
         max_cost_budget_usd=_get_float("MAX_COST_BUDGET_USD", 2.0),
         hitl_enabled=_get_bool("HITL_ENABLED", True),
         runtime_mode=_get("RUNTIME_MODE", "development").strip().lower(),

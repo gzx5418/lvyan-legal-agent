@@ -20,8 +20,13 @@ __all__ = ["attachment_retriever"]
 _logger = logging.getLogger("lvyan.nodes.attachment_retriever")
 
 
-def _load_markdown(stored_path: str) -> str:
-    """从 stored_path 读取 markdown 正文；失败返回空串。"""
+def _load_markdown(stored_path: str, expected_thread_id: str = "") -> str:
+    """从 stored_path 读取 markdown 正文；失败返回空串。
+
+    ``expected_thread_id`` 传当前 run 归属的 thread_id：vault 引用与当前
+    thread 不一致（状态被污染或跨 thread 引用）时读取失败返回空串，
+    防止图执行读到其他会话的案件材料。
+    """
     try:
         if stored_path.startswith("vault://"):
             from lvyan.memory.case_vault import CaseVault
@@ -30,7 +35,9 @@ def _load_markdown(stored_path: str) -> str:
             thread_id, separator, doc_id = ref.partition("/")
             if not separator or not thread_id or not doc_id:
                 return ""
-            payload = CaseVault().retrieve(thread_id, doc_id)
+            payload = CaseVault().retrieve(
+                thread_id, doc_id, expected_thread_id=expected_thread_id
+            )
             return payload.decode("utf-8") if payload is not None else ""
         p = Path(stored_path)
         if not p.is_file():
@@ -53,6 +60,7 @@ def attachment_retriever(
     """
     user_goal = str(_get(state, "user_goal", "") or "")
     docs = _get(state, "uploaded_documents", []) or []
+    current_thread_id = str(_get(state, "thread_id", "") or "")
 
     if not docs or not user_goal.strip():
         return {"relevant_attachment_context": ""}
@@ -64,7 +72,7 @@ def attachment_retriever(
         stored_path = str(_get(doc, "stored_path", "") or "")
         if not stored_path:
             continue
-        md = _load_markdown(stored_path)
+        md = _load_markdown(stored_path, expected_thread_id=current_thread_id)
         if not md.strip():
             continue
         chunks = chunk_attachment_markdown(md, document_id=doc_id, document_name=filename)
