@@ -63,7 +63,10 @@ def test_cross_thread_retrieve_with_fabricated_thread_id(tmp_vault: CaseVault):
         assert result is None, f"伪造 requesting_thread_id={fake_thread!r} 不应读取成功"
 
     # 合法 thread 自身可读
-    assert tmp_vault.retrieve("legit_thread", "doc_x", expected_thread_id="legit_thread") == b"sensitive"
+    assert (
+        tmp_vault.retrieve("legit_thread", "doc_x", expected_thread_id="legit_thread")
+        == b"sensitive"
+    )
     # 空字符串同样不可读
     assert tmp_vault.retrieve("legit_thread", "doc_x", expected_thread_id="") is None
 
