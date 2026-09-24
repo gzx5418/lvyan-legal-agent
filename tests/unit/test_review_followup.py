@@ -203,7 +203,7 @@ async def test_checkpoint_hitl_uses_run_metadata_without_sidecar(monkeypatch):
     class FakeStore:
         claimed = False
 
-        def get_run(self, run_id: str) -> dict[str, Any] | None:
+        def get_run(self, run_id: str, user_id: str | None = None) -> dict[str, Any] | None:
             assert run_id == "run-db"
             return {
                 "run_id": run_id,
@@ -213,7 +213,7 @@ async def test_checkpoint_hitl_uses_run_metadata_without_sidecar(monkeypatch):
                 "created_at": 1.0,
             }
 
-        def update_run(self, _run_id: str, **_values: Any) -> None:
+        def update_run(self, _run_id: str, user_id: str | None = None, **_values: Any) -> None:
             return None
 
         def claim_hitl_run(self, run_id: str, user_id: str) -> dict[str, Any] | None:
@@ -284,10 +284,10 @@ async def test_in_process_hitl_claims_metadata_before_resume(monkeypatch):
                 "status": "running",
             }
 
-        def get_run(self, _run_id: str):
+        def get_run(self, _run_id: str, user_id: str | None = None):
             return None
 
-        def update_run(self, _run_id: str, **_values: Any) -> None:
+        def update_run(self, _run_id: str, user_id: str | None = None, **_values: Any) -> None:
             return None
 
     manager = sse.RunManager(metadata_store=FakeStore())
@@ -319,7 +319,7 @@ async def test_two_instances_only_one_can_claim_hitl(monkeypatch):
     class SharedStore:
         status = "awaiting_hitl"
 
-        def get_run(self, run_id: str):
+        def get_run(self, run_id: str, user_id: str | None = None):
             return {
                 "run_id": run_id,
                 "thread_id": "thread-db",
@@ -339,7 +339,7 @@ async def test_two_instances_only_one_can_claim_hitl(monkeypatch):
                 "status": "running",
             }
 
-        def update_run(self, _run_id: str, **_values: Any) -> None:
+        def update_run(self, _run_id: str, user_id: str | None = None, **_values: Any) -> None:
             return None
 
     class FakeGraph:
@@ -443,7 +443,7 @@ async def test_metadata_update_failure_marks_run_non_recoverable():
     from lvyan.api import sse
 
     class Store:
-        def update_run(self, _run_id: str, **_values: Any) -> None:
+        def update_run(self, _run_id: str, user_id: str | None = None, **_values: Any) -> None:
             raise OSError("database unavailable")
 
     async def runner(*_args: Any, **_kwargs: Any) -> str:
@@ -469,7 +469,7 @@ def test_durable_thread_owner_cannot_be_overwritten(monkeypatch):
     from lvyan.api.server import create_app
 
     class Store:
-        def get_thread(self, thread_id: str):
+        def get_thread(self, thread_id: str, user_id: str | None = None):
             assert thread_id == "thread-owned"
             return {"thread_id": thread_id, "user_id": "user-a"}
 
@@ -497,7 +497,7 @@ def test_cross_instance_stream_returns_completed_output():
     from lvyan.api.server import create_app
 
     class Store:
-        def get_run(self, run_id: str):
+        def get_run(self, run_id: str, user_id: str | None = None):
             return {
                 "run_id": run_id,
                 "thread_id": "thread-1",
@@ -526,7 +526,7 @@ def test_cross_instance_running_stream_requires_affinity():
     from lvyan.api.server import create_app
 
     class Store:
-        def get_run(self, run_id: str):
+        def get_run(self, run_id: str, user_id: str | None = None):
             return {
                 "run_id": run_id,
                 "thread_id": "thread-1",
@@ -553,7 +553,7 @@ def test_cross_instance_cancelled_stream_returns_cancel_event():
     from lvyan.api.server import create_app
 
     class Store:
-        def get_run(self, run_id: str):
+        def get_run(self, run_id: str, user_id: str | None = None):
             return {
                 "run_id": run_id,
                 "thread_id": "thread-1",
@@ -579,7 +579,7 @@ async def test_hitl_persistence_failure_does_not_publish_approval(monkeypatch):
     from lvyan.api import sse
 
     class FailingStore:
-        def update_run(self, _run_id: str, **_values: Any) -> None:
+        def update_run(self, _run_id: str, user_id: str | None = None, **_values: Any) -> None:
             raise OSError("database unavailable")
 
     class FakeGraph:
@@ -633,7 +633,7 @@ async def test_second_hitl_persistence_failure_closes_without_approval(
     from lvyan.api import sse
 
     class FailingStore:
-        def update_run(self, _run_id: str, **_values: Any) -> None:
+        def update_run(self, _run_id: str, user_id: str | None = None, **_values: Any) -> None:
             raise OSError("database unavailable")
 
     class FakeGraph:
@@ -686,10 +686,10 @@ def test_delete_thread_uses_durable_store_and_local_cleanup():
     memory.items["thread-1"] = {"user_id": "anonymous"}
 
     class Store:
-        def get_thread(self, thread_id: str):
+        def get_thread(self, thread_id: str, user_id: str | None = None):
             return {"thread_id": thread_id, "user_id": "anonymous"}
 
-        def has_active_runs(self, _thread_id: str) -> bool:
+        def has_active_runs(self, _thread_id: str, user_id: str | None = None) -> bool:
             return False
 
         def delete_thread(self, thread_id: str, user_id: str) -> bool:
@@ -867,10 +867,10 @@ def test_checkpoint_delete_failure_returns_503_without_deleting_metadata():
             raise OSError("checkpoint unavailable")
 
     class Store:
-        def get_thread(self, thread_id: str):
+        def get_thread(self, thread_id: str, user_id: str | None = None):
             return {"thread_id": thread_id, "user_id": "anonymous"}
 
-        def has_active_runs(self, _thread_id: str) -> bool:
+        def has_active_runs(self, _thread_id: str, user_id: str | None = None) -> bool:
             return False
 
         def delete_thread(self, _thread_id: str, _user_id: str) -> bool:
@@ -899,10 +899,10 @@ def test_active_durable_run_blocks_thread_deletion():
             raise AssertionError("active thread checkpoint must not be deleted")
 
     class Store:
-        def get_thread(self, thread_id: str):
+        def get_thread(self, thread_id: str, user_id: str | None = None):
             return {"thread_id": thread_id, "user_id": "anonymous"}
 
-        def has_active_runs(self, _thread_id: str) -> bool:
+        def has_active_runs(self, _thread_id: str, user_id: str | None = None) -> bool:
             return True
 
     response = TestClient(
@@ -925,7 +925,7 @@ def test_checkpoint_read_failure_returns_503():
             raise OSError("checkpoint unavailable")
 
     class Store:
-        def get_thread(self, thread_id: str):
+        def get_thread(self, thread_id: str, user_id: str | None = None):
             return {"thread_id": thread_id, "user_id": "anonymous"}
 
     response = TestClient(
@@ -984,11 +984,11 @@ async def test_completion_persistence_failure_sends_warning_before_result():
     from lvyan.api import sse
 
     class Store:
-        def update_run(self, _run_id: str, **values: Any) -> None:
+        def update_run(self, _run_id: str, user_id: str | None = None, **values: Any) -> None:
             if values.get("status") == "completed":
                 raise OSError("database unavailable")
 
-        def mark_thread_output(self, _thread_id: str) -> None:
+        def mark_thread_output(self, _thread_id: str, user_id: str | None = None) -> None:
             return None
 
     async def runner(*_args: Any, **_kwargs: Any) -> str:
@@ -1033,7 +1033,7 @@ def test_state_returns_complete_durable_message_history():
             )
 
     class Store:
-        def get_thread(self, thread_id: str):
+        def get_thread(self, thread_id: str, user_id: str | None = None):
             return {"thread_id": thread_id, "user_id": "anonymous"}
 
         def list_messages(self, thread_id: str, user_id: str):
@@ -1093,7 +1093,7 @@ async def test_create_run_persists_user_message_and_attachments():
         def update_run(self, *_args: Any, **_kwargs: Any) -> None:
             return None
 
-        def mark_thread_output(self, _thread_id: str) -> None:
+        def mark_thread_output(self, _thread_id: str, user_id: str | None = None) -> None:
             return None
 
         def append_message(self, *_args: Any, **_kwargs: Any) -> None:
@@ -1127,7 +1127,7 @@ async def test_completion_persists_assistant_message():
         def update_run(self, *_args: Any, **_kwargs: Any) -> None:
             return None
 
-        def mark_thread_output(self, _thread_id: str) -> None:
+        def mark_thread_output(self, _thread_id: str, user_id: str | None = None) -> None:
             return None
 
         def append_message(

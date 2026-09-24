@@ -9,8 +9,20 @@ from pydantic import BaseModel, Field, field_validator
 __all__ = ["OnlineSource", "is_official_source_url"]
 
 
+# P1 收紧：原 `host.endswith(".gov.cn")` 放行任意 gov.cn 子域（含区县政务网）。
+# 权威法律来源收敛到核心域名后缀集合；需要扩充时在此显式登记。
+_OFFICIAL_SOURCE_DOMAINS: tuple[str, ...] = (
+    "flk.npc.gov.cn",  # 国家法律法规数据库
+    "npc.gov.cn",  # 全国人大
+    "www.gov.cn",  # 国务院
+    "court.gov.cn",  # 最高人民法院
+    "spp.gov.cn",  # 最高人民检察院
+    "justice.gov.cn",  # 司法部
+)
+
+
 def is_official_source_url(value: str) -> bool:
-    """仅接受中国大陆政府、人大、法院和检察院的 HTTPS 页面。"""
+    """仅接受核心官方域名的 HTTPS 页面。"""
     try:
         parsed = urlsplit(value)
     except (TypeError, ValueError):
@@ -18,15 +30,7 @@ def is_official_source_url(value: str) -> bool:
     host = (parsed.hostname or "").lower().rstrip(".")
     if parsed.scheme != "https" or not host:
         return False
-    return (
-        host == "flk.npc.gov.cn"
-        or host == "npc.gov.cn"
-        or host.endswith(".gov.cn")
-        or host == "court.gov.cn"
-        or host.endswith(".court.gov.cn")
-        or host == "spp.gov.cn"
-        or host.endswith(".spp.gov.cn")
-    )
+    return any(host == domain or host.endswith("." + domain) for domain in _OFFICIAL_SOURCE_DOMAINS)
 
 
 class OnlineSource(BaseModel):

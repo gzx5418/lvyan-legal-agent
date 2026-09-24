@@ -2,23 +2,33 @@
 -- legal_cases: 直接校验 user_id。
 -- 子表: 通过 case_id JOIN legal_cases 校验所属案件的 user_id。
 
+-- 幂等性：每条 CREATE POLICY 前置 DROP POLICY IF EXISTS 守卫。
+-- 背景：docker-entrypoint-initdb.d 与应用层 _ensure_schema（schema_migrations
+-- 版本表）是两条独立执行通道，全新数据卷首启时 initdb 先执行本文件、应用
+-- 启动后按版本表重放；无守卫会因 "policy already exists" 使生产实例进入
+-- crash loop（对照 010_checkpoint_rls.sql 的既有做法）。
+
 -- ============================================================================
 -- legal_cases (顶层, 直接 user_id 校验)
 -- ============================================================================
 ALTER TABLE legal_cases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE legal_cases FORCE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS tenant_select_cases ON legal_cases;
 CREATE POLICY tenant_select_cases ON legal_cases
     FOR SELECT USING (user_id = current_setting('app.user_id', true));
 
+DROP POLICY IF EXISTS tenant_insert_cases ON legal_cases;
 CREATE POLICY tenant_insert_cases ON legal_cases
     FOR INSERT WITH CHECK (user_id = current_setting('app.user_id', true));
 
+DROP POLICY IF EXISTS tenant_update_cases ON legal_cases;
 CREATE POLICY tenant_update_cases ON legal_cases
     FOR UPDATE
     USING (user_id = current_setting('app.user_id', true))
     WITH CHECK (user_id = current_setting('app.user_id', true));
 
+DROP POLICY IF EXISTS tenant_delete_cases ON legal_cases;
 CREATE POLICY tenant_delete_cases ON legal_cases
     FOR DELETE USING (user_id = current_setting('app.user_id', true));
 
@@ -28,6 +38,7 @@ CREATE POLICY tenant_delete_cases ON legal_cases
 ALTER TABLE case_evidence ENABLE ROW LEVEL SECURITY;
 ALTER TABLE case_evidence FORCE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS tenant_select_evidence ON case_evidence;
 CREATE POLICY tenant_select_evidence ON case_evidence
     FOR SELECT
     USING (EXISTS (
@@ -36,6 +47,7 @@ CREATE POLICY tenant_select_evidence ON case_evidence
           AND legal_cases.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_insert_evidence ON case_evidence;
 CREATE POLICY tenant_insert_evidence ON case_evidence
     FOR INSERT
     WITH CHECK (EXISTS (
@@ -44,6 +56,7 @@ CREATE POLICY tenant_insert_evidence ON case_evidence
           AND legal_cases.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_update_evidence ON case_evidence;
 CREATE POLICY tenant_update_evidence ON case_evidence
     FOR UPDATE
     USING (EXISTS (
@@ -52,6 +65,7 @@ CREATE POLICY tenant_update_evidence ON case_evidence
           AND legal_cases.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_delete_evidence ON case_evidence;
 CREATE POLICY tenant_delete_evidence ON case_evidence
     FOR DELETE
     USING (EXISTS (
@@ -66,6 +80,7 @@ CREATE POLICY tenant_delete_evidence ON case_evidence
 ALTER TABLE legal_documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE legal_documents FORCE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS tenant_select_documents ON legal_documents;
 CREATE POLICY tenant_select_documents ON legal_documents
     FOR SELECT
     USING (EXISTS (
@@ -74,6 +89,7 @@ CREATE POLICY tenant_select_documents ON legal_documents
           AND legal_cases.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_insert_documents ON legal_documents;
 CREATE POLICY tenant_insert_documents ON legal_documents
     FOR INSERT
     WITH CHECK (EXISTS (
@@ -82,6 +98,7 @@ CREATE POLICY tenant_insert_documents ON legal_documents
           AND legal_cases.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_update_documents ON legal_documents;
 CREATE POLICY tenant_update_documents ON legal_documents
     FOR UPDATE
     USING (EXISTS (
@@ -90,6 +107,7 @@ CREATE POLICY tenant_update_documents ON legal_documents
           AND legal_cases.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_delete_documents ON legal_documents;
 CREATE POLICY tenant_delete_documents ON legal_documents
     FOR DELETE
     USING (EXISTS (
@@ -104,6 +122,7 @@ CREATE POLICY tenant_delete_documents ON legal_documents
 ALTER TABLE document_versions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_versions FORCE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS tenant_select_versions ON document_versions;
 CREATE POLICY tenant_select_versions ON document_versions
     FOR SELECT
     USING (EXISTS (
@@ -113,6 +132,7 @@ CREATE POLICY tenant_select_versions ON document_versions
           AND c.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_insert_versions ON document_versions;
 CREATE POLICY tenant_insert_versions ON document_versions
     FOR INSERT
     WITH CHECK (EXISTS (
@@ -122,6 +142,7 @@ CREATE POLICY tenant_insert_versions ON document_versions
           AND c.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_delete_versions ON document_versions;
 CREATE POLICY tenant_delete_versions ON document_versions
     FOR DELETE
     USING (EXISTS (
@@ -137,6 +158,7 @@ CREATE POLICY tenant_delete_versions ON document_versions
 ALTER TABLE review_findings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE review_findings FORCE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS tenant_select_findings ON review_findings;
 CREATE POLICY tenant_select_findings ON review_findings
     FOR SELECT
     USING (EXISTS (
@@ -146,6 +168,7 @@ CREATE POLICY tenant_select_findings ON review_findings
           AND c.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_insert_findings ON review_findings;
 CREATE POLICY tenant_insert_findings ON review_findings
     FOR INSERT
     WITH CHECK (EXISTS (
@@ -155,6 +178,7 @@ CREATE POLICY tenant_insert_findings ON review_findings
           AND c.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_update_findings ON review_findings;
 CREATE POLICY tenant_update_findings ON review_findings
     FOR UPDATE
     USING (EXISTS (
@@ -170,6 +194,7 @@ CREATE POLICY tenant_update_findings ON review_findings
 ALTER TABLE document_approvals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_approvals FORCE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS tenant_select_approvals ON document_approvals;
 CREATE POLICY tenant_select_approvals ON document_approvals
     FOR SELECT
     USING (EXISTS (
@@ -179,6 +204,7 @@ CREATE POLICY tenant_select_approvals ON document_approvals
           AND c.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_insert_approvals ON document_approvals;
 CREATE POLICY tenant_insert_approvals ON document_approvals
     FOR INSERT
     WITH CHECK (EXISTS (
@@ -194,6 +220,7 @@ CREATE POLICY tenant_insert_approvals ON document_approvals
 ALTER TABLE workspace_audit_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workspace_audit_events FORCE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS tenant_select_audit ON workspace_audit_events;
 CREATE POLICY tenant_select_audit ON workspace_audit_events
     FOR SELECT
     USING (EXISTS (
@@ -202,6 +229,7 @@ CREATE POLICY tenant_select_audit ON workspace_audit_events
           AND legal_cases.user_id = current_setting('app.user_id', true)
     ));
 
+DROP POLICY IF EXISTS tenant_insert_audit ON workspace_audit_events;
 CREATE POLICY tenant_insert_audit ON workspace_audit_events
     FOR INSERT
     WITH CHECK (EXISTS (

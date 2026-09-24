@@ -7,4 +7,46 @@
 #     superseded_by: replacement-source-id
 #     official_urls:
 #       - https://example.gov.cn/official-page
-overrides: {}
+#
+# 已核验回填：《中华人民共和国民法典》第一千二百六十条明确规定，下列九部
+# 法律自 2021-01-01（民法典施行日）起废止。语料 front matter 只有 status=已废止
+# 而无失效日期，历史时点查询（law_as_of_date）会因"废止但无 expiry 保守排除"
+# 而全部漏召回——本表补齐失效时点，使"2018 年案件适用合同法"类查询可召回。
+# 核验来源：国家法律法规数据库 flk.npc.gov.cn《民法典》第 1260 条。
+overrides:
+  2c909fdd678bf17901678bf6053a0217:   # 中华人民共和国合同法
+    status: repealed
+    expiry_date: 2021-01-01
+    superseded_by: ff808081729d1efe01729d50b5c500bf
+  2c909fdd678bf17901678bf60f08027b:   # 中华人民共和国婚姻法（2001 修正版）
+    status: repealed
+    expiry_date: 2021-01-01
+    superseded_by: ff808081729d1efe01729d50b5c500bf
+  2c909fdd678bf17901678bf5aff900b9:   # 中华人民共和国继承法
+    status: repealed
+    expiry_date: 2021-01-01
+    superseded_by: ff808081729d1efe01729d50b5c500bf
+  2c909fdd678bf17901678bf5f808020d:   # 中华人民共和国收养法
+    status: repealed
+    expiry_date: 2021-01-01
+    superseded_by: ff808081729d1efe01729d50b5c500bf
+  2c909fdd678bf17901678bf5d86801b3:   # 中华人民共和国担保法
+    status: repealed
+    expiry_date: 2021-01-01
+    superseded_by: ff808081729d1efe01729d50b5c500bf
+  2c909fdd678bf17901678bf645b90375:   # 中华人民共和国物权法
+    status: repealed
+    expiry_date: 2021-01-01
+    superseded_by: ff808081729d1efe01729d50b5c500bf
+  2c909fdd678bf17901678bf706b1055f:   # 中华人民共和国侵权责任法
+    status: repealed
+    expiry_date: 2021-01-01
+    superseded_by: ff808081729d1efe01729d50b5c500bf
+  2c909fdd678bf17901678bf674710415:   # 中华人民共和国民法通则
+    status: repealed
+    expiry_date: 2021-01-01
+    superseded_by: ff808081729d1efe01729d50b5c500bf
+  2c909fdd678bf17901678bf8479b09dd:   # 中华人民共和国民法总则
+    status: repealed
+    expiry_date: 2021-01-01
+    superseded_by: ff808081729d1efe01729d50b5c500bf

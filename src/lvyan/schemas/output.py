@@ -34,6 +34,11 @@ class CitationAudit(BaseModel):
     unsupported: int
     details: list[CitationDetail]
     reretrieval_count: int = 0
+    # 语义蕴含审查是否实际执行；None=未尝试，False=降级（原因见
+    # llm_degraded_reason）。降级时 passed=True 只代表"未经语义核验"，
+    # 输出层应向用户披露该限制。
+    llm_semantic_reviewed: bool | None = None
+    llm_degraded_reason: str | None = None
 
 
 class ReasoningResult(BaseModel):

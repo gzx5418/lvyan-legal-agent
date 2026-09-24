@@ -17,8 +17,13 @@
 - 「覆盖」语义字段（运行标识 / 元信息 / 推理结果 / 迭代计数等）：节点返回
   的值直接覆盖旧值，符合「最新一次计算为准」的直觉。
 
-字段清单与 :class:`CaseState` 完全一致，便于在节点边界处用
-``CaseState.model_validate(dict_state)`` 还原为带校验的 Pydantic 视图。
+字段清单是 :class:`CaseState` 的**超集**：多出的运行域字段
+（critic_report / critic_feedback / pending_human_approval / output_iteration /
+output_retry_needed / legal_answer / document_payload / document_file）属于图
+执行层状态，不属于领域模型——``CaseState.model_validate(dict_state)`` 会静默
+丢弃它们，该视图只读不回写。字段一致性由
+``tests/unit/test_graph_state_consistency.py`` 守护（CaseState 必须是
+GraphState 子集，且 GraphState 多出的字段恰为运行域白名单）。
 """
 
 from __future__ import annotations

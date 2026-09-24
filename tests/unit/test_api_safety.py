@@ -205,7 +205,7 @@ def test_state_returns_200_with_messages_when_checkpoint_gone(monkeypatch):
             return None  # checkpoint 不存在
 
     class _FakeStore:
-        def get_thread(self, thread_id):
+        def get_thread(self, thread_id, user_id=None):
             return {
                 "thread_id": thread_id,
                 "user_id": "anonymous",
@@ -428,7 +428,7 @@ def test_fail_run_updates_db_to_failed():
         def __init__(self):
             self.updates = {}
 
-        def update_run(self, run_id, **values):
+        def update_run(self, run_id, user_id=None, **values):
             self.updates[run_id] = values
             return None
 
@@ -465,7 +465,7 @@ def test_drive_writes_failed_to_db_on_runner_failure(monkeypatch):
         def __init__(self):
             self.updates = {}
 
-        def update_run(self, run_id, **values):
+        def update_run(self, run_id, user_id=None, **values):
             self.updates[run_id] = values
 
         def append_message(self, *a, **kw):
@@ -542,10 +542,13 @@ def test_request_cancel_awaiting_hitl_directly_cancels():
     result = store.request_cancel("r1", "u1")
     # P0-1：返回三态 "cancelled_immediately"
     assert result == "cancelled_immediately"
-    # P1-1：确认是单条原子 SQL（含 CASE WHEN status = 'awaiting_hitl'）
-    assert len(executed_sqls) == 1
-    assert "awaiting_hitl" in executed_sqls[0]
-    assert "cancel_requested_at" in executed_sqls[0]
+    # P1-1：确认是单条原子 SQL（含 CASE WHEN status = 'awaiting_hitl'）。
+    # P1（RLS GUC）后 executed_sqls 还含 set_config 注入/复位两条，业务语句
+    # 需过滤后断言。
+    business = [q for q in executed_sqls if "set_config" not in q]
+    assert len(business) == 1
+    assert "awaiting_hitl" in business[0]
+    assert "cancel_requested_at" in business[0]
 
 
 def test_request_cancel_running_returns_cancel_requested():
@@ -973,7 +976,7 @@ def test_has_active_thread_runs_syncs_with_db_cancelled():
     from lvyan.api.sse import RunContext, RunManager
 
     class _StubStore:
-        def get_run(self, run_id):
+        def get_run(self, run_id, user_id=None):
             return {"status": "cancelled", "error": "用户已停止生成"}
 
     stub = _StubStore()
@@ -992,7 +995,7 @@ def test_has_active_thread_runs_db_unreachable_fail_open():
     from lvyan.api.sse import RunContext, RunManager
 
     class _StubStore:
-        def get_run(self, run_id):
+        def get_run(self, run_id, user_id=None):
             raise ConnectionError("DB down")
 
     stub = _StubStore()
@@ -1023,7 +1026,7 @@ def test_resolve_hitl_claim_failure_rolls_back_db():
             self.claimed = True
             return {"run_id": run_id, "thread_id": "t1", "user_id": user_id}
 
-        def update_run(self, run_id, **values):
+        def update_run(self, run_id, user_id=None, **values):
             self.updates[run_id] = values
 
         def append_message(self, *a, **kw):
@@ -1116,7 +1119,7 @@ def test_cancel_context_writes_completed_at_to_db():
         def __init__(self):
             self.updates = {}
 
-        def update_run(self, run_id, **values):
+        def update_run(self, run_id, user_id=None, **values):
             self.updates[run_id] = values
 
         def append_message(self, *a, **kw):
@@ -1150,7 +1153,7 @@ def test_cancel_context_persistence_failure_returns_unavailable():
     from lvyan.api.sse import RunContext, RunManager
 
     class _StubStore:
-        def update_run(self, run_id, **values):
+        def update_run(self, run_id, user_id=None, **values):
             raise ConnectionError("DB down")  # 持久化失败
 
         def append_message(self, *a, **kw):
@@ -1345,10 +1348,10 @@ def test_delete_history_initializes_shared_graph_after_restart(monkeypatch, tmp_
         checkpointer = _Checkpoint()
 
     class _MetadataStore:
-        def get_thread(self, thread_id):
+        def get_thread(self, thread_id, user_id=None):
             return {"thread_id": thread_id, "user_id": "anonymous"}
 
-        def has_active_runs(self, thread_id):
+        def has_active_runs(self, thread_id, user_id=None):
             return False
 
         def delete_thread(self, thread_id, user_id):

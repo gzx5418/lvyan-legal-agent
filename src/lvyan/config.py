@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -410,6 +411,8 @@ def _build_settings() -> Settings:
 
 
 # 全局单例：整个 Runtime 共享一份配置
+_logger = logging.getLogger("lvyan.config")
+
 settings: Settings = _build_settings()
 
 
@@ -517,6 +520,20 @@ def validate_runtime_config() -> None:
             raise RuntimeError(
                 "AUTH_MODE=auto 在生产模式下被禁止；请设置 AUTH_MODE=jwt 或 AUTH_MODE=trusted_proxy"
             )
+    # P1：生产模式必须启用认证。RLS / 限流 / 成本归因 / thread ownership 全部
+    # 以 user_id 为前提，匿名模式下整体退化为单租户（所有人共享 anonymous）。
+    # 保留 ALLOW_UNAUTHENTICATED=true 逃生门供内网单租户部署显式声明风险。
+    if is_production() and not is_auth_enabled_env():
+        raw = os.getenv("ALLOW_UNAUTHENTICATED", "").strip().lower()
+        if raw not in {"1", "true", "yes", "on"}:
+            raise RuntimeError(
+                "生产模式下必须 AUTH_ENABLED=true；若为内网单租户部署且明确接受"
+                "匿名共享身份的风险，可显式设置 ALLOW_UNAUTHENTICATED=true 跳过本检查"
+            )
+        _logger.warning(
+            "ALLOW_UNAUTHENTICATED=true：生产实例以匿名共享身份运行，"
+            "RLS 退化为单租户、成本与限流归因失效——仅限内网单租户部署"
+        )
     # P1: 加密配置校验（生产环境必须有合法密钥）
     from lvyan.memory.case_vault import CaseVault
 
@@ -533,6 +550,12 @@ def validate_runtime_config() -> None:
             raise RuntimeError("生产模式下 RATE_LIMIT_BACKEND 必须为 redis（多实例限流必需）")
         if not os.getenv("REDIS_URL", "").strip():
             raise RuntimeError("生产模式下 REDIS_URL 必须配置（限流后端依赖）")
+        # P2：/metrics 指标含 path/user 维度，生产裸暴露等于信息泄露
+        if os.getenv("METRICS_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
+            if not os.getenv("METRICS_AUTH_TOKEN", "").strip():
+                raise RuntimeError(
+                    "生产模式下 METRICS_ENABLED=true 必须同时配置 METRICS_AUTH_TOKEN"
+                )
         gateway = os.getenv("MODEL_GATEWAY_URL", settings.model_gateway_url).strip()
         allow_local_models = os.getenv("ALLOW_LOCAL_MODELS", "false").strip().lower() in {
             "1",

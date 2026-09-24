@@ -155,6 +155,13 @@ def legal_answer_finalizer(state: CaseState) -> dict[str, Any]:
         # document_file=None 表示本就无文书载荷（非渲染失败），维持原语义。
         doc_file = result.get("document_file")
         if isinstance(doc_file, dict) and not doc_file.get("success"):
+            # P2：与非 document 分支的不变量对齐——HITL 编辑后构建的
+            # legal_answer 基于编辑前的 CaseState，结构一致性无法保证，
+            # 同样清空（前端 Markdown 回退）。
+            pending_approval = _get(state, "pending_human_approval", None)
+            if isinstance(pending_approval, dict) and pending_approval.get("status") == "edited":
+                _logger.info("document 渲染失败 + HITL 编辑态：清空 legal_answer 回退 Markdown")
+                return result
             try:
                 from lvyan.nodes.answer_builder import build_legal_answer
                 from lvyan.nodes.answer_validator import (

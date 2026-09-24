@@ -481,6 +481,10 @@ class PostgresCaseWorkspaceStore:
     def _ensure_schema(self, conn: Any) -> None:
         self._metadata._ensure_schema(conn)
 
+    def _tenant_connect(self, user_id: str | None):
+        """P1：租户上下文连接（RLS 生效前提），语义见 PostgresRunMetadataStore。"""
+        return self._metadata._tenant_connect(user_id)
+
     @staticmethod
     def _case_model(row: dict[str, Any]) -> LegalCase:
         return LegalCase.model_validate(dict(row))
@@ -510,8 +514,7 @@ class PostgresCaseWorkspaceStore:
         self, user_id: str, title: str, description: str = "", thread_id: str | None = None
     ) -> LegalCase:
         case_id = _id("case")
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO legal_cases (case_id, user_id, title, description, thread_id) VALUES (%s, %s, %s, %s, %s) RETURNING *",
@@ -522,8 +525,7 @@ class PostgresCaseWorkspaceStore:
         return self._case_model(row)
 
     def list_cases(self, user_id: str) -> list[LegalCase]:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT * FROM legal_cases WHERE user_id = %s ORDER BY updated_at DESC",
@@ -533,8 +535,7 @@ class PostgresCaseWorkspaceStore:
         return [self._case_model(row) for row in rows]
 
     def get_case(self, user_id: str, case_id: str) -> LegalCase | None:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT * FROM legal_cases WHERE case_id = %s AND user_id = %s",
@@ -555,8 +556,7 @@ class PostgresCaseWorkspaceStore:
     ) -> CaseEvidence | None:
         from psycopg.types.json import Jsonb
 
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
                     "SELECT case_id FROM legal_cases WHERE case_id = %s AND user_id = %s FOR UPDATE",
@@ -585,8 +585,7 @@ class PostgresCaseWorkspaceStore:
         return CaseEvidence.model_validate(dict(row))
 
     def list_evidence(self, user_id: str, case_id: str) -> list[CaseEvidence] | None:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT 1 FROM legal_cases WHERE case_id = %s AND user_id = %s",
@@ -610,8 +609,7 @@ class PostgresCaseWorkspaceStore:
         source_run_id: str | None = None,
     ) -> tuple[LegalDocument, DocumentVersion] | None:
         document_id, version_id = _id("document"), _id("version")
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
                     "SELECT 1 FROM legal_cases WHERE case_id = %s AND user_id = %s FOR UPDATE",
@@ -644,8 +642,7 @@ class PostgresCaseWorkspaceStore:
         return self._document_model(document_row), DocumentVersion.model_validate(dict(version_row))
 
     def get_document(self, user_id: str, document_id: str) -> LegalDocument | None:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT d.* FROM legal_documents d JOIN legal_cases c ON c.case_id = d.case_id WHERE d.document_id = %s AND c.user_id = %s",
@@ -655,8 +652,7 @@ class PostgresCaseWorkspaceStore:
         return self._document_model(row) if row else None
 
     def list_documents(self, user_id: str, case_id: str) -> list[LegalDocument] | None:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT 1 FROM legal_cases WHERE case_id = %s AND user_id = %s",
@@ -680,8 +676,7 @@ class PostgresCaseWorkspaceStore:
         source_run_id: str | None = None,
     ) -> DocumentVersion | None:
         version_id = _id("version")
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
                     "SELECT d.case_id FROM legal_documents d JOIN legal_cases c ON c.case_id = d.case_id WHERE d.document_id = %s AND c.user_id = %s FOR UPDATE",
@@ -726,8 +721,7 @@ class PostgresCaseWorkspaceStore:
     def list_versions(self, user_id: str, document_id: str) -> list[DocumentVersion] | None:
         if self.get_document(user_id, document_id) is None:
             return None
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT * FROM document_versions WHERE document_id = %s ORDER BY version_number DESC",
@@ -750,8 +744,7 @@ class PostgresCaseWorkspaceStore:
         from psycopg.types.json import Jsonb
 
         finding_id = _id("finding")
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
                     "SELECT d.case_id FROM legal_documents d JOIN legal_cases c ON c.case_id = d.case_id JOIN document_versions v ON v.version_id = %s AND v.document_id = d.document_id WHERE d.document_id = %s AND c.user_id = %s FOR UPDATE",
@@ -792,8 +785,7 @@ class PostgresCaseWorkspaceStore:
     def list_findings(self, user_id: str, document_id: str) -> list[ReviewFinding] | None:
         if self.get_document(user_id, document_id) is None:
             return None
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT * FROM review_findings WHERE document_id = %s ORDER BY created_at DESC",
@@ -803,8 +795,7 @@ class PostgresCaseWorkspaceStore:
         return [ReviewFinding.model_validate(dict(row)) for row in rows]
 
     def resolve_finding(self, user_id: str, finding_id: str, status: str) -> ReviewFinding | None:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
                     "SELECT d.case_id FROM review_findings f JOIN legal_documents d ON d.document_id = f.document_id JOIN legal_cases c ON c.case_id = d.case_id WHERE f.finding_id = %s AND c.user_id = %s FOR UPDATE",
@@ -832,8 +823,7 @@ class PostgresCaseWorkspaceStore:
         self, user_id: str, document_id: str, version_id: str, decision: str, comment: str = ""
     ) -> DocumentApproval | None:
         approval_id = _id("approval")
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.transaction(), conn.cursor() as cur:
                 cur.execute(
                     "SELECT d.case_id FROM legal_documents d JOIN legal_cases c ON c.case_id = d.case_id JOIN document_versions v ON v.version_id = %s AND v.document_id = d.document_id WHERE d.document_id = %s AND c.user_id = %s FOR UPDATE",
@@ -873,8 +863,7 @@ class PostgresCaseWorkspaceStore:
     def list_approvals(self, user_id: str, document_id: str) -> list[DocumentApproval] | None:
         if self.get_document(user_id, document_id) is None:
             return None
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT * FROM document_approvals WHERE document_id = %s ORDER BY decided_at DESC",
@@ -886,8 +875,7 @@ class PostgresCaseWorkspaceStore:
     def list_audit_events(self, user_id: str, case_id: str) -> list[WorkspaceAuditEvent] | None:
         if self.get_case(user_id, case_id) is None:
             return None
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT * FROM workspace_audit_events WHERE case_id = %s ORDER BY created_at DESC",

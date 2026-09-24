@@ -63,8 +63,16 @@ def test_rebuild_article_index_corrupt_json_falls_back(tmp_path, monkeypatch, ca
 
     monkeypatch.setattr(ingest_mod, "build_article_index", lambda lawtext_dir=None: _fake_chunks())
 
+    # P1（force 语义变更）：force=True 跳过缓存直接现场构建；损坏缓存 +
+    # force=False 才走"读取失败告警"分支。两条路径都验证。
     with caplog.at_level(logging.WARNING, logger=rebuild_indexes.__name__):
         ok = rebuild_indexes.rebuild_article_index(manifests_dir, force=True)
+    assert ok is True
+
+    (manifests_dir / "article_index_v3.lvix").unlink()
+    (manifests_dir / "article_index_v2.json").write_text("{not valid json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger=rebuild_indexes.__name__):
+        ok = rebuild_indexes.rebuild_article_index(manifests_dir, force=False)
 
     assert ok is True
     assert "JSON 缓存读取失败" in caplog.text
@@ -83,7 +91,12 @@ def test_rebuild_article_index_corrupt_json_falls_back(tmp_path, monkeypatch, ca
 
 
 def test_rebuild_bm25_index_corrupt_json_falls_back(tmp_path, monkeypatch, caplog):
-    """bm25 JSON 损坏时应告警并降级从 article chunks 构建。"""
+    """bm25 JSON 损坏时应告警并降级从 article chunks 构建。
+
+    P1（force 语义变更）后两条路径：
+    - force=True：跳过 JSON 缓存直接从法规源/chunks 重建（缓存元数据可能过时）；
+    - force=False：尝试读缓存，损坏时告警降级。
+    """
     manifests_dir = tmp_path / "manifests"
     manifests_dir.mkdir()
     (manifests_dir / "bm25_index.json").write_text("", encoding="utf-8")  # 空 JSON → 解析失败
@@ -93,13 +106,21 @@ def test_rebuild_bm25_index_corrupt_json_falls_back(tmp_path, monkeypatch, caplo
 
     monkeypatch.setattr(lexical, "_load_article_chunks", lambda *a, **kw: _fake_chunks())
 
+    # force=True：跳过缓存（不读 JSON，无"读取失败"告警），直接构建成功
     with caplog.at_level(logging.WARNING, logger=rebuild_indexes.__name__):
         ok = rebuild_indexes.rebuild_bm25_index(manifests_dir, force=True)
+    assert ok is True
+    assert (manifests_dir / "bm25_index_v3.lvix").is_file()
+    data = json.loads((manifests_dir / "bm25_index.json").read_text(encoding="utf-8"))
+    assert data["n_docs"] == 2
 
+    # force=False + 损坏 JSON：告警并降级构建
+    (manifests_dir / "bm25_index_v3.lvix").unlink()
+    (manifests_dir / "bm25_index.json").write_text("", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger=rebuild_indexes.__name__):
+        ok = rebuild_indexes.rebuild_bm25_index(manifests_dir, force=False)
     assert ok is True
     assert "JSON 缓存读取失败" in caplog.text
-    assert (manifests_dir / "bm25_index_v3.lvix").is_file()
-
     data = json.loads((manifests_dir / "bm25_index.json").read_text(encoding="utf-8"))
     assert data["n_docs"] == 2
 

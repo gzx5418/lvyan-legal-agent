@@ -14,8 +14,13 @@ from typing import Any
 
 from lvyan.retrieval.lexical import ScoredChunk, _load_article_chunks
 
-# 《XX法》第Y条 — Y 支持中文数字与阿拉伯数字
+# 《XX法》第Y条 — Y 支持中文数字与阿拉伯数字（标准形式，书名号必需）
 _ARTICLE_NO_RE = re.compile(r"《([^》]+)》第([一二三四五六七八九十百千零〇0-9]+)条")
+# 无书名号变体（P2）："民法典第1064条"这类口语写法。法名约束为以
+# 法/条例/解释结尾的连续汉字，避免句中懒匹配把前文吞进法名。
+_ARTICLE_NO_BARE_RE = re.compile(
+    r"([一-鿿]{0,15}?(?:法典|法|条例|解释))第([一二三四五六七八九十百千零〇0-9]+)条"
+)
 
 # 中文数字 → 阿拉伯数字 用于归一化比对
 _CN_DIGIT = {
@@ -93,6 +98,16 @@ def extract_article_refs(query: str) -> list[tuple[str, str, str]]:
         raw_num = m.group(2).strip()
         norm = _normalize_article_number(raw_num)
         refs.append((law_name, raw_num, norm))
+    # 无书名号变体：跳过已被标准形式覆盖的位置（避免同一处引用重复计入）
+    covered = [(m.start(1), m.end()) for m in _ARTICLE_NO_RE.finditer(query)]
+    for m in _ARTICLE_NO_BARE_RE.finditer(query):
+        start, end = m.start(1), m.end()
+        if any(cs <= start and end <= ce for cs, ce in covered):
+            continue
+        law_name = m.group(1).strip()
+        raw_num = m.group(2).strip()
+        norm = _normalize_article_number(raw_num)
+        refs.append((law_name, raw_num, norm))
     return refs
 
 
@@ -101,8 +116,29 @@ _TITLE_PREFIXES = ("中华人民共和国", "全国人民代表大会", "全国�
 _TITLE_SUFFIX_RE = re.compile(r"[（(][^（）()]{0,20}(修正|修订|修正本| amended)[^（）()]*[)）]$")
 
 
+# P2：惯用简称/旧称别名表（归一化后应用，仍是全等比较，无误配风险）。
+# 《新婚姻法》→婚姻法（已废止旧称，历史时点查询高频）、《民诉法》→民事诉讼法等。
+_LAW_TITLE_ALIASES: dict[str, str] = {
+    "新婚姻法": "婚姻法",
+    "旧婚姻法": "婚姻法",
+    "民诉法": "民事诉讼法",
+    "刑诉法": "刑事诉讼法",
+    "行诉法": "行政诉讼法",
+    "劳动合同法实施条例": "劳动合同法实施条例",
+    "消保法": "消费者权益保护法",
+    "劳动法": "劳动法",
+    "民法典合同编": "民法典",
+    "民法典物权编": "民法典",
+    "民法典婚姻家庭编": "民法典",
+    "民法典继承编": "民法典",
+    "民法典侵权责任编": "民法典",
+    "民法典总则编": "民法典",
+}
+
+
 def _normalize_law_title(title: str) -> str:
-    """归一化法律标题：去前缀（如「中华人民共和国」）、去尾部修正/修订标注。"""
+    """归一化法律标题：去前缀（如「中华人民共和国」）、去尾部修正/修订标注，
+    再应用惯用简称别名表。"""
     t = title.strip()
     t = _TITLE_SUFFIX_RE.sub("", t).strip()
     changed = True
@@ -112,7 +148,7 @@ def _normalize_law_title(title: str) -> str:
             if t.startswith(prefix):
                 t = t[len(prefix) :].strip()
                 changed = True
-    return t
+    return _LAW_TITLE_ALIASES.get(t, t)
 
 
 def _match_law_title(query_name: str, chunk_title: str) -> bool:

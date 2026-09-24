@@ -73,7 +73,31 @@ def _is_from_trusted_proxy(request: Request) -> bool:
     direct_ip = request.client.host if request.client else None
     if not direct_ip:
         return False
-    return direct_ip in _get_trusted_proxies()
+    # P2：IPv4-mapped IPv6（::ffff:127.0.0.1，双栈监听常见）与白名单里的
+    # IPv4 字面量做归一化后比较，避免合法网关被误拒（fail-closed 方向但
+    # 排障成本高）。解析失败（hostname 等）按原字符串精确比较兜底。
+    try:
+        import ipaddress
+
+        direct = ipaddress.ip_address(direct_ip)
+
+        def _norm(addr: Any) -> Any:
+            mapped = getattr(addr, "ipv4_mapped", None)
+            return mapped if mapped is not None else addr
+
+        direct_norm = _norm(direct)
+        for entry in _get_trusted_proxies():
+            try:
+                trusted = ipaddress.ip_address(entry)
+            except ValueError:
+                if direct_ip == entry:
+                    return True
+                continue
+            if direct_norm == _norm(trusted):
+                return True
+        return False
+    except ValueError:
+        return direct_ip in _get_trusted_proxies()
 
 
 def is_auth_enabled() -> bool:

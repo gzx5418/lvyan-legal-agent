@@ -20,6 +20,8 @@ _HTML = """<!doctype html><ol>
 
 class _Response:
     content = _HTML
+    status_code = 200
+    headers: dict[str, str] = {}
 
     def raise_for_status(self) -> None:
         return None

@@ -152,6 +152,17 @@ def search_official_web(
             },
         ) as client:
             response = client.get(_BING_RSS_ENDPOINT, params={"q": sanitized_query})
+            # P1：3xx 不跟随（follow_redirects=False）时 httpx 不抛异常，会得到
+            # 零结果页面并静默返回空——与"网络失败"不可区分。显式记 warning
+            # 便于发现端点重定向失效。
+            if 300 <= response.status_code < 400:
+                _logger.warning(
+                    "联网权威来源检索端点返回重定向（status=%d, location=%s），"
+                    "结果为空；请检查 _BING_RSS_ENDPOINT 是否失效",
+                    response.status_code,
+                    response.headers.get("location", ""),
+                )
+                return []
             response.raise_for_status()
     except httpx.HTTPError as exc:
         _logger.info("联网权威来源检索不可用：%s", type(exc).__name__)

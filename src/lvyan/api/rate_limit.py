@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 import uuid
 import logging
@@ -85,11 +86,17 @@ _PATH_LIMITS: tuple[tuple[str, str, int], ...] = (
     ("/api/cases", "RATE_LIMIT_DEFAULT_RPM", 60),
 )
 
-# 高成本写路径前缀（Redis 不可用时返回 503）
-_HIGH_COST_PREFIXES: tuple[str, ...] = (
+# fail-closed 写路径前缀（Redis 不可用时返回 503）。
+# P1 扩展：/api/cases 的写操作直写 PostgreSQL（创建案件/文书/审批），
+# /api/agent/cancel 触发 DB 状态迁移——二者在限流失效时的滥用面与
+# run/upload 同量级；cancel 的客户端重试幂等（取消已取消返回 not_found），
+# 503 重试安全。
+_FAIL_CLOSED_PREFIXES: tuple[str, ...] = (
     "/api/agent/run",
     "/api/upload",
     "/api/agent/hitl/",
+    "/api/agent/cancel/",
+    "/api/cases",
 )
 
 # 不限制的路径（健康检查、静态资源、GET 读取）
@@ -158,10 +165,14 @@ class InMemoryBackend:
     def __init__(self) -> None:
         self._counters: dict[str, _SlidingWindowCounter] = defaultdict(_SlidingWindowCounter)
         self._last_gc: float = time.monotonic()
+        # is_allowed 经 asyncio.to_thread 并发执行；无锁时"过滤重建+append"
+        # 会丢更新（少计→多放），defaultdict 并发建键同理。
+        self._lock = threading.Lock()
 
     def is_allowed(self, key: str, limit: int) -> bool:
-        self._gc()
-        return self._counters[key].is_allowed(limit)
+        with self._lock:
+            self._gc()
+            return self._counters[key].is_allowed(limit)
 
     def is_healthy(self) -> bool:
         return True
@@ -187,11 +198,16 @@ class RedisBackend:
     """
 
     _WINDOW_SECONDS: int = 60
+    # P1：Redis 宕机时每个请求都发起 2s connect 重试会占满 to_thread 线程池
+    # 并连累 /readyz——重连加冷却窗口，冷却期内健康检查直接返回不健康
+    # （fail-closed 前缀继续 503，不再反复打 Redis）。
+    _RECONNECT_COOLDOWN_SECONDS: float = 30.0
 
     def __init__(self, redis_url: str) -> None:
         self._redis_url = redis_url
         self._client: Any = None
         self._healthy = False
+        self._last_reconnect_attempt: float = 0.0
         self._connect()
 
     def _connect(self) -> None:
@@ -238,22 +254,32 @@ class RedisBackend:
         except Exception as exc:  # noqa: BLE001 boundary-exception: Redis操作失败
             _logger.warning("Redis 限流操作失败: %s", exc)
             self._healthy = False
-            return True  # Redis 故障时不阻塞（fail-open for reads）
+            return True  # Redis 故障时不阻塞（fail-open for reads；fail-closed 前缀已在 dispatch 层 503）
 
     def is_healthy(self) -> bool:
         if self._healthy:
             return True
-        self._reconnect_and_check("__health__", 999)
+        # P1：健康检查不再伪造 is_allowed("__health__") 调用——那会向真实的
+        # rl:__health__ 键写入条目，污染限流键空间。直接探测连接。
+        self._try_reconnect()
+        return self._healthy
+
+    def _try_reconnect(self) -> bool:
+        """带冷却的重连：冷却期内不发起连接尝试（返回 False 表示未尝试）。"""
+        now = time.monotonic()
+        if now - self._last_reconnect_attempt < self._RECONNECT_COOLDOWN_SECONDS:
+            return False
+        self._last_reconnect_attempt = now
+        try:
+            self._connect()
+        except Exception:  # noqa: BLE001 boundary-exception: 重连失败
+            self._healthy = False
         return self._healthy
 
     def _reconnect_and_check(self, key: str, limit: int) -> bool:
-        try:
-            self._connect()
-            if self._healthy:
-                return self.is_allowed(key, limit)
-        except Exception:  # noqa: BLE001 boundary-exception: 重连失败
-            pass
-        return True  # 不可用时 fail-open
+        if self._try_reconnect():
+            return self.is_allowed(key, limit)
+        return True  # 冷却期内不可用：fail-open（读取路径）
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +335,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if direct_ip and direct_ip in trusted_proxies:
             forwarded = request.headers.get("x-forwarded-for")
             if forwarded:
-                client_ip = forwarded.split(",")[0].strip()
+                # P1 修复：取最右段。可信代理（nginx proxy_add_x_forwarded_for）
+                # 是 append 语义——最左段是客户端自带的可伪造值，最右段才是
+                # 可信代理亲眼看到的来源。取最左等于允许攻击者每请求换一个
+                # 假 IP 获得无限独立限流桶。
+                client_ip = forwarded.split(",")[-1].strip()
                 if client_ip:
                     return f"ip:{client_ip}"
         if direct_ip:
@@ -350,8 +380,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return None
 
     def _is_high_cost_path(self, path: str) -> bool:
-        """路径是否为高成本写操作（Redis 不可用时应拒绝）。"""
-        return any(path.startswith(p) for p in _HIGH_COST_PREFIXES)
+        """路径是否为 fail-closed 写操作（Redis 不可时应拒绝）。"""
+        return any(path.startswith(p) for p in _FAIL_CLOSED_PREFIXES)
 
     async def dispatch(self, request: Request, call_next: Any) -> Response:
         if not self._enabled:

@@ -62,6 +62,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -552,6 +553,12 @@ def invalidate_corpus_health_cache() -> None:
 # ---------------------------------------------------------------------------
 # P0-3：原子重建
 # ---------------------------------------------------------------------------
+# P2：索引自愈/预热状态事件——/readyz 据此区分 building（后台重建进行中，
+# 请求方应等待而非重复触发重建）与 degraded（真坏）；lex ical 加载方据此等待。
+INDEX_BUILDING = threading.Event()
+INDEX_READY = threading.Event()
+
+
 def rebuild_corpus_indexes(
     lawtext_dir: Path | None = None,
     manifests_dir: Path | None = None,
@@ -569,6 +576,20 @@ def rebuild_corpus_indexes(
     Returns:
         ``verify_corpus_consistency(force=True)`` 的结果 dict。
     """
+    INDEX_BUILDING.set()
+    INDEX_READY.clear()
+    try:
+        return _rebuild_corpus_indexes_locked(lawtext_dir, manifests_dir)
+    finally:
+        INDEX_BUILDING.clear()
+        INDEX_READY.set()
+
+
+def _rebuild_corpus_indexes_locked(
+    lawtext_dir: Path | None = None,
+    manifests_dir: Path | None = None,
+) -> dict[str, Any]:
+    """``rebuild_corpus_indexes`` 的实现体（状态事件已由外层管理）。"""
     from lvyan.retrieval.lexical import (
         ARTICLE_INDEX_SCHEMA_VERSION,
         _build_bm25_index,

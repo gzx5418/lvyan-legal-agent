@@ -167,11 +167,33 @@ def _rerank_authorities(
 # 30 秒超时后静默退化为空结果——法规检索在并发下无声失败。
 _CONCURRENT_EXECUTOR: Any = None
 _QUERY_EXECUTOR: Any = None
+# P2：两池创建均需加锁——_CONCURRENT_EXECUTOR 此前在请求路径裸赋值，
+# 并发首跑会创建第二个池造成线程泄漏。
+_EXECUTORS_LOCK = threading.Lock()
 _QUERY_EXECUTOR_LOCK = threading.Lock()
 
 # 子任务超时必须小于外层 job 的 30 秒，让降级先发生在内层并留下日志，
 # 而不是被外层整体超时吞掉。
 _QUERY_TIMEOUT_SECONDS = 25.0
+
+
+def shutdown_executors(wait: bool = False, cancel_futures: bool = True) -> None:
+    """关闭两个模块级线程池（优雅停机调用；进程退出随进程终止亦可）。"""
+    global _CONCURRENT_EXECUTOR, _QUERY_EXECUTOR
+    for attr in ("_CONCURRENT_EXECUTOR", "_QUERY_EXECUTOR"):
+        executor = getattr(_threading_ref(), attr)
+        if executor is not None:
+            executor.shutdown(wait=wait, cancel_futures=cancel_futures)
+    with _EXECUTORS_LOCK:
+        _CONCURRENT_EXECUTOR = None
+    with _QUERY_EXECUTOR_LOCK:
+        _QUERY_EXECUTOR = None
+
+
+def _threading_ref() -> Any:
+    import sys
+
+    return sys.modules[__name__]
 
 
 def _get_query_executor() -> Any:
@@ -361,9 +383,13 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
     # --- 法规与类案并发（互不依赖）---
     global _CONCURRENT_EXECUTOR
     if _CONCURRENT_EXECUTOR is None:
-        from concurrent.futures import ThreadPoolExecutor
+        with _EXECUTORS_LOCK:
+            if _CONCURRENT_EXECUTOR is None:
+                from concurrent.futures import ThreadPoolExecutor
 
-        _CONCURRENT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="lvyan-search")
+                _CONCURRENT_EXECUTOR = ThreadPoolExecutor(
+                    max_workers=4, thread_name_prefix="lvyan-search"
+                )
 
     stat_future = _CONCURRENT_EXECUTOR.submit(_search_statutes_job)
     case_future = _CONCURRENT_EXECUTOR.submit(_search_cases_job)

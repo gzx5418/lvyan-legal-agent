@@ -89,13 +89,30 @@ _COMPLEXITY_DEEP_KEYWORDS: tuple[str, ...] = (
     "证据是否充分",
 )
 
-# 文书生成关键词（触发 document 模式）
-_COMPLEXITY_DOCUMENT_KEYWORDS: tuple[str, ...] = (
+# 文书生成关键词（触发 document 模式）。
+# P1 修复：弱意图词（起诉状/合同审查/律师函/文书）单独出现不足以判定用户
+# 想要"生成文书"——"收到律师函怎么办""对方发的合同审查意见有理吗"是分析
+# 需求，误入 document 会生成文书草稿而非回答问题。弱意图词须与起草动词
+# 共现才判 document；强意图词（起草等）单独即判。
+_COMPLEXITY_DOCUMENT_STRONG_KEYWORDS: tuple[str, ...] = (
     "起草",
+    "拟一份",
+    "生成一份",
+    "帮我写一份",
+)
+_COMPLEXITY_DOCUMENT_WEAK_KEYWORDS: tuple[str, ...] = (
     "起诉状",
+    "答辩状",
     "合同审查",
     "律师函",
     "文书",
+)
+_DOCUMENT_DRAFTING_VERBS: tuple[str, ...] = (
+    "写",
+    "拟",
+    "出具",
+    "生成",
+    "制作",
 )
 
 
@@ -148,9 +165,12 @@ def _detect_complexity(user_goal: str) -> str:
     if not user_goal:
         return "light"
     # document 优先（"起诉状" 含 "起诉"，需先判 document）
-    for kw in _COMPLEXITY_DOCUMENT_KEYWORDS:
-        if kw in user_goal:
-            return "document"
+    if any(kw in user_goal for kw in _COMPLEXITY_DOCUMENT_STRONG_KEYWORDS):
+        return "document"
+    has_weak = any(kw in user_goal for kw in _COMPLEXITY_DOCUMENT_WEAK_KEYWORDS)
+    has_drafting_verb = any(v in user_goal for v in _DOCUMENT_DRAFTING_VERBS)
+    if has_weak and has_drafting_verb:
+        return "document"
     for kw in _COMPLEXITY_DEEP_KEYWORDS:
         if kw in user_goal:
             return "deep"

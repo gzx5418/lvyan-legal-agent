@@ -173,6 +173,33 @@ def test_hitl_edit_dict_replaces_output(hitl_enabled, patch_interrupt):
     assert "用户编辑后的版本" in result["final_output"]
 
 
+def test_hitl_edit_output_is_redacted_after_replacement(hitl_enabled, patch_interrupt):
+    """P0 回归：edit 替换后的输出必须重新过隐私脱敏——未脱敏 PII 不得进入
+    final_output（该文本会经 SSE 下发、持久化进 DB、document 模式渲染进 DOCX）。"""
+    state = _make_state(
+        final_output=(
+            "## 用户目标\n咨询发送律师函。\n\n"
+            "## 核心法律结论\n原草稿内容。\n\n"
+            "## 关键法条引用\n无。\n\n"
+            "## 行动建议\n建议发送律师函。\n\n"
+            "_以上仅供参考，不构成正式法律意见。_"
+        )
+    )
+    edited = "我的身份证号是110101199001011234，手机13812345678，胜诉率大概80%左右。"
+    patch_interrupt({"action": "edit", "edited_output": edited})
+
+    result = output_guardrail(state)
+
+    assert result["pending_human_approval"]["status"] == "edited"
+    # PII 必须被脱敏
+    assert "110101199001011234" not in result["final_output"]
+    assert "13812345678" not in result["final_output"]
+    # 数字概率必须被拦截
+    assert "80%" not in result["final_output"]
+    # 脱敏说明并入 final_output 尾注（notes 会拼进校验备注）
+    assert "重新脱敏" in result["final_output"]
+
+
 def test_hitl_edit_missing_edited_output_degrades_to_reject(hitl_enabled, patch_interrupt):
     """edit 缺少 edited_output → 降级为 reject 处理（保留原输出，不抛异常）。
 

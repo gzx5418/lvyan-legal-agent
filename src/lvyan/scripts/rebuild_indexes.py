@@ -52,8 +52,11 @@ def rebuild_article_index(
         _logger.info("article_index LVIX 已存在且有效，跳过（使用 --force 强制重建）")
         return True
 
-    # 优先从 JSON 缓存读取（损坏/不可读时告警并降级走现场构建，而非裸崩）
-    if json_path.is_file():
+    # 优先从 JSON 缓存读取（损坏/不可读时告警并降级走现场构建，而非裸崩）。
+    # 注意 --force 跳过本路径：JSON 缓存固化的元数据可能已过时（如
+    # law_metadata_overrides.yaml 新增的失效日期只在现场构建时经
+    # parse_law_metadata 应用），force 的语义就是从法规源全量重建。
+    if not force and json_path.is_file():
         import json
 
         _logger.info("从 JSON 缓存转换: %s", json_path)
@@ -137,8 +140,9 @@ def rebuild_bm25_index(
         _logger.info("bm25_index LVIX 已存在且有效，跳过（使用 --force 强制重建）")
         return True
 
-    # 从 JSON 缓存转换（损坏/不可读时告警并降级，而非裸崩）
-    if json_path.is_file():
+    # 从 JSON 缓存转换（损坏/不可读时告警并降级，而非裸崩）；
+    # --force 跳过缓存（理由同 rebuild_article_index：缓存元数据可能过时）。
+    if not force and json_path.is_file():
         import json
 
         _logger.info("从 JSON 缓存转换: %s", json_path)

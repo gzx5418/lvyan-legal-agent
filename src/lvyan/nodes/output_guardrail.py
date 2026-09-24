@@ -100,6 +100,11 @@ def _remove_numeric_probability(text: str) -> str:
     return result
 
 
+def _contains_numeric_probability(text: str) -> bool:
+    """检测文本是否含数字概率表达（用于编辑后输出的再拦截判断）。"""
+    return any(pattern.search(text) for pattern in _NUMERIC_PROBABILITY_RES)
+
+
 def _remove_invalid_citation(text: str, detail: str) -> str:
     """移除输出中无效的法条引用。
 
@@ -278,6 +283,19 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
                     pending_human_approval["status"] = "rejected"
                 else:
                     final_output = str(edited_output)
+                    # P0 修复：edited_output 是用户/API 自由文本，必须重新过隐私
+                    # 脱敏与数字概率拦截——否则未脱敏 PII 经 SSE、agent_runs/
+                    # agent_messages 持久化与 document 模式 DOCX 三路外泄。
+                    edited_privacy = redact_privacy(final_output)
+                    if edited_privacy.redaction_count:
+                        final_output = edited_privacy.redacted_text
+                        notes.append(
+                            f"已对编辑后输出重新脱敏（共 {edited_privacy.redaction_count} 处："
+                            f"{edited_privacy.redaction_types}）"
+                        )
+                    if _NUMERIC_PROBABILITY_RES and _contains_numeric_probability(final_output):
+                        final_output = _remove_numeric_probability(final_output)
+                        notes.append("已对编辑后输出重新拦截并移除数字概率表达")
                     pending_human_approval["status"] = "edited"
                     notes.append("用户已编辑输出，已替换 final_output")
 

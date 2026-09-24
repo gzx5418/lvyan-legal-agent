@@ -233,8 +233,18 @@ def test_citation_verifier_node_flags_fabricated_and_reretrieval(
 def test_citation_verifier_node_normal_passes(
     make_authority, make_reasoning_result, mock_statute_status_effective
 ):
-    """citation_verifier 节点：正常引用 → audit.passed=True，无重检索。"""
-    rr = make_reasoning_result(key_factors=["依据《中华人民共和国民法典》第五百七十七条认定违约"])
+    """citation_verifier 节点：正常引用 → audit.passed=True，无重检索。
+
+    P1（内容阈值收紧至 4/0.15）后，引用上下文需携带条文语义（如「应当承担
+    违约责任」）——纯「认定违约」式单 bigram 上下文与任何条文都可能"同主题
+    不支持"，正是收紧要拦截的形态。
+    """
+    rr = make_reasoning_result(
+        key_factors=[
+            "依据《中华人民共和国民法典》第五百七十七条，"
+            "对方不履行合同义务应当承担继续履行或赔偿损失等违约责任"
+        ]
+    )
     statutes = [make_authority(article_number="第五百七十七条")]
     state = _state(rr, statutes, iteration=0)
 

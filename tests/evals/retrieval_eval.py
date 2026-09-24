@@ -15,6 +15,8 @@ CLI 用法：
 
 from __future__ import annotations
 
+import importlib
+
 import argparse
 import json
 import math
@@ -80,6 +82,10 @@ class EvalReport:
     per_query: list[QueryResult] = field(default_factory=list)
     top_k: int = 10
     label: str = "baseline"  # baseline / reranker
+    # P1：embedding/rerank 是否为真实模型——开发态默认走 hash/Jaccard 桩，
+    # 其结论不能外推到生产网关配置，报告必须可辨识。
+    embedding_mode: str = "unknown"  # real / stub / unknown
+    rerank_mode: str = "unknown"  # real / stub / unknown
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -237,7 +243,14 @@ def evaluate_retrieval(
     if limit is not None and limit > 0:
         golden = golden[:limit]
 
-    report = EvalReport(top_k=top_k, label="baseline")
+    emb_mode, rr_mode = _detect_modes()
+    if emb_mode == "stub" or rr_mode == "stub":
+        print(
+            "[Eval] WARNING: embedding/rerank 处于降级桩模式"
+            f"（embedding={emb_mode}, rerank={rr_mode}），本报告结论不可外推到生产配置。",
+            file=sys.stderr,
+        )
+    report = EvalReport(top_k=top_k, label="baseline", embedding_mode=emb_mode, rerank_mode=rr_mode)
     report.total_queries = len(golden)
 
     for item in golden:
@@ -248,7 +261,7 @@ def evaluate_retrieval(
         expected_titles = [e.get("title", "") for e in expected]
 
         try:
-            results = search_statutes(query=query, top_k=top_k)
+            results = search_statutes(query=query, top_k=top_k, as_of=item.get("as_of"))
         except Exception as exc:  # noqa: BLE001
             # 检索失败不应中断整批评测；记录空结果
             print(f"[Eval] 检索失败 qid={qid} query={query!r} err={exc}", file=sys.stderr)
@@ -337,7 +350,8 @@ def evaluate_with_reranker(
     if limit is not None and limit > 0:
         golden = golden[:limit]
 
-    report = EvalReport(top_k=top_k, label="reranker")
+    emb_mode, rr_mode = _detect_modes()
+    report = EvalReport(top_k=top_k, label="reranker", embedding_mode=emb_mode, rerank_mode=rr_mode)
     report.total_queries = len(golden)
 
     # reranker 需要更大候选池：取 top_k * 4 路召回后 rerank 到 top_k
@@ -423,6 +437,30 @@ def _format_report(report: EvalReport) -> str:
         )
     lines.append(sep)
     return "\n".join(lines)
+
+
+def _detect_modes() -> tuple[str, str]:
+    """探测 embedding / reranker 当前是真实模型还是降级桩。"""
+    from lvyan.config import settings
+
+    # embedding：复用检索管线自身的探测（含网关 HTTP 与本地模型两级）
+    try:
+        from lvyan.retrieval.dense import _probe_real_embedding
+
+        emb_mode = "real" if _probe_real_embedding() else "stub"
+    except Exception:  # noqa: BLE001
+        emb_mode = "unknown"
+
+    # reranker：无独立探测入口，按可用后端判断（网关配置或本地 CrossEncoder）
+    try:
+        if settings.model_gateway_url:
+            rr_mode = "real"
+        else:
+            importlib.import_module("sentence_transformers")
+            rr_mode = "real"
+    except Exception:  # noqa: BLE001
+        rr_mode = "stub"
+    return emb_mode, rr_mode
 
 
 def _format_comparison(baseline: EvalReport, reranker: EvalReport) -> str:

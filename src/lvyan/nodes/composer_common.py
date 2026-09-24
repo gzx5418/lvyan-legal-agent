@@ -149,18 +149,29 @@ def _format_timeline(timeline: list[Any]) -> str:
 
 
 def _format_cases(cases: list[Any]) -> str:
-    """格式化类案参考。"""
+    """格式化类案参考。
+
+    P1 修复：精编知识库来源（source=curated_knowledge，无真实案号/法院字段）
+    必须显式标注"非真实案例检索"——当前类案检索是精编裁判规则的桩实现，
+    不标注会让用户把它当成真实裁判文书检索结果。
+    """
     if not cases:
         return "（暂无类案参考）"
     lines: list[str] = []
+    curated_seen = False
+    real_seen = False
     for i, c in enumerate(cases, 1):
         case_number = str(_get(c, "case_number", "") or "").strip()
         court = str(_get(c, "court", "") or "").strip()
         ruling = str(_get(c, "ruling_summary", "") or "").strip()
         facts = str(_get(c, "brief_facts", "") or "").strip()
-        head = f"### 类案{i}"
-        if case_number:
-            head += f"（{case_number}）"
+        source = str(_get(c, "source", "") or "").strip()
+        if source == "curated_knowledge" or not case_number:
+            curated_seen = True
+            head = f"### 类案参考规则{i}（精编裁判规则，非真实案例检索）"
+        else:
+            real_seen = True
+            head = f"### 类案{i}（{case_number}）"
         lines.append(head)
         if court:
             lines.append(f"- 法院：{court}")
@@ -168,6 +179,12 @@ def _format_cases(cases: list[Any]) -> str:
             lines.append(f"- 简要事实：{facts}")
         if ruling:
             lines.append(f"- 裁判要旨：{ruling}")
+    if curated_seen and not real_seen:
+        lines.append("")
+        lines.append(
+            "> 以上为精编裁判规则归纳，非个案检索结果；具体案件请核对"
+            "人民法院案例库（rmfyalk.court.gov.cn）。"
+        )
     return "\n".join(lines)
 
 

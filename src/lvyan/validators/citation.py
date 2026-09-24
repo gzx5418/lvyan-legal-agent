@@ -223,9 +223,16 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(union)
 
 
-# 内容匹配阈值：Jaccard ≥ 0.1 或 ≥ 2 个共同 bigram 视为匹配
-_CONTENT_JACCARD_THRESHOLD = 0.1
-_CONTENT_COMMON_THRESHOLD = 2
+# 内容匹配阈值（P0 收紧）：引用上下文与条文的共同 bigram < 4 且 Jaccard < 0.15
+# 判为 content_mismatch。原阈值（2 / 0.1）在法律语料上近似恒真——60 字推理
+# 上下文几乎必然与任何条文共享「合同/支付/赔偿」等泛化 bigram ≥2 个，同主题
+# 错引（如以劳动合同法 85 条支撑"即时解除"）可带 9 个共同 bigram 通过。
+# 数值基线（真实法条复算）：正确引用意译改写 ≈ 共同 9 / Jaccard 0.12（通过，
+# 因 9 ≥ 4）；摘录原文 ≈ 35 / 0.53；跨法/跨主题错引 ≈ 3 / 0.04（拦截）。
+# 同法同主题错条（bigram 高但语义不支持）确定性阈值天然拦不住，交由
+# grounding 的 LLM 蕴含层复核。
+_CONTENT_JACCARD_THRESHOLD = 0.15
+_CONTENT_COMMON_THRESHOLD = 4
 
 
 def _find_matching_statute(citation: dict[str, Any], statutes: list[Any]) -> Any | None:

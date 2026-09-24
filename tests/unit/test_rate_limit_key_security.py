@@ -73,14 +73,19 @@ def test_client_ip_ignored_when_not_from_trusted_proxy(monkeypatch):
 
 
 def test_client_ip_trusted_when_from_trusted_proxy(monkeypatch):
-    """P0-4：来源是可信代理时，X-Forwarded-For 最左侧 IP 应被采用。"""
+    """P1 修复后语义：可信代理来源时取 XFF 最右段（可信代理最后追加的真实来源）。
+
+    最左段是客户端自带的可伪造值——nginx proxy_add_x_forwarded_for 是 append
+    语义，攻击者每请求换一个假最左 IP 即可获得无限独立限流桶。
+    """
     mw = _build_middleware(monkeypatch, trusted_proxies="10.0.0.1,10.0.0.2")
     req = _make_request(
         client_host="10.0.0.1",
-        x_forwarded_for="198.51.100.7, 10.0.0.1",
+        # 客户端伪造最左段 1.2.3.4，可信代理追加真实来源 198.51.100.7
+        x_forwarded_for="1.2.3.4, 198.51.100.7",
     )
     key = mw._get_client_key(req)
-    assert key == "ip:198.51.100.7", "可信代理来源时应取 XFF 最左侧客户端 IP"
+    assert key == "ip:198.51.100.7", "可信代理来源时应取 XFF 最右段（真实来源），忽略可伪造的最左段"
 
 
 def test_user_id_takes_priority_over_ip(monkeypatch):

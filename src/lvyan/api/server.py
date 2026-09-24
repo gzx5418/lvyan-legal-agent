@@ -104,7 +104,20 @@ _EXPECTED_OBSERVABILITY_COMPONENTS = frozenset({"http_metrics", "request_id", "m
 # 文件上传相关常量
 _UPLOAD_DIR = AGENT_DIR / "data" / "uploads"
 _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-_ALLOWED_TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".log"}
+# P2：补 .yaml/.yml/.toml——上传端点 docstring 与用户认知均已包含这三类
+# 结构化文本（合同配置/清单常见格式），此前白名单缺漏导致文档宣称支持但实际 415。
+_ALLOWED_TEXT_EXTS = {
+    ".txt",
+    ".md",
+    ".csv",
+    ".json",
+    ".xml",
+    ".html",
+    ".log",
+    ".yaml",
+    ".yml",
+    ".toml",
+}
 _ALLOWED_OFFICE_EXTS = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx"}
 _ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
 _ALLOWED_ALL_EXTS = _ALLOWED_TEXT_EXTS | _ALLOWED_OFFICE_EXTS | _ALLOWED_IMAGE_EXTS
@@ -119,6 +132,9 @@ _EXT_TO_MIME_PREFIX: dict[str, str] = {
     ".xml": "application/xml",
     ".html": "text/html",
     ".log": "text/",
+    ".yaml": "text/",
+    ".yml": "text/",
+    ".toml": "text/",
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".doc": "application/msword",
@@ -359,8 +375,12 @@ def _check_retrieval() -> str:
             return "ok" if settings.knowledge_dir.is_dir() else "unavailable"
 
         # 官方法律库可用 → P0-B：校验索引一致性
-        from lvyan.retrieval.manifest import verify_corpus_consistency
+        # P2：后台预热/自愈进行中返回 building（LB 可区分"正在修"与"坏了"，
+        # 避免重建期被误判为 degraded 而摘除实例）。
+        from lvyan.retrieval.manifest import INDEX_BUILDING, verify_corpus_consistency
 
+        if INDEX_BUILDING.is_set():
+            return "building"
         check = verify_corpus_consistency()
         if not check["consistent"]:
             return "degraded"
@@ -591,6 +611,18 @@ def _enforce_zip_uncompressed_limit(content: bytes, limit: int) -> None:
     （覆盖非标准 ZIP）。对加密 / 异常 ZIP 直接放行（markitdown 自行处理或失败）。
     """
     import struct
+
+    # ------------------------------------------------------------------
+    # 策略 0：ZIP64 检测（P2 补丁）。单条目 >4GiB 的流式炸弹必带 ZIP64 EOCD
+    # （PK），此时 classic EOCD 的 cd_offset/cd_size 为 0xFFFFFFFF，
+    # 下方 central directory 扫描会失败并回退 local header 扫描——而流式
+    # local header 的 size 字段为 0 被跳过，炸弹放行。诚实拒绝（413）。
+    # ------------------------------------------------------------------
+    if content.rfind(b"PK") != -1:
+        raise HTTPException(
+            status_code=413,
+            detail="暂不支持 ZIP64 格式的压缩文件（可能为超大文档），请拆分后上传",
+        )
 
     # ------------------------------------------------------------------
     # 策略 1：解析 central directory（优先，不受 data descriptor 影响）
@@ -847,6 +879,17 @@ def _lifespan(app: FastAPI) -> Any:
                     _logger.info("启动时清理 %d 个过期案件材料目录", cleaned)
             except (OSError, ValueError, TypeError):
                 _logger.exception("案件材料 TTL 清理失败")
+
+        # P2：停机时关闭检索线程池（不做模块级 import——检索节点按需加载）
+        async def _close_search_executors() -> None:
+            try:
+                from lvyan.nodes.retrieve_statutes import shutdown_executors
+
+                shutdown_executors(wait=False, cancel_futures=True)
+            except Exception:  # noqa: BLE001 boundary-exception: 停机清理不影响主流程
+                pass
+
+        coordinator.register_cleanup(_close_search_executors)
 
         yield
 
@@ -1289,7 +1332,7 @@ def create_app(
             if metadata_store is not None:
                 try:
                     durable_thread = await asyncio.to_thread(
-                        metadata_store.get_thread, req.thread_id
+                        metadata_store.get_thread, req.thread_id, user_id
                     )
                 except Exception as exc:  # noqa: BLE001
                     raise HTTPException(
@@ -1392,10 +1435,21 @@ def create_app(
             )
         except TypeError:
             # 兼容旧 CaseMemory.register（无 user_id 参数）
-            mem.register(
+            try:
+                mem.register(
+                    ctx.thread_id,
+                    title=(req.query[:40] if req.query else ctx.thread_id),
+                    complexity=complexity,
+                )
+            except TypeError:
+                pass
+        except Exception:  # noqa: BLE001
+            # P2：run 已启动（后台任务在跑）。索引注册失败只降级为告警——
+            # 在此抛 500 会让客户端以为失败而重试（产生重复 run），且 vault
+            # 文档不会回滚；default_runner 会再次注册，索引最终一致。
+            _logger.warning(
+                "CaseMemory 索引注册失败（run 已启动，忽略）: thread=%s",
                 ctx.thread_id,
-                title=(req.query[:40] if req.query else ctx.thread_id),
-                complexity=complexity,
             )
         return AgentRunResponse(run_id=ctx.run_id, thread_id=ctx.thread_id, status="started")
 
@@ -1504,7 +1558,7 @@ def create_app(
         if metadata_store is not None:
             try:
                 # 同步 DB 查询放入线程池，避免 Postgres 延迟阻塞事件循环
-                meta = await asyncio.to_thread(metadata_store.get_thread, thread_id)
+                meta = await asyncio.to_thread(metadata_store.get_thread, thread_id, user_id)
                 messages = await asyncio.to_thread(metadata_store.list_messages, thread_id, user_id)
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
@@ -1571,14 +1625,14 @@ def create_app(
         """删除指定会话：从 checkpointer 与索引中移除。"""
         if metadata_store is not None:
             try:
-                meta = await asyncio.to_thread(metadata_store.get_thread, thread_id)
+                meta = await asyncio.to_thread(metadata_store.get_thread, thread_id, user_id)
                 assert_thread_owner(meta, user_id, thread_id)
                 if manager.has_active_thread_runs(thread_id):
                     raise HTTPException(
                         status_code=409,
                         detail="该会话仍在运行，请先终止运行",
                     )
-                if metadata_store.has_active_runs(thread_id):
+                if metadata_store.has_active_runs(thread_id, user_id=user_id):
                     raise HTTPException(
                         status_code=409,
                         detail="该会话仍在运行，请先终止运行",
@@ -1613,7 +1667,7 @@ def create_app(
                 ) from exc
             try:
                 deleted = metadata_store.delete_thread(thread_id, user_id)
-                if not deleted and metadata_store.has_active_runs(thread_id):
+                if not deleted and metadata_store.has_active_runs(thread_id, user_id=user_id):
                     raise HTTPException(
                         status_code=409,
                         detail="该会话仍在运行，请先终止运行",

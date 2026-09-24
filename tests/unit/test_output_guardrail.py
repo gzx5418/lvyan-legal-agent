@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from datetime import date, datetime, timezone
 from unittest.mock import patch
 
@@ -28,6 +30,18 @@ from lvyan.config import settings
 from lvyan.graph.routing import route_after_output_guardrail
 from lvyan.nodes.output_guardrail import MAX_OUTPUT_ITERATIONS, output_guardrail
 from lvyan.schemas import Authority
+
+# 测试用模块常量构造 state（output_iteration=MAX_OUTPUT_ITERATIONS），运行时
+# 实际读 settings.max_output_iterations——不同步时环境变量改动会让本文件
+# 测出假结果（假失败或假通过）。fixture 级对齐见 _sync_settings。
+
+
+@pytest.fixture(autouse=True)
+def _sync_max_output_iterations(monkeypatch):
+    """把 settings.max_output_iterations 对齐到测试引用的模块常量。"""
+    from lvyan.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "max_output_iterations", MAX_OUTPUT_ITERATIONS)
 
 
 # ---------------------------------------------------------------------------

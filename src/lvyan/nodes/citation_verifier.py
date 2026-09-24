@@ -229,6 +229,13 @@ def _summarize_audit(
     unsupported = sum(1 for d in details if d.status == "unsupported")
     total = len(details)
 
+    # P1：语义蕴含审查降级留痕——grounding 的确定性 bigram 阈值近似恒真，
+    # LLM 不可用时 passed=True 的含义退化为"未经语义核验"，必须可观测。
+    llm_reviewed = _get(grounding_report, "llm_reviewed", None) if grounding_report else None
+    degraded_reason = (
+        _get(grounding_report, "llm_degraded_reason", None) if grounding_report else None
+    )
+
     return CitationAudit(
         passed=passed,
         total_citations=total,
@@ -238,6 +245,8 @@ def _summarize_audit(
         unsupported=unsupported,
         details=details,
         reretrieval_count=iteration,
+        llm_semantic_reviewed=(bool(llm_reviewed) if llm_reviewed is not None else None),
+        llm_degraded_reason=degraded_reason,
     )
 
 

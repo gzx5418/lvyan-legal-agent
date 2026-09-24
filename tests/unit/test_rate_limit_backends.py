@@ -104,7 +104,7 @@ class TestMiddlewareKeyStrategy:
         assert key == "user:user_123"
 
     def test_anonymous_uses_forwarded_ip_only_from_trusted_proxy(self, monkeypatch):
-        """匿名用户仅在来源是可信代理时才使用 X-Forwarded-For IP。"""
+        """匿名用户仅在来源是可信代理时才使用 X-Forwarded-For 最右段 IP。"""
         from lvyan.api.rate_limit import RateLimitMiddleware
         from unittest.mock import MagicMock
 
@@ -113,12 +113,13 @@ class TestMiddlewareKeyStrategy:
         middleware = RateLimitMiddleware.__new__(RateLimitMiddleware)
 
         request = MagicMock()
+        # 客户端伪造最左段 10.0.0.5，可信代理追加真实来源 192.168.1.1
         request.headers = {"x-forwarded-for": "10.0.0.5, 192.168.1.1"}
         request.client = MagicMock()
         request.client.host = "127.0.0.1"
 
         key = middleware._get_client_key(request)
-        assert key == "ip:10.0.0.5"
+        assert key == "ip:192.168.1.1"
 
     def test_anonymous_ignores_forwarded_ip_from_untrusted(self, monkeypatch):
         """P0-4：非可信代理来源时忽略 X-Forwarded-For，使用直连 IP。"""

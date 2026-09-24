@@ -9,6 +9,8 @@ Fusion（RRF）融合排序，按 ``only_effective`` 和 ``as_of`` 过滤版本�
 
 from __future__ import annotations
 
+import logging
+
 from datetime import date
 from typing import Any
 
@@ -201,14 +203,17 @@ def hybrid_search(
             reranked = rerank(query, pool_results, top_k=top_k)
             if reranked:
                 return reranked
-        except Exception:  # noqa: BLE001 - rerank 失败不阻断检索
+        except Exception as exc:  # noqa: BLE001 - rerank 失败不阻断检索
             # RuntimeError：生产强制模式拒绝桩（ALLOW_HEURISTIC_RERANKER_FALLBACK=false）；
-            # 其它异常（网络/解析/依赖缺失等）同样只应降级 RRF 排序，由上游节点
-            # 的 _safe_search 统一兜底，而非在 hybrid 层向上穿透中断整次检索。
-            pass
+            # 其它异常（网络/解析/依赖缺失等）同样只应降级 RRF 排序，而非在
+            # hybrid 层向上穿透中断整次检索。必须留痕：静默降级会让 rerank
+            # 内部代码 bug 被无声吞掉，无从诊断。
+            _logger.warning("rerank 失败，降级 RRF 排序：%s: %s", type(exc).__name__, exc)
 
     # with_rerank=False 或 rerank 失败：返回 RRF 排序
     return pool_results[:top_k]
 
+
+_logger = logging.getLogger("lvyan.retrieval.hybrid")
 
 __all__ = ["hybrid_search"]

@@ -59,6 +59,7 @@ class RunManager:
     def _bind_context(self, ctx: RunContext) -> RunContext:
         ctx._persist_hitl_callback = lambda interrupt_info: self._update_metadata(
             ctx.run_id,
+            user_id=ctx.user_id,
             status="awaiting_hitl",
             interrupt_payload=interrupt_info,
         )
@@ -73,11 +74,11 @@ class RunManager:
             ctx._cancel_check = _cancel_check
         return ctx
 
-    def _update_metadata(self, run_id: str, **values: Any) -> bool:
+    def _update_metadata(self, run_id: str, user_id: str | None = None, **values: Any) -> bool:
         if self._metadata_store is None:
             return True
         try:
-            self._metadata_store.update_run(run_id, **values)
+            self._metadata_store.update_run(run_id, user_id=user_id, **values)
             return True
         except Exception as exc:  # noqa: BLE001
             _logger.warning("run metadata update failed for %s: %s", run_id, exc)
@@ -88,8 +89,10 @@ class RunManager:
 
     # 同步 DB 操作的异步包装：事件循环内禁止直接调用同步 Postgres 客户端，
     # Postgres 延迟时会卡住所有并发请求（含 /livez 健康检查）。
-    async def _aupdate_metadata(self, run_id: str, **values: Any) -> bool:
-        return await asyncio.to_thread(self._update_metadata, run_id, **values)
+    async def _aupdate_metadata(
+        self, run_id: str, user_id: str | None = None, **values: Any
+    ) -> bool:
+        return await asyncio.to_thread(self._update_metadata, run_id, user_id=user_id, **values)
 
     async def _fail_run(
         self,
@@ -116,6 +119,7 @@ class RunManager:
         ctx.completed_at = time.time()
         persisted = await self._aupdate_metadata(
             ctx.run_id,
+            user_id=ctx.user_id,
             status="failed",
             error=msg,
             completed_at=datetime.now(timezone.utc),
@@ -158,6 +162,7 @@ class RunManager:
         ctx.completed_at = time.time()
         persisted = await self._aupdate_metadata(
             ctx.run_id,
+            user_id=ctx.user_id,
             status="cancelled",
             error=message,
             completed_at=datetime.now(timezone.utc),
@@ -184,7 +189,7 @@ class RunManager:
             claimed = self._metadata_store.claim_hitl_run(run_id, user_id)
             if claimed is not None:
                 return ("claimed", claimed)
-            existing = self._metadata_store.get_run(run_id)
+            existing = self._metadata_store.get_run(run_id, user_id=user_id)
         except Exception as exc:  # noqa: BLE001
             _logger.exception("HITL claim failed for run %s", run_id)
             return ("unavailable", {"error": str(exc)})
@@ -194,11 +199,11 @@ class RunManager:
             return ("forbidden", existing)
         return ("conflict", existing)
 
-    def _mark_thread_output(self, thread_id: str) -> bool:
+    def _mark_thread_output(self, thread_id: str, user_id: str | None = None) -> bool:
         if self._metadata_store is None:
             return True
         try:
-            self._metadata_store.mark_thread_output(thread_id)
+            self._metadata_store.mark_thread_output(thread_id, user_id=user_id)
             return True
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
@@ -208,8 +213,8 @@ class RunManager:
             )
             return False
 
-    async def _amark_thread_output(self, thread_id: str) -> bool:
-        return await asyncio.to_thread(self._mark_thread_output, thread_id)
+    async def _amark_thread_output(self, thread_id: str, user_id: str | None = None) -> bool:
+        return await asyncio.to_thread(self._mark_thread_output, thread_id, user_id)
 
     def _append_message(
         self,
@@ -310,7 +315,7 @@ class RunManager:
             # P0-1：与数据库协调，检测远端取消
             if self._metadata_store is not None:
                 try:
-                    run_meta = self._metadata_store.get_run(ctx.run_id)
+                    run_meta = self._metadata_store.get_run(ctx.run_id, user_id=ctx.user_id)
                 except Exception as exc:  # noqa: BLE001
                     _logger.debug("has_active_thread_runs 查询失败: %s", exc)
                     return True  # fail-open：DB 不可达时保守返回 True
@@ -424,7 +429,7 @@ class RunManager:
         P1-4：启动独立 cancel watcher 任务，不依赖 graph 事件产生即可取消。
         """
         ctx.status = "running"
-        if not await self._aupdate_metadata(ctx.run_id, status="running"):
+        if not await self._aupdate_metadata(ctx.run_id, ctx.user_id, status="running"):
             await ctx.publish(
                 {
                     "event": "warning",
@@ -468,13 +473,14 @@ class RunManager:
             ctx.completed_at = time.time()
             run_persisted = await self._aupdate_metadata(
                 ctx.run_id,
+                user_id=ctx.user_id,
                 status="completed",
                 final_output=ctx.final_output,
                 legal_answer=ctx.legal_answer,
                 document_file=ctx.document_file,
                 completed_at=datetime.now(timezone.utc),
             )
-            thread_marked = await self._amark_thread_output(ctx.thread_id)
+            thread_marked = await self._amark_thread_output(ctx.thread_id, ctx.user_id)
             message_persisted = await self._aappend_message(
                 ctx,
                 "assistant",
@@ -527,15 +533,25 @@ class RunManager:
         now = time.time()
         stale: list[str] = []
         for rid, ctx in self._runs.items():
-            if ctx.status in ("completed", "failed", "cancelled"):
-                completed = ctx.completed_at or ctx.created_at
-                if completed and (now - completed) > ttl:
-                    stale.append(rid)
-            elif ctx.status == "awaiting_hitl":
-                # W3：awaiting_hitl 使用更长 TTL，避免用户长时间不审批导致内存泄漏
-                created = ctx.created_at or now
-                if (now - created) > self._HITL_TTL_SECONDS:
-                    stale.append(rid)
+            # P0 修复：单个坏 ctx（如历史 bug 写入的非数值 created_at）不得
+            # 拖垮整个 gc_runs——gc_runs 在 create_run 末尾执行，异常会让
+            # 该实例后续所有 run 创建 500。
+            try:
+                if ctx.status in ("completed", "failed", "cancelled"):
+                    completed = ctx.completed_at or ctx.created_at
+                    if completed and (now - float(completed)) > ttl:
+                        stale.append(rid)
+                elif ctx.status == "awaiting_hitl":
+                    # W3：awaiting_hitl 使用更长 TTL，避免用户长时间不审批导致内存泄漏
+                    created = ctx.created_at or now
+                    if (now - float(created)) > self._HITL_TTL_SECONDS:
+                        stale.append(rid)
+            except (TypeError, ValueError):
+                _logger.warning(
+                    "gc_runs 跳过时间戳异常的 run（rid=%s, created_at=%r）",
+                    rid,
+                    getattr(ctx, "created_at", None),
+                )
         for rid in stale:
             self._runs.pop(rid, None)
         return len(stale)
@@ -642,7 +658,7 @@ class RunManager:
             graph = await _get_graph()
             run_meta: dict[str, Any] | None = None
             if self._metadata_store is not None:
-                run_meta = self._metadata_store.get_run(run_id)
+                run_meta = self._metadata_store.get_run(run_id, user_id=current_user_id)
                 if run_meta is None:
                     return ("not_found", f"run {run_id} 不存在")
                 if run_meta.get("status") != "awaiting_hitl":
@@ -699,7 +715,14 @@ class RunManager:
                 )
                 ctx.status = "awaiting_hitl"
                 ctx.hitl_interrupt = interrupt_info
-                ctx.created_at = meta.get("created_at", 0.0)
+                # P0 修复：DB 返回的 created_at 是 datetime，直接赋值会让
+                # gc_runs 的 now - created 抛 TypeError，进而令 create_run 500。
+                raw_created = meta.get("created_at", 0.0)
+                ctx.created_at = (
+                    float(raw_created.timestamp())
+                    if hasattr(raw_created, "timestamp")
+                    else float(raw_created)
+                )
                 self._runs[run_id] = ctx
 
                 resume_payload: dict[str, Any] = {"action": request.action}
@@ -804,13 +827,14 @@ class RunManager:
             ctx.completed_at = time.time()
             run_persisted = await self._aupdate_metadata(
                 ctx.run_id,
+                user_id=ctx.user_id,
                 status="completed",
                 final_output=ctx.final_output,
                 legal_answer=ctx.legal_answer,
                 document_file=ctx.document_file,
                 completed_at=datetime.now(timezone.utc),
             )
-            thread_marked = await self._amark_thread_output(ctx.thread_id)
+            thread_marked = await self._amark_thread_output(ctx.thread_id, ctx.user_id)
             message_persisted = await self._aappend_message(
                 ctx,
                 "assistant",

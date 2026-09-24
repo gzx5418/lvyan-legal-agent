@@ -310,7 +310,13 @@ def _load_article_chunks(
     cache_trusted = True
     check: dict[str, Any] = {}
     try:
-        from lvyan.retrieval.manifest import ensure_corpus_ready
+        from lvyan.retrieval.manifest import INDEX_BUILDING, INDEX_READY, ensure_corpus_ready
+
+        # P2：后台预热/自愈已在重建时不重复触发——等其完成（上限 30s），
+        # 否则首个请求会在请求线程上同步全库重建（秒级到十秒级延迟尖峰），
+        # 且与预热线程争 .rebuild.lock 空等。
+        if INDEX_BUILDING.is_set():
+            INDEX_READY.wait(timeout=30.0)
 
         # P0-3：自愈入口。索引不一致时自动原子重建（含重新生成 manifest），
         # 避免「readyz=503 → 无流量 → 永不修复」的恶性循环。

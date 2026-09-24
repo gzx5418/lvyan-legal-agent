@@ -186,7 +186,10 @@ services:
       CHECKPOINTER_BACKEND: ${CHECKPOINTER_BACKEND:-postgres}
 
       # —— PostgreSQL（容器内通过服务名访问）——
-      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-lvyan}:${POSTGRES_PASSWORD:-lvyan}@postgres:5432/${POSTGRES_DB:-lvyan}"
+      # P1：支持整体覆盖——启用 RLS 时在 .env 设置
+      # DATABASE_URL=postgresql+psycopg://lvyan_runtime:<密码>@postgres:5432/lvyan
+      # 未设置时回退默认 owner 连接。
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-lvyan}:${POSTGRES_PASSWORD:-lvyan}@postgres:5432/${POSTGRES_DB:-lvyan}}
 
       # —— OpenSearch（未启动时检索降级，不阻塞应用）——
       # W7：URL 可通过 .env 的 OPENSEARCH_URL 覆盖（启用 TLS 时改为 https://）
@@ -273,6 +276,7 @@ services:
       MAX_RETRIEVAL_ITERATIONS: ${MAX_RETRIEVAL_ITERATIONS:-1}
       MAX_LEGAL_REASONER_ITERATIONS: ${MAX_LEGAL_REASONER_ITERATIONS:-1}
       MAX_COST_BUDGET_USD: ${MAX_COST_BUDGET_USD:-2.0}
+      MAX_OUTPUT_ITERATIONS: ${MAX_OUTPUT_ITERATIONS:-2}
       MAX_ATTACHMENT_COUNT: ${MAX_ATTACHMENT_COUNT:-10}
       MAX_EXTRACTED_CHARS_PER_FILE: ${MAX_EXTRACTED_CHARS_PER_FILE:-200000}
       MAX_TOTAL_ATTACHMENT_CHARS: ${MAX_TOTAL_ATTACHMENT_CHARS:-400000}

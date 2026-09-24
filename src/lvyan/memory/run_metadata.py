@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from typing import Any, Literal, Protocol
@@ -31,19 +32,19 @@ class RunMetadataStore(Protocol):
         attachments: list[str] | None = None,
     ) -> None: ...
 
-    def update_run(self, run_id: str, **values: Any) -> None: ...
+    def update_run(self, run_id: str, user_id: str | None = None, **values: Any) -> None: ...
 
-    def get_run(self, run_id: str) -> dict[str, Any] | None: ...
+    def get_run(self, run_id: str, user_id: str | None = None) -> dict[str, Any] | None: ...
 
-    def get_thread(self, thread_id: str) -> dict[str, Any] | None: ...
+    def get_thread(self, thread_id: str, user_id: str | None = None) -> dict[str, Any] | None: ...
 
     def list_threads(self, user_id: str) -> list[tuple[str, dict[str, Any]]]: ...
 
     def delete_thread(self, thread_id: str, user_id: str) -> bool: ...
 
-    def has_active_runs(self, thread_id: str) -> bool: ...
+    def has_active_runs(self, thread_id: str, user_id: str | None = None) -> bool: ...
 
-    def mark_thread_output(self, thread_id: str) -> None: ...
+    def mark_thread_output(self, thread_id: str, user_id: str | None = None) -> None: ...
 
     def append_message(
         self,
@@ -162,6 +163,41 @@ class PostgresRunMetadataStore:
             row_factory=dict_row,
         )
 
+    def _raw_connect_for_maintenance(self):
+        """无租户上下文的连接（仅 _ensure_schema / healthcheck 等 owner 级操作）。"""
+        return self._connect()
+
+    @contextlib.contextmanager
+    def _tenant_connect(self, user_id: str | None):
+        """获取连接并注入 ``app.user_id`` 租户上下文（RLS 生效的前提）。
+
+        P1 修复：007/008 的 RLS 策略依赖 ``current_setting('app.user_id')``，
+        但此前业务 Store 从不写入该 GUC——按文档切到 lvyan_runtime 角色后，
+        所有 INSERT/SELECT 会立即违反策略。此处采用**会话级** set_config
+        （第二参 false）+ finally 显式复位：psycopg_pool 的 ``connection()``
+        检出是独占的（并发调用方拿到不同连接），无需 TenantAwareCheckpointer
+        那样的全局锁；owner role 有 BYPASSRLS，注入是无害的 no-op。
+
+        ``user_id`` 为空（初始化/迁移/健康检查）时不注入，保持旧行为。
+        """
+        with self._connect() as conn:
+            self._ensure_schema(conn)
+            if not (user_id and user_id.strip()):
+                yield conn
+                return
+            with conn.cursor() as cur:
+                cur.execute("SELECT set_config('app.user_id', %s, false)", (user_id,))
+            try:
+                yield conn
+            finally:
+                # 复位失败（连接已断）不应掩盖业务异常；连接归还池前由
+                # 服务端断连兜底（broken connection 不会复用）。
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT set_config('app.user_id', '', false)")
+                except Exception:  # noqa: BLE001
+                    _logger.debug("tenant context reset failed on returned connection")
+
     def _ensure_schema(self, conn: Any) -> None:
         """在 ``conn`` 上以事务方式执行 migration。
 
@@ -233,8 +269,7 @@ class PostgresRunMetadataStore:
         user_message: str = "",
         attachments: list[str] | None = None,
     ) -> None:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.transaction():
                 with conn.cursor() as cur:
                     cur.execute(
@@ -283,7 +318,7 @@ class PostgresRunMetadataStore:
                             ),
                         )
 
-    def update_run(self, run_id: str, **values: Any) -> None:
+    def update_run(self, run_id: str, user_id: str | None = None, **values: Any) -> None:
         clean = {key: value for key, value in values.items() if key in self._ALLOWED_UPDATE_COLUMNS}
         if not clean:
             return
@@ -301,8 +336,7 @@ class PostgresRunMetadataStore:
             clean["document_file"] = Jsonb(clean["document_file"])
         assignments = ", ".join(f"{key} = %s" for key in clean)
         params = [*clean.values(), run_id]
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"UPDATE agent_runs SET {assignments} WHERE run_id = %s",
@@ -311,9 +345,9 @@ class PostgresRunMetadataStore:
                 if cur.rowcount != 1:
                     raise RunMetadataUnavailable(f"run {run_id} does not exist")
 
-    def get_run(self, run_id: str) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+    def get_run(self, run_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+        """读取 run 元数据；传 user_id 时在租户上下文内查询（RLS 强制）。"""
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -328,9 +362,8 @@ class PostgresRunMetadataStore:
                 row = cur.fetchone()
         return dict(row) if row else None
 
-    def get_thread(self, thread_id: str) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+    def get_thread(self, thread_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -345,8 +378,7 @@ class PostgresRunMetadataStore:
         return dict(row) if row else None
 
     def list_threads(self, user_id: str) -> list[tuple[str, dict[str, Any]]]:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -363,8 +395,7 @@ class PostgresRunMetadataStore:
 
     def delete_thread(self, thread_id: str, user_id: str) -> bool:
         """Delete an inactive user-owned thread and cascade-delete its runs."""
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -383,9 +414,8 @@ class PostgresRunMetadataStore:
                 row = cur.fetchone()
         return row is not None
 
-    def has_active_runs(self, thread_id: str) -> bool:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+    def has_active_runs(self, thread_id: str, user_id: str | None = None) -> bool:
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -401,9 +431,8 @@ class PostgresRunMetadataStore:
                 row = cur.fetchone()
         return bool(row and row["has_active_runs"])
 
-    def mark_thread_output(self, thread_id: str) -> None:
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+    def mark_thread_output(self, thread_id: str, user_id: str | None = None) -> None:
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -429,8 +458,7 @@ class PostgresRunMetadataStore:
             raise ValueError(f"unsupported message role: {role}")
         from psycopg.types.json import Jsonb
 
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -460,8 +488,7 @@ class PostgresRunMetadataStore:
         ``artifacts``，并在读取时做 **public 化**：仅暴露 type / run_id /
         filename / format / file_size，绝不泄露 ``output_path`` 等服务器路径。
         """
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -513,8 +540,7 @@ class PostgresRunMetadataStore:
         P1-1：已请求取消（``cancel_requested_at`` 非空）的 run 不得被 claim，
         防止用户取消后仍能提交审批将 run 恢复为 running。
         """
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -560,8 +586,7 @@ class PostgresRunMetadataStore:
         Returns:
             上述三态字符串之一。
         """
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 # P1-1：单条原子 SQL，CASE 在同一行内求值，无竞态窗口
                 cur.execute(
@@ -596,8 +621,7 @@ class PostgresRunMetadataStore:
 
     def is_cancel_requested(self, run_id: str, user_id: str) -> bool:
         """P1-2：worker 侧协作取消轮询。``cancel_requested_at`` 非空即已请求取消。"""
-        with self._connect() as conn:
-            self._ensure_schema(conn)
+        with self._tenant_connect(user_id) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """

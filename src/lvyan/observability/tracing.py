@@ -342,17 +342,25 @@ class CostTracker:
         self._max_threads = max(1, int(max_threads))
 
     def add(self, thread_id: str, tokens_in: int, tokens_out: int, cost: float) -> None:
-        """累加一次模型调用的 token 与成本；超出容量上限时淘汰最旧 thread。"""
+        """累加一次模型调用的 token 与成本；超出容量上限时淘汰最久未更新的 thread。"""
         with self._lock:
-            if thread_id not in self._data and len(self._data) >= self._max_threads:
-                # dict 按插入序保序：弹出首个键即最旧插入的 thread。
-                # 已存在的 thread 更新时保持原位，不会被此次调用淘汰。
+            if thread_id in self._data:
+                # P2：真 LRU——已存在条目先摘除再重插（移到末尾），否则活跃
+                # 老 thread 会被新 thread 挤出，get_cost_summary 返回 0 导致
+                # check_cost_budget 低估该会话的真实成本。
+                entry = self._data.pop(thread_id)
+            elif len(self._data) >= self._max_threads:
                 oldest = next(iter(self._data))
                 del self._data[oldest]
                 _logger.debug(
-                    "CostTracker 达到容量上限（%d），淘汰最旧 thread：%s", self._max_threads, oldest
+                    "CostTracker 达到容量上限（%d），淘汰最久未更新 thread：%s",
+                    self._max_threads,
+                    oldest,
                 )
-            entry = self._data.setdefault(thread_id, {"in": 0, "out": 0, "cost": 0.0})
+                entry = {"in": 0, "out": 0, "cost": 0.0}
+            else:
+                entry = {"in": 0, "out": 0, "cost": 0.0}
+            self._data[thread_id] = entry
             entry["in"] += tokens_in
             entry["out"] += tokens_out
             entry["cost"] += cost
