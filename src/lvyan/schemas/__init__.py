@@ -15,6 +15,7 @@ from .case import (
     RetrievalQuery,
     TimelineEvent,
 )
+from .case_document import CaseDocument, CitedStatuteRef, SpanRef
 from .evidence import AuthorityConflict, CaseAuthority, EvidenceRequirement
 from .legal_answer import (
     ActionItem,
@@ -53,6 +54,10 @@ __all__ = [
     "DocumentRef",
     "PlanStep",
     "RetrievalQuery",
+    # case_document.py
+    "CaseDocument",
+    "CitedStatuteRef",
+    "SpanRef",
     # authority.py
     "Authority",
     # evidence.py
