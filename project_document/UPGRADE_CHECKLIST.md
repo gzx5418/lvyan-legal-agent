@@ -2,12 +2,18 @@
 
 > 创建时间: 2026-09-28
 > 配套计划: `docs/plans/2026-09-28-platform-upgrade.md`(设计依据与验收标准,本文档只管"做什么、做到哪了")
-> 总计: 3 期 / 6 方向 / 46 个原子步骤
+> 总计: 4 期 / 7 方向 / 57 个原子步骤(v2,2026-09-28 修订)
 >
 > ## 执行状态总览
-> - **第一期(类案 0→1 + 智能收尾)**: 待开始(步骤 U-01 ~ U-17)
-> - **第二期(领域深化 + 评测对标)**: 待开始(步骤 U-18 ~ U-32)
-> - **第三期(平台化)**: 待开始(步骤 U-33 ~ U-46)
+> - **第一期(类案 0→1,要素化 schema 起步)**: 待开始(步骤 U-01 ~ U-17)
+> - **第 1.5 期(Retrieval 2.0 / Legal Issue Frame)**: 待开始(步骤 U-47 ~ U-54)——v2 新增
+> - **第二期(可验证推理 + 合同 + 评测对标)**: 待开始(步骤 U-18 ~ U-32、U-55 ~ U-57)
+> - **第三期(平台化)**: 待开始(步骤 U-33 ~ U-38、U-41 ~ U-46)
+>
+> ## v2 修订记录(2026-09-28,吸收外部评审)
+> - 核心判断调整:检索天花板优先于生成模型(Legal RAG Bench 2026:检索影响 > 生成模型;自身 pipeline_eval 劳动案由低分全是检索失败佐证)→ 新增第 1.5 期"Retrieval 2.0 / Legal Issue Frame"(U-47~U-54);LEGAL_CHAT_MODEL 降为实验项(U-19)。
+> - U-01 schema 直接要素化(避免日后迁移);U-03 数据源改 LeCaRDv2 为主 + 同罪名捷径警示;U-07 关联难负例(U-54)。
+> - 新增 U-55 文档双通道、U-56 EvidenceSpan 坐标化、U-57 合同条款理解层;U-40 重塑为轻量法律关系图并前移至第二期。
 >
 > ## 使用约定
 > 1. 完成一步:勾选 `[x]` 并在行尾补 `✅ <commit-hash> <日期>`;部分完成标 `[~]` 并写明卡点。
@@ -22,9 +28,13 @@
 
 ## A. 类案检索(A2 接线 + A3 审计呈现)
 
-**U-01** - 类案数据 schema 定义
+**U-01** - 类案数据 schema 定义(v2 要素化)
 - File: `src/lvyan/schemas/case.py` 或新建 `src/lvyan/schemas/case_document.py`
-- 定义 `CaseDocument` 模型:case_id / case_number / court / case_type(案由)/ effective_level(指导性案例|参考案例)/ brief_facts / ruling_summary / disputed_focus / judgment_date / source_url / source_name / content_hash
+- 定义 `CaseDocument` 模型,基础字段:case_id / case_number / court / case_type(案由)/ effective_level(指导性案例|参考案例)/ brief_facts / ruling_summary / disputed_focus / judgment_date / source_url / source_name / content_hash
+- **v2 必含要素化字段(一次到位,避免日后迁移;对齐 JUREX-4E 思想但自建 schema)**:legal_elements(构成要件列表)/ legal_issues(争议焦点)/ claims(诉请/请求权)/ defenses(抗辩)/ evidence_summary(证据概要)/ reasoning_spans(裁判理由段落定位 SpanRef)/ cited_statutes(引用法条)
+- 与 `CaseAuthority` 的映射函数(检索结果 → 领域模型,对齐 `version_aware` 的 chunk→Authority 模式)
+- 依赖:无
+- 验收:模型可 JSON 序列化;与 curated 桩数据双向转换测试;要素化字段可空但类型稳定
 - 与 `CaseAuthority` 的映射函数(检索结果 → 领域模型,对齐 `version_aware` 的 chunk→Authority 模式)
 - 依赖:无
 - 验收:模型可 JSON 序列化;与 curated 桩数据双向转换测试
@@ -36,11 +46,12 @@
 - 依赖:U-01;需 OpenSearch 可用(compose 已含,本机可跳过并在 CI external-services job 补)
 - 验收:灌库后 `count` 断言;重复执行幂等
 
-**U-03** - LeCaRD / CAIL 公开数据适配器
+**U-03** - LeCaRDv2 / CAIL 公开数据适配器(v2 更换主数据源)
 - File: `src/lvyan/scripts/case_datasets.py`(新建)
-- LeCaRD(JSON,清华 SIGIR 2021)与 CAIL 公开赛题数据 → `CaseDocument` 流式转换;字段脱敏(当事人姓名 → 角色 placeholder,与 privacy.redact_privacy 口径一致)
+- **LeCaRDv2 为主**(800 queries / 55,192 候选案例,源自 430 万刑事判决书,法律专家按 characterization / penalty / procedure 三维标注)+ CAIL 公开赛题数据补充 → `CaseDocument` 流式转换;字段脱敏(当事人姓名 → 角色 placeholder,与 privacy.redact_privacy 口径一致)
+- **已知陷阱**:2026 中文类案检索分析指出 LeCaRDv2 上"同罪名"即可解释大部分排名效果(同罪名+BM25 恢复强模型大部分提升)——灌库时保留 charge/case_type 元数据供难负例评测(U-54)使用
 - 依赖:U-01
-- 验收:抽样 100 条转换零失败;当事人姓名零残留断言
+- 验收:抽样 100 条转换零失败;当事人姓名零残留断言;charge 字段完整率断言
 
 **U-04** - `MultiSourceRetriever` 接入检索主链
 - File: `src/lvyan/retrieval/case_source.py`(已有多来源抽象,未接线)、`src/lvyan/tools/cases.py`
@@ -65,9 +76,9 @@
 - File: `tests/evals/golden_set.json`
 - 新增 ≥10 条类案检索用例(案由覆盖与既有 7 类一致 + 刑事起步),`expected_cases` 字段(对齐 `expected_statutes` 结构)
 - 依赖:U-05
-- 验收:`retrieval_eval` 增类案指标(Recall@k/MRR)报告;CI 全绿
+- 验收:`retrieval_eval` 增类案指标(Recall@k/MRR)报告;CI 全绿;**v2:难负例维度由 U-54 补齐,本步先建普通基线防止只刷 LeCaRDv2 分数**
 
-## B. 模型层(B1 四节点 LLM 化)
+## B. 模型层(B1 四节点 LLM 化,向 IssueFrame 收敛)
 
 **U-08** - jurisdiction_triage LLM 化收尾
 - File: `src/lvyan/nodes/triage.py`(已有 `_try_llm_triage`,补交叉校验缺口)
@@ -105,7 +116,7 @@
 - File: `src/lvyan/nodes/composer.py`、`composer_light.py`、`composer_deep.py`、`legal_answer_finalizer.py`
 - 弃答卡片:分析正文完整保留 + 结论区替换为"现有检索结果不足以支撑结论" + 缺失引用清单 + 补充建议(哪些案情/证据能解锁);`legal_answer.abstained` 结构化字段;SSE 事件透传
 - File(前端): `templates/static/app.js` 弃答卡片渲染
-- 依赖:U-12
+- 依赖:U-12;**v2 建议在 U-52(检索置信度)之后执行,弃答触发条件从"引用审计轮次"升级为消费 retrieval_confidence**
 - 验收:端到端用例(构造检索必失败)→ 前端契约测试;HITL 不适用于弃答路径断言
 
 ## D. 评测(D3 真模型夜间评测)
@@ -138,9 +149,66 @@
 
 ---
 
-# 第二期:领域深化 + 评测对标(1-2 月)
+# 第 1.5 期:Retrieval 2.0 / Legal Issue Frame(3-4 周,v2 新增)
 
-## B. 模型层(B2 路由 + B3 全量蕴含)
+> 核心论据:Legal RAG Bench 2026——检索模型对最终 RAG 质量的影响明显大于生成模型,大量"幻觉"首先是检索失败;自身 pipeline_eval 劳动案由低分全为检索未召回。本期把"文档级检索"升级为"要件级检索 + 精确 Span",是律言最难被复制的壁垒。
+
+**U-47** - LegalIssueFrame 数据模型与状态接入
+- File: `src/lvyan/schemas/`(新建 `issue_frame.py`)、`src/lvyan/graph/state.py`、`src/lvyan/schemas/case.py`
+- 模型字段:legal_relation(法律关系)/ claims(诉请与请求权基础)/ elements(构成要件,逐条可检索可举证)/ disputed_facts / defenses / evidence(要件↔证据映射)/ applicable_rules(候选规范)/ temporal_context(对接 law_as_of_date)
+- GraphState 增 `issue_frame` 字段(覆盖语义;加入 GraphState↔CaseState 一致性测试白名单评估——属运行域还是领域模型需判定);preflight 复位清单同步
+- 依赖:无
+- 验收:与既有字段映射文档(disputed_facts/evidence_requirements/missing_facts ≈ 60% 雏形,明确升级关系);一致性守护测试更新
+
+**U-48** - issue_frame 节点(规则 + LLM 双路径)
+- File: `src/lvyan/nodes/issue_frame.py`(新建)、`graph/builder.py`(插入主链:fact_extractor → missing_fact_assessor → **issue_frame** → planner)、`llm/prompt_registry.py`
+- LLM 产出 frame;规则降级路径从案由模板 + 既有 reasoner issues 结构合成;**B1 的四节点 LLM 化工作向本节点收敛**(triage→legal_relation、missing_fact_assessor→elements 缺失、evidence_analyzer→evidence 映射、authority_resolver→applicable_rules);规则否决权框架不变(LLM 只能修正不能创造)
+- 依赖:U-47
+- 验收:劳动纠纷示例端到端(违法解除赔偿金 8 要件);离线规则路径产出完整 frame;与 B1 步骤(U-08~U-11)的合并/拆分在执行时按实际收敛
+
+**U-49** - Multi-query 检索规划器
+- File: `src/lvyan/retrieval/query_rewriter.py` 扩展、`nodes/planner.py`
+- 从 IssueFrame 生成 3~5 路查询:原话 + 法律术语化 + 逐要件查询;复用 parallel_retrieval 双层线程池并行;计划步骤携带 element 关联
+- 依赖:U-48
+- 验收:单查询 → 多查询的 planner 测试;成本守卫(policies)对多路查询的预算适配
+
+**U-50** - 要件级检索(element-aware retrieval)
+- File: `src/lvyan/retrieval/`(扩展 hybrid/version_aware;类案走 U-04 的 OpenSearch 通道)
+- 法条:要件关键词 ↔ 条文映射检索;类案:CaseDocument.legal_elements 字段索引与召回;metadata filter 强化(案由/法院层级/效力等级/时点)
+- 依赖:U-49、U-04
+- 验收:同要件在法条与类案两侧均可召回;违反要件过滤用例
+
+**U-51** - Support Span Extractor(精确片段)
+- File: `src/lvyan/retrieval/span_extractor.py`(新建)、`schemas/`(SpanRef: source_type/statute|case, source_id, locator(条/款/项 or 段落区间), text)
+- 法条侧:条内款/项粒度切分(chunk 索引已按条);类案侧:裁判理由段落定位(启发式切分起步:"本院认为/经审理查明"锚点);引用携带 SpanRef 进最终输出
+- 依赖:U-50
+- 验收:Span 定位准确率抽检(法条 ≥95%,类案段落 ≥80%);SpanRef 随 citation 流转的端到端测试
+
+**U-52** - 检索置信度信号
+- File: `src/lvyan/retrieval/confidence.py`(新建)、`nodes/retrieve_statutes.py`
+- 三信号:candidate coverage(各要件是否都有候选)/ score margin(top1 与阈值距离)/ 后续 entailment 通过率预留;输出 `retrieval_confidence: sufficient|insufficient|failed` 进状态
+- 依赖:U-50
+- 验收:三档构造用例;低置信触发 query retry(改写而非硬答)的节点测试
+
+**U-53** - precise-span 评测指标(LegalBench-RAG 式)
+- File: `tests/evals/retrieval_eval.py`
+- 新指标:span-level precision/recall(召回的是最小支撑片段而非整文);报告标注与文档级指标的对比
+- 依赖:U-51
+- 验收:金标集抽 10 条人工标注支撑片段作为种子;指标可复现
+
+**U-54** - 难负例评测集
+- File: `tests/evals/hard_negatives.json`(新建)、`retrieval_eval.py` 接入
+- 四类:同罪名 hard negatives / 同案由 hard negatives / 相似事实不同要件 / 不同事实同一法律问题;针对 LeCaRDv2"同罪名捷径"设计
+- 依赖:U-03
+- 验收:同罪名+BM25 基线在难负例集上**不再**恢复大部分提升(即指标能区分真要件检索与罪名捷径);报告独立呈现
+
+---
+
+# 第二期:可验证推理 + 合同审查 + 评测对标(1-2 月)
+
+> v2 执行顺序建议:U-57(条款理解层)→ U-22~U-24(Playbook)→ U-25~U-27 → U-55/U-56(文档解析)→ U-20/U-21(蕴含)→ U-28~U-31(评测)→ U-32;**U-18/U-19 为实验项,最后执行**(依据:检索优先于模型替换)。
+
+## B. 模型层(B3 全量蕴含 + 实验项)
 
 **U-18** - LEGAL_CHAT_MODEL 路由
 - File: `src/lvyan/config.py`、`src/lvyan/llm/client.py`
@@ -148,10 +216,10 @@
 - 依赖:无
 - 验收:路由选择/回退单测;.env.example 文档
 
-**U-19** - 法律领域模型对比评测
-- 依赖:U-18、U-14
+**U-19** - 法律领域模型对比评测(v2 降级为实验项)
+- 依赖:U-18、U-14;**前置:P1.5 检索 2.0 达标**(依据 Legal RAG Bench 2026:先提高检索天花板,再讨论生成模型天花板)
 - 智海-录问 / ChatLaw(经魔搭或网关部署)与当前 CHAT_MODEL 在金标全集对比;结论写入 `docs/evals/legal-model-comparison.md`
-- 验收:对比报告含准确率/虚构率/成本/延迟四维
+- 验收:对比报告含准确率/虚构率/成本/延迟四维;若提升不显著则记录结论并关闭 LEGAL_CHAT_MODEL 维护面
 
 **U-20** - 语义蕴含全量化(B3)
 - File: `src/lvyan/validators/grounding.py`、`src/lvyan/nodes/citation_verifier.py`
@@ -185,10 +253,17 @@
 - 依赖:U-22
 - 验收:跨租户 404 测试;白名单校验( sanitize 模式照抄 preferences)
 
+**U-57** - 条款理解层(v2 新增,Playbook 的前置)
+- File: `src/lvyan/nodes/contract_understanding.py`(新建)
+- 三级流水:Clause Segmentation(条款切分,编号/层级感知)→ Clause Classification(付款/违约责任/解除/知产/保密/竞业限制/争议解决/责任上限/自动续期/赔偿等标准类目)→ Term Extraction(金额/期限/比例等结构化要素)
+- 思路对齐 CUAD/MAUD 的条款级标注实践;**ContractEval 2025 发现:推理模式不总提高条款风险判断正确率**——确定性切分/分类规则前置,LLM 只做语义归类兜底
+- 依赖:无
+- 验收:三类合同(劳动/买卖/租赁)切分+分类抽检准确率;结构化 term 抽取(违约金比例/期限)断言
+
 **U-25** - 偏差检测节点
 - File: `src/lvyan/nodes/contract_reviewer.py`(新建;MCP/CLI 不接,走 workspace 流程)
 - 逐条款:LLM 比对 ↔ playbook → 三色 + 建议替换文本 + 依据;确定性规则(金额上限/期限)前置过滤降 LLM 量;结果入 review_findings 现有状态机
-- 依赖:U-23、U-18
+- 依赖:U-23、**U-57(v2:先有条款理解层再做偏差比对)**
 - 验收:违约金超限/竞业过宽/无偏离三类用例;离线降级(规则-only)路径可用
 
 **U-26** - 红线建议与 HITL 审批
@@ -237,9 +312,31 @@
 - 依赖:无
 - 验收:重连不重复投递测试;旧客户端(无 Last-Event-ID)行为不变
 
+**U-55** - 文档解析双通道路由(v2 新增,F5,原方案低估项)
+- File: `src/lvyan/tools/document_router.py`(新建)、`tools/file_converter.py` 扩展
+- born-digital(有文本层 PDF/DOCX/XLSX)→ MarkItDown(现状);扫描/拍照/盖章件(文本层检测:PDF 抽取字符数阈值)→ **VISION_MODEL 网关通道(已有,直接复用)**;Docling / PaddleOCR-VL 作为可选 extra 依赖(pyproject `[project.optional-dependencies] documents-ai`),不设硬依赖
+- 路由决策记录进附件元数据(转换通道 + 置信度)
+- 依赖:无
+- 验收:扫描合同/法院 PDF/微信截图三类样本端到端;无文本层 PDF 正确路由到视觉通道;纯 born-digital 路径零回归
+
+**U-58** - 轻量法律关系图(v2 新增,原 U-40 升格前移)
+- File: `src/lvyan/graph/legal_relation.py`(新建,in-repo 边表 JSON/networkx,不上图数据库)
+- 节点与边:Claim →requires→ LegalElement →supported_by→ Fact →proved_by→ Evidence →governed_by→ Statute →interpreted_by→ JudicialInterpretation →illustrated_by→ Case;StatuteVersion(effective_from/to、replaces、amended_by、references)——直接复用 version-aware 检索的既有语义
+- 检索路由:普通咨询 Hybrid RAG(现状);复杂多法条(多部法律交叉/法条竞合)走图增强 multi-hop;依据法律 GraphRAG 研究:层级结构/交叉引用/时间版本三要素
+- 依赖:U-47(IssueFrame 提供节点实体)
+- 验收:法条竞合场景(交通事故+工伤)multi-hop 检索用例;图构建随 run 增量更新;普通咨询路径零回归
+
+**U-56** - EvidenceSpan 坐标化与前端跳转高亮(v2 新增,F8)
+- File: `src/lvyan/schemas/attachment.py`(EvidenceSpan: file_id/page/bbox/paragraph_id/text)、`tools/document_router.py` 输出携带坐标、引用结构增 SpanRef → 前端"点击依据 → 跳转页码/段落高亮"
+- 与 U-51 的 SpanRef 体系合流(法条:条/款/项;类案:判决段落;用户文档:页/bbox/段落)
+- 依赖:U-55、U-51
+- 验收:合同第 7 页第 13.2 条点击跳转高亮的前端契约测试;坐标数据随附件持久化
+
 ---
 
 # 第三期:平台化(季度)
+
+> v2 调整:原 U-40(争议焦点图谱)已升格为 U-58(轻量法律关系图)前移至第二期;本期为 U-33 ~ U-38、U-41 ~ U-46。
 
 ## C. 合同审查(C3)
 
@@ -289,11 +386,7 @@
 - 依赖:U-20(成本模型重估后)
 - 验收:分级成本/延迟曲线报告;深度提升在金标需推理层有效
 
-**U-40** - 争议焦点图谱(可选)
-- File: `src/lvyan/nodes/focus_graph.py`(新建,探索性)
-- 多问题案件的问题分解与依赖(争议焦点 → 待证事实 → 证据)显式化,指导检索与文书结构;先用规则+LLM 混合,不引图数据库
-- 依赖:U-39
-- 验收:多争议案件(交通事故+工伤竞合)分解正确率人工评估 ≥70%
+**(v2 移出)U-40 原第三期条目已重塑为"轻量法律关系图"并前移至第二期,见 U-58**
 
 ## F. 工程收尾(续)
 
