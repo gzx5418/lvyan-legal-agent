@@ -28,7 +28,7 @@
 
 ## A. 类案检索(A2 接线 + A3 审计呈现)
 
-**U-01** - 类案数据 schema 定义(v2 要素化)
+**[x]** **U-01** - 类案数据 schema 定义(v2 要素化) ✅ 48c3f77
 - File: `src/lvyan/schemas/case.py` 或新建 `src/lvyan/schemas/case_document.py`
 - 定义 `CaseDocument` 模型,基础字段:case_id / case_number / court / case_type(案由)/ effective_level(指导性案例|参考案例)/ brief_facts / ruling_summary / disputed_focus / judgment_date / source_url / source_name / content_hash
 - **v2 必含要素化字段(一次到位,避免日后迁移;对齐 JUREX-4E 思想但自建 schema)**:legal_elements(构成要件列表)/ legal_issues(争议焦点)/ claims(诉请/请求权)/ defenses(抗辩)/ evidence_summary(证据概要)/ reasoning_spans(裁判理由段落定位 SpanRef)/ cited_statutes(引用法条)
@@ -39,7 +39,7 @@
 - 依赖:无
 - 验收:模型可 JSON 序列化;与 curated 桩数据双向转换测试
 
-**U-02** - OpenSearch 类案索引建索引脚本
+**[x]** **U-02** - OpenSearch 类案索引建索引脚本 ✅ 48c3f77(CI 集成测试待 external-services job 验证)
 - File: `src/lvyan/scripts/ingest_cases.py`(新建,参照 `ingest_laws.py:526-608` 的 bulk 管线)
 - `legal_cases` 索引 mapping(中文 analyzer 与法条索引一致);幂等创建 + 全量重建
 - 支持 `--source lecard|cail|curated` 与 `--batch-size`
