@@ -300,3 +300,102 @@ def test_urgency_detection_raises_risk_level():
     result = jurisdiction_triage(state)
     assert result["risk_level"] != "low"
     assert result["risk_level"] in ("medium", "high")
+
+
+# ---------------------------------------------------------------------------
+# U-08:LLM/规则双向冲突消解
+# ---------------------------------------------------------------------------
+def test_weak_intent_document_negative_no_drafting_verb(monkeypatch):
+    """负向用例(U-08/P1):"收到律师函怎么办"是分析需求,不得判 document。"""
+    monkeypatch.setattr("lvyan.nodes.triage._try_llm_triage", lambda *args: None)
+    result = jurisdiction_triage({"user_goal": "收到律师函怎么办"})
+    assert result["complexity"] != "document"
+
+
+def test_weak_intent_document_downgraded_by_llm(monkeypatch):
+    """双向消解(复杂度):规则弱意图词+动词判 document,LLM 明确给 light → 采纳 LLM。"""
+    monkeypatch.setattr(
+        "lvyan.nodes.triage._try_llm_triage",
+        lambda *args: {
+            "jurisdiction": "中国大陆",
+            "case_type": None,
+            "complexity": "light",
+            "risk_level": "low",
+        },
+    )
+    # "律师函"(弱意图) + "写"(动词) → 规则 document(弱);LLM 判 light
+    # (注意不用"帮我写一份"——那是强意图词,不可降级)
+    result = jurisdiction_triage({"user_goal": "帮我写一下律师函"})
+    assert result["complexity"] == "light"
+
+
+def test_strong_intent_document_not_downgraded_by_llm(monkeypatch):
+    """单向保留:强意图词(起草/起诉状)判定的 document 不可被 LLM 降级。"""
+    monkeypatch.setattr(
+        "lvyan.nodes.triage._try_llm_triage",
+        lambda *args: {
+            "jurisdiction": "中国大陆",
+            "case_type": None,
+            "complexity": "light",
+            "risk_level": "low",
+        },
+    )
+    result = jurisdiction_triage({"user_goal": "帮我起草起诉状"})
+    assert result["complexity"] == "document"
+
+
+def test_rule_document_beats_llm_for_analysis_queries(monkeypatch):
+    """LLM 误判 document(分析类请求)仍被降级为 deep(既有保护不变)。"""
+    monkeypatch.setattr(
+        "lvyan.nodes.triage._try_llm_triage",
+        lambda *args: {
+            "jurisdiction": "中国大陆",
+            "case_type": None,
+            "complexity": "document",
+            "risk_level": "low",
+        },
+    )
+    result = jurisdiction_triage({"user_goal": "根据我上传的合同分析押金退还问题"})
+    # 分析类请求不得进入 document(真实形态 _try_llm_triage 会降 deep;
+    # 即便绕过,主流程 light 升级通道也不采纳 document——双保险)
+    assert result["complexity"] != "document"
+
+
+def test_case_type_conflict_resolved_toward_llm_on_weak_signal(monkeypatch):
+    """双向消解(案由):规则仅 1 关键词命中 + LLM 不同案由 → 采纳 LLM。"""
+    monkeypatch.setattr(
+        "lvyan.nodes.triage._try_llm_triage",
+        lambda *args: {
+            "jurisdiction": "中国大陆",
+            # "合同"(1 个关键词命中合同纠纷) vs LLM 判劳动争议
+            "case_type": "劳动争议",
+            "complexity": "deep",
+            "risk_level": "low",
+        },
+    )
+    result = jurisdiction_triage({"user_goal": "我的合同被公司收走了怎么办"})
+    assert result["case_type"] == "劳动争议"
+
+
+def test_case_type_strong_rule_signal_beats_llm(monkeypatch):
+    """≥2 个关键词命中(强信号)时规则胜:辞退+经济补偿明确指向劳动争议。"""
+    monkeypatch.setattr(
+        "lvyan.nodes.triage._try_llm_triage",
+        lambda *args: {
+            "jurisdiction": "中国大陆",
+            "case_type": "合同纠纷",
+            "complexity": "deep",
+            "risk_level": "low",
+        },
+    )
+    result = jurisdiction_triage({"user_goal": "公司辞退我,经济补偿怎么算"})
+    assert result["case_type"] == "劳动争议"
+
+
+def test_offline_degradation_unchanged_without_llm(monkeypatch):
+    """离线降级路径不变:LLM None 时全部走规则。"""
+    monkeypatch.setattr("lvyan.nodes.triage._try_llm_triage", lambda *args: None)
+    result = jurisdiction_triage({"user_goal": "公司辞退我,我要起诉,经济补偿怎么算"})
+    assert result["case_type"] == "劳动争议"
+    assert result["complexity"] == "deep"  # "起诉" 命中 deep 关键词
+    assert result["jurisdiction"] == "中国大陆"

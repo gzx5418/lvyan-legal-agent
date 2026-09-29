@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from typing import Any
 import re
 
@@ -40,6 +42,8 @@ _FOREIGN_KEYWORDS: tuple[str, ...] = (
 )
 
 # 案由 → 关键词映射（顺序即匹配优先级）
+_logger = logging.getLogger("lvyan.nodes.triage")
+
 _CASE_TYPE_KEYWORDS: dict[str, list[str]] = {
     # 通勤交通事故工伤认定的法律要件和普通劳动争议不同，必须优先分流，
     # 不能落入经济补偿/解除劳动合同模板。
@@ -125,6 +129,16 @@ def is_personal_information_dispute(*texts: str) -> bool:
     return any(keyword in combined for keyword in _PERSONAL_INFORMATION_KEYWORDS)
 
 
+def _count_case_type_keyword_hits(text: str) -> dict[str, int]:
+    """统计各案由的关键词命中数(U-08:供规则/LLM 冲突消解的强度信号)。"""
+    hits: dict[str, int] = {}
+    for case_type, keywords in _CASE_TYPE_KEYWORDS.items():
+        n = sum(1 for kw in keywords if kw in text)
+        if n:
+            hits[case_type] = n
+    return hits
+
+
 def _detect_case_type(user_goal: str, conversation_summary: str = "") -> str | None:
     """根据当前问题匹配案由；必要时继承同一会话的上下文。
 
@@ -156,25 +170,35 @@ def _detect_case_type(user_goal: str, conversation_summary: str = "") -> str | N
     return None
 
 
+def _detect_complexity_detail(user_goal: str) -> tuple[str, bool]:
+    """复杂度分级,附 document 判定依据((complexity, document_by_weak_intent))。
+
+    ``document_by_weak_intent=True`` 表示 document 判定来自弱意图词 + 起草
+    动词共现(启发式,可被 LLM 纠正);强意图词(起草/拟一份等)判定的
+    document 不可降级。
+    """
+    if not user_goal:
+        return "light", False
+    # document 优先（"起诉状" 含 "起诉"，需先判 document）
+    if any(kw in user_goal for kw in _COMPLEXITY_DOCUMENT_STRONG_KEYWORDS):
+        return "document", False
+    has_weak = any(kw in user_goal for kw in _COMPLEXITY_DOCUMENT_WEAK_KEYWORDS)
+    has_drafting_verb = any(v in user_goal for v in _DOCUMENT_DRAFTING_VERBS)
+    if has_weak and has_drafting_verb:
+        return "document", True
+    for kw in _COMPLEXITY_DEEP_KEYWORDS:
+        if kw in user_goal:
+            return "deep", False
+    return "light", False
+
+
 def _detect_complexity(user_goal: str) -> str:
     """复杂度分级：document > deep > light。
 
     先检 document（起草/起诉状 等），避免被 deep 的 "起诉" 子串误命中
     "起诉状"。
     """
-    if not user_goal:
-        return "light"
-    # document 优先（"起诉状" 含 "起诉"，需先判 document）
-    if any(kw in user_goal for kw in _COMPLEXITY_DOCUMENT_STRONG_KEYWORDS):
-        return "document"
-    has_weak = any(kw in user_goal for kw in _COMPLEXITY_DOCUMENT_WEAK_KEYWORDS)
-    has_drafting_verb = any(v in user_goal for v in _DOCUMENT_DRAFTING_VERBS)
-    if has_weak and has_drafting_verb:
-        return "document"
-    for kw in _COMPLEXITY_DEEP_KEYWORDS:
-        if kw in user_goal:
-            return "deep"
-    return "light"
+    return _detect_complexity_detail(user_goal)[0]
 
 
 def _try_llm_triage(user_goal: str, conversation_summary: str) -> dict[str, str | None] | None:
@@ -232,6 +256,8 @@ def _try_llm_triage(user_goal: str, conversation_summary: str) -> dict[str, str 
     # 模式成本高且用户预期差异大，必须以明确的文书动作意图为准：规则引擎
     # （_detect_complexity，基于文书动词白名单）判非 document 时，一律降级为
     # deep（保留 LLM 判断的"需要深入分析"信号，但不进入文书生成）。
+    # U-08 的弱意图双向消解在节点主流程做（规则 document(weak) + LLM 非
+    # document → 采纳 LLM）。
     if complexity == "document" and _detect_complexity(user_goal) != "document":
         complexity = "deep"
     if risk_level not in {"low", "medium", "high"}:
@@ -292,6 +318,21 @@ def jurisdiction_triage(state: CaseState) -> dict[str, Any]:
         user_goal,
         conversation_summary,
     )
+    # U-08 双向消解(案由):规则仅 1 个关键词命中(弱信号)且 LLM 给出不同
+    # 有效案由 → 采纳 LLM 并记录冲突;≥2 个关键词命中时规则胜(强信号)。
+    if case_type is not None and llm_triage is not None:
+        llm_case_type = llm_triage.get("case_type")
+        if (
+            llm_case_type
+            and llm_case_type != case_type
+            and _count_case_type_keyword_hits(user_goal).get(case_type, 0) <= 1
+        ):
+            _logger.info(
+                "triage 案由冲突消解:规则=%s(弱信号,1 关键词) vs LLM=%s → 采纳 LLM",
+                case_type,
+                llm_case_type,
+            )
+            case_type = str(llm_case_type)
     if case_type is None and llm_triage is not None:
         case_type = llm_triage.get("case_type")
 
@@ -307,10 +348,29 @@ def jurisdiction_triage(state: CaseState) -> dict[str, Any]:
     # --- 复杂度分级 ---
     # 回答形态只由当前问题意图决定；不采纳前端或调用方预先写入的模式，
     # 避免“选了深度”就把一句追问强制渲染为完整报告。
-    complexity = _detect_complexity(user_goal)
-    # 规则明确识别 document/deep 时不得被 LLM 下调；规则仅 light 时允许语义升级。
+    rule_complexity, document_by_weak = _detect_complexity_detail(user_goal)
+    complexity = rule_complexity
+    # 规则明确识别 document/deep 时不得被 LLM 下调；规则仅 light 时允许语义升级
+    # ——但 document 例外：分析类请求的 LLM 误判形态（真实环境交互测试），
+    # document 只能来自规则判定（强/弱意图词），LLM 的 document 经
+    # _try_llm_triage 已降为 deep，此处再拦一道防绕过（U-08 双保险）。
     if complexity == "light" and llm_triage is not None:
-        complexity = str(llm_triage.get("complexity") or complexity)
+        llm_complexity = str(llm_triage.get("complexity") or "")
+        complexity = llm_complexity if llm_complexity in {"deep"} else complexity
+    # U-08 双向消解(复杂度):规则仅凭弱意图词+动词共现判 document(启发式)
+    # 时,LLM 明确给出 deep/light → 采纳 LLM(规则误判可纠正);强意图词
+    # (起草/拟一份等)判定的 document 不可降级。
+    if (
+        complexity == "document"
+        and document_by_weak
+        and llm_triage is not None
+        and llm_triage.get("complexity") in {"light", "deep"}
+    ):
+        _logger.info(
+            "triage 复杂度冲突消解:规则 document(弱意图) vs LLM=%s → 采纳 LLM",
+            llm_triage.get("complexity"),
+        )
+        complexity = str(llm_triage["complexity"])
 
     # 涉外、安全和期限规则是硬边界；仅在规则未发现风险时采纳 LLM 的保守升级。
     if not is_foreign and llm_triage is not None:
