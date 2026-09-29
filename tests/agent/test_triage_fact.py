@@ -399,3 +399,108 @@ def test_offline_degradation_unchanged_without_llm(monkeypatch):
     assert result["case_type"] == "劳动争议"
     assert result["complexity"] == "deep"  # "起诉" 命中 deep 关键词
     assert result["jurisdiction"] == "中国大陆"
+
+
+# ---------------------------------------------------------------------------
+# U-09:missing_fact_assessor 时效追问激活 + LLM blocking 白名单
+# ---------------------------------------------------------------------------
+def test_limitation_urgency_triggers_blocking_fact_offline(monkeypatch):
+    """时效紧迫 + 无日期线索 → 规则兜底产生 blocking 起算日追问(离线可用)。"""
+    from lvyan.nodes.planner import missing_fact_assessor
+    from lvyan.graph.routing import route_after_missing_fact
+
+    monkeypatch.setattr("lvyan.nodes.planner._try_llm_missing_facts", lambda **kw: [])
+    state = {
+        "user_goal": "我的借款超过诉讼时效了吗",
+        "case_type": "合同纠纷",
+        "missing_facts": [
+            {"fact_key": "loan_amount", "question": "借款金额?", "is_blocking": False}
+        ],
+        "facts": [],
+    }
+    result = missing_fact_assessor(state)
+    keys = [m["fact_key"] if isinstance(m, dict) else m.fact_key for m in result["missing_facts"]]
+    assert "limitation_start_date" in keys
+    # 路由:存在 blocking → ask_user
+    merged = [
+        *(m for m in state["missing_facts"]),
+        *(m for m in result["missing_facts"]),
+    ]
+    assert route_after_missing_fact({"missing_facts": merged}) == "ask_user"
+
+
+def test_limitation_urgency_with_date_hint_no_blocking(monkeypatch):
+    """时效紧迫但既有事实已含日期线索 → 不追问起算日。"""
+    from lvyan.nodes.planner import missing_fact_assessor
+
+    monkeypatch.setattr("lvyan.nodes.planner._try_llm_missing_facts", lambda **kw: [])
+    state = {
+        "user_goal": "我的借款超过诉讼时效了吗",
+        "case_type": "合同纠纷",
+        "missing_facts": [
+            {"fact_key": "loan_amount", "question": "借款金额?", "is_blocking": False}
+        ],
+        "facts": [{"content": "借款发生于2022年3月"}],
+    }
+    result = missing_fact_assessor(state)
+    keys = [
+        m["fact_key"] if isinstance(m, dict) else m.fact_key
+        for m in result.get("missing_facts", [])
+    ]
+    assert "limitation_start_date" not in keys
+
+
+def test_non_urgency_early_exit_regression(monkeypatch):
+    """非紧迫场景:missing_facts 非空即早退(回归,不重复生成)。"""
+    from lvyan.nodes.planner import missing_fact_assessor
+
+    called = {"n": 0}
+
+    def _spy(**kw):
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr("lvyan.nodes.planner._try_llm_missing_facts", _spy)
+    state = {
+        "user_goal": "公司辞退我怎么赔偿",
+        "case_type": "劳动争议",
+        "missing_facts": [{"fact_key": "wage", "question": "月工资?", "is_blocking": False}],
+        "facts": [],
+    }
+    assert missing_fact_assessor(state) == {}
+    assert called["n"] == 0  # LLM 未被调用
+
+
+def test_llm_blocking_whitelist_forces_non_blocking(monkeypatch):
+    """LLM is_blocking 白名单:非时效/日期键强制 False。"""
+    from lvyan.nodes.planner import _try_llm_missing_facts
+
+    class _FakePayload(dict):
+        pass
+
+    monkeypatch.setattr(
+        "lvyan.llm.chat_json",
+        lambda **kw: {
+            "missing_facts": [
+                {
+                    "fact_key": "contract_signed",
+                    "question": "合同签了吗?",
+                    "reason": "r",
+                    "is_blocking": True,
+                },
+                {
+                    "fact_key": "breach_date",
+                    "question": "对方何时违约?",
+                    "reason": "r",
+                    "is_blocking": True,
+                },
+            ]
+        },
+    )
+    import lvyan.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "llm_available", lambda: True)
+    results = _try_llm_missing_facts(user_goal="u", case_type="合同纠纷", facts=[])
+    by_key = {r.fact_key: r.is_blocking for r in results}
+    assert by_key["contract_signed"] is False  # 白名单外强制非阻断
+    assert by_key["breach_date"] is True  # 时效/日期键允许阻断

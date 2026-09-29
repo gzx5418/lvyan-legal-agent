@@ -105,6 +105,75 @@ def _extract_action_keywords(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # 节点函数
 # ---------------------------------------------------------------------------
+# U-09:时效紧迫场景的追问激活。
+# 背景(二轮审查):missing_facts 非空即早退,LLM 评估几乎不运行,
+# is_blocking 无从产生 → 阻断式追问接近死代码。时效是法律结论的
+# 决定性前提(超时效丧失胜诉权),此类场景缺失"起算日"时必须追问。
+_LIMITATION_URGENCY_KEYWORDS: tuple[str, ...] = (
+    "诉讼时效",
+    "仲裁时效",
+    "时效",
+    "过期",
+    "超期",
+    "过了期限",
+    "还有效吗",
+    "还能告吗",
+    "还能起诉吗",
+)
+# 时效起算类事实的日期线索(用户已给出时不再追问)
+_DATE_HINT_KEYWORDS: tuple[str, ...] = (
+    "年",
+    "月",
+    "日",
+    "去年",
+    "今年",
+    "上月",
+    "上个月",
+    "前天",
+    "昨天",
+    "当天",
+)
+# U-09:LLM is_blocking 白名单——仅时效起算类事实可阻断;其余 LLM 项
+# 强制非阻断(防 LLM 滥用 blocking 卡死用户;追问走 END 重跑成本高)。
+_BLOCKING_KEY_HINTS: tuple[str, ...] = (
+    "limitation",
+    "date",
+    "time",
+    "deadline",
+    "duration",
+)
+
+# 时效起算日追问(规则兜底,离线可用)
+_LIMITATION_FACT_KEY = "limitation_start_date"
+
+
+def _has_limitation_urgency(user_goal: str) -> bool:
+    return any(kw in user_goal for kw in _LIMITATION_URGENCY_KEYWORDS)
+
+
+def _has_date_hint(facts: list[Any]) -> bool:
+    """既有事实是否已含日期线索(有则不追问起算日)。"""
+    import re as _re
+
+    for item in facts:
+        content = str(_get(item, "content", "") or "")
+        if any(kw in content for kw in _DATE_HINT_KEYWORDS) or _re.search(r"\d{4}", content):
+            return True
+    return False
+
+
+def _build_limitation_blocking_fact() -> MissingFact:
+    return MissingFact(
+        fact_key=_LIMITATION_FACT_KEY,
+        question=(
+            "请告诉我:您的权利受到损害(或对方明确拒绝履行)大致发生在什么时间?"
+            "这直接决定是否已过诉讼时效——超时效可能丧失胜诉权。"
+        ),
+        reason="时效起算日是判断是否超过诉讼时效的决定性前提,缺失时无法给出时效结论",
+        is_blocking=True,
+    )
+
+
 def missing_fact_assessor(state: CaseState) -> dict[str, Any]:
     """缺失事实评估节点。
 
@@ -126,9 +195,15 @@ def missing_fact_assessor(state: CaseState) -> dict[str, Any]:
     中实现，本节点只需确保 ``missing_facts`` 正确传递/补充。
     """
     missing_facts = _get(state, "missing_facts", []) or []
+    user_goal_early = str(_get(state, "user_goal", "") or "")
     # Fact extractor 已完成一轮缺口评估时不再重复生成。重复执行会覆盖或
     # 累加同义问题；是否阻断由路由层读取 ``is_blocking`` 决定。
-    if missing_facts:
+    # U-09 例外:时效紧迫场景(且尚无日期线索)时不早退——继续评估以产生
+    # 起算日的 blocking 追问(超时效是法律结论的决定性缺口)。
+    limitation_urgency = _has_limitation_urgency(user_goal_early) and not any(
+        bool(_get(item, "is_blocking", False)) for item in missing_facts
+    )
+    if missing_facts and not limitation_urgency:
         return {}
 
     # 无 blocking，尝试补充评估
@@ -157,6 +232,19 @@ def missing_fact_assessor(state: CaseState) -> dict[str, Any]:
         if item.fact_key not in existing_keys:
             new_missing.append(item)
             existing_keys.add(item.fact_key)
+
+    # U-09 规则兜底(离线可用):时效紧迫 + 事实无日期线索 + 尚无该 blocking
+    # → 直接生成起算日追问,不依赖 LLM。
+    if (
+        limitation_urgency
+        and not any(
+            str(_get(item, "fact_key", "")) == _LIMITATION_FACT_KEY
+            for item in [*missing_facts, *new_missing]
+        )
+        and case_type
+        and not _has_date_hint(existing_facts)
+    ):
+        new_missing.append(_build_limitation_blocking_fact())
 
     if not new_missing:
         return {}
@@ -217,12 +305,16 @@ def _try_llm_missing_facts(
             key = f"llm_missing_{index + 1}"
         if not question or not reason:
             continue
+        raw_blocking = bool(item.get("is_blocking", False))
+        # U-09:is_blocking 白名单——仅时效/日期类键可阻断,其余强制非阻断
+        key_lower = key.lower()
+        blocking_allowed = any(hint in key_lower for hint in _BLOCKING_KEY_HINTS)
         result.append(
             MissingFact(
                 fact_key=key,
                 question=question[:300],
                 reason=reason[:500],
-                is_blocking=bool(item.get("is_blocking", False)),
+                is_blocking=raw_blocking and blocking_allowed,
             )
         )
     if not result and raw:
