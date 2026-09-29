@@ -133,7 +133,7 @@
 - 依赖:U-14
 - 验收:手动 dispatch 首跑产出报告
 
-**U-16** - 金标集劳动案由离线盲区修复
+**[x]** **U-16** - 金标集劳动案由离线盲区修复 ✅ a82e22f(requires_llm 标注归入 live_eval;离线准确率 1.0)
 - File: `tests/evals/golden_set.json`、`tests/evals/pipeline_eval.py`
 - labor_001-004 离线低分(既有现象,二轮基线对比确认):查询措辞与规则降级检索的匹配校准,或标注 `requires_llm: true` 仅入真模型评测
 - 依赖:无
