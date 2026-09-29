@@ -46,7 +46,7 @@
 - 依赖:U-01;需 OpenSearch 可用(compose 已含,本机可跳过并在 CI external-services job 补)
 - 验收:灌库后 `count` 断言;重复执行幂等
 
-**U-03** - LeCaRDv2 / CAIL 公开数据适配器(v2 更换主数据源)
+**[x]** **U-03** - LeCaRDv2 / CAIL 公开数据适配器(v2 更换主数据源) ✅ 3f397b7(姓名启发式为文档化已知限制,数据集下载由部署方执行)
 - File: `src/lvyan/scripts/case_datasets.py`(新建)
 - **LeCaRDv2 为主**(800 queries / 55,192 候选案例,源自 430 万刑事判决书,法律专家按 characterization / penalty / procedure 三维标注)+ CAIL 公开赛题数据补充 → `CaseDocument` 流式转换;字段脱敏(当事人姓名 → 角色 placeholder,与 privacy.redact_privacy 口径一致)
 - **已知陷阱**:2026 中文类案检索分析指出 LeCaRDv2 上"同罪名"即可解释大部分排名效果(同罪名+BM25 恢复强模型大部分提升)——灌库时保留 charge/case_type 元数据供难负例评测(U-54)使用

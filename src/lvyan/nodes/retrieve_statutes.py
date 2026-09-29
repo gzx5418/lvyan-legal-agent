@@ -355,7 +355,9 @@ def parallel_retrieval(state: CaseState) -> dict[str, Any]:
         if not case_query_text.strip():
             return []
         try:
-            case_search_result = search_cases(case_query_text, top_k=10)
+            # U-04:透传案由作 OpenSearch term 过滤(未识别案由时不过滤)
+            node_case_type = str(_get(state, "case_type", "") or "").strip() or None
+            case_search_result = search_cases(case_query_text, top_k=10, case_type=node_case_type)
         except Exception:  # noqa: BLE001  检索失败不中断流程
             return []
         cases: list[CaseAuthority] = []

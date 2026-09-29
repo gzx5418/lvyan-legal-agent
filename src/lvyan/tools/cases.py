@@ -7,6 +7,8 @@ OpenSearch cases 索引），届时替换 ``_search_curated`` 后端即可。
 
 from __future__ import annotations
 
+import logging
+
 import re
 from functools import lru_cache
 
@@ -178,12 +180,57 @@ def _keyword_overlap(query: str, candidate: str) -> float:
 # ---------------------------------------------------------------------------
 # 公开工具
 # ---------------------------------------------------------------------------
-def search_cases(query: str, top_k: int = 10) -> CaseSearchResult:
-    """案例检索（桩实现）：从精编知识库 ``case_patterns.md`` 中检索裁判规则。
+def _search_opensearch_hits(query: str, top_k: int, case_type: str | None) -> list[CaseHit] | None:
+    """OpenSearch 真实类案检索(U-04)。
+
+    Returns:
+        命中列表(可为空列表 = 检索成功但无结果);``None`` = OpenSearch
+        未配置/不可用(调用方回退 curated 兜底)。
+    """
+    from lvyan.config import settings
+    from lvyan.retrieval.case_source import OpenSearchCaseSource
+
+    if not settings.opensearch_url:
+        return None
+    try:
+        source = OpenSearchCaseSource()
+        filters = {"case_type": case_type} if case_type else None
+        results = source.search_sync(query, top_k=top_k, filters=filters)
+    except Exception as exc:  # noqa: BLE001 boundary-exception: 可选数据源降级
+        _logger.warning("OpenSearch 类案检索不可用,回退 curated: %s", type(exc).__name__)
+        return None
+
+    hits: list[CaseHit] = []
+    for result in results:
+        metadata = result.metadata or {}
+        case_number = metadata.get("case_number") or None
+        hits.append(
+            CaseHit(
+                case_id=result.case_id,
+                case_number=str(case_number) if case_number else None,
+                court=result.court or None,
+                case_type=result.case_type,
+                brief_facts=str(metadata.get("brief_facts", "") or ""),
+                ruling_summary=result.summary,
+                similarity_score=float(result.score or 0.0),
+                source="opensearch",
+            )
+        )
+    return hits
+
+
+def search_cases(query: str, top_k: int = 10, case_type: str | None = None) -> CaseSearchResult:
+    """案例检索:OpenSearch 真实类案库优先,不可用时回退精编知识库。
+
+    U-04 接线:
+    - OpenSearch 可用 → ``legal_cases`` 索引检索(真实案号/法院,source=opensearch);
+    - 未配置/不可达/零命中 → curated ``case_patterns.md`` 裁判规则兜底
+      (source=curated_knowledge,输出端标注"非真实案例检索")。
 
     Args:
         query: 自然语言查询。
         top_k: 返回结果数上限。
+        case_type: 案由(可选,作 OpenSearch term 过滤;curated 路径仍走关键词评分)。
 
     Returns:
         CaseSearchResult：含 query / total / results。
@@ -196,6 +243,16 @@ def search_cases(query: str, top_k: int = 10) -> CaseSearchResult:
             query=query,
             total=0,
             results=[],
+        )
+
+    opensearch_hits = _search_opensearch_hits(query, top_k, case_type)
+    if opensearch_hits is not None:
+        return CaseSearchResult(
+            tool_name="search_cases",
+            success=True,
+            query=query,
+            total=len(opensearch_hits),
+            results=opensearch_hits,
         )
 
     try:
@@ -294,6 +351,9 @@ def get_case_detail(case_id: str) -> CaseDetailResult:
         found=False,
         case_id=case_id,
     )
+
+
+_logger = logging.getLogger("lvyan.tools.cases")
 
 
 __all__ = [

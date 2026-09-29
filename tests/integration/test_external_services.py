@@ -61,7 +61,6 @@ def test_opensearch_case_documents_ingestion(monkeypatch: pytest.MonkeyPatch) ->
         pytest.skip("LVYAN_TEST_OPENSEARCH_URL is not configured")
 
     import asyncio
-    import json
     from datetime import date
 
     from opensearchpy import OpenSearch

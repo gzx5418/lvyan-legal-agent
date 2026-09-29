@@ -39,6 +39,7 @@ _CASE_INDEX_MAPPING: dict = {
             "date": {"type": "keyword"},  # OpenSearchCaseSource 读 str 型 date
             "case_type": {"type": "keyword"},
             "summary": {"type": "text"},
+            "brief_facts": {"type": "text"},
             "full_text": {"type": "text"},
             # 过滤/分级
             "effective_level": {"type": "keyword"},
@@ -77,6 +78,7 @@ def case_document_to_index_doc(doc) -> dict:
         "date": judgment,
         "case_type": doc.case_type,
         "summary": doc.ruling_summary,
+        "brief_facts": doc.brief_facts,
         "full_text": "\n".join(
             part for part in (doc.title, doc.brief_facts, doc.ruling_summary) if part
         ),

@@ -28,6 +28,7 @@ __all__ = [
     "MultiSourceRetriever",
     "CuratedCaseSource",
     "OpenSearchCaseSource",
+    "build_default_retriever",
 ]
 
 
@@ -298,6 +299,23 @@ class OpenSearchCaseSource(CaseSource):
             )
         return results
 
+    def search_sync(
+        self,
+        query: str,
+        *,
+        top_k: int = 10,
+        filters: dict[str, Any] | None = None,
+    ) -> list[CaseResult]:
+        """同步检索入口(U-04):检索节点运行在同步线程池,不应 asyncio.run。
+
+        任何异常降级为空列表(可选数据源语义,不阻断主链)。
+        """
+        try:
+            return self._search_sync(query, top_k, filters)
+        except Exception as exc:  # noqa: BLE001 boundary-exception: optional data source
+            _logger.warning("OpenSearch 案例检索失败: %s", exc)
+            return []
+
     async def search(
         self,
         query: str,
@@ -324,6 +342,29 @@ class OpenSearchCaseSource(CaseSource):
 
 
 _CASE_FIELDS = frozenset({"case_id", "title", "court", "date", "case_type", "summary", "full_text"})
+
+
+def build_default_retriever() -> MultiSourceRetriever:
+    """按配置构建默认检索器(U-04 接线入口)。
+
+    - OpenSearch 已配置且健康:OpenSearch(真实类案,权重 1.2)+ curated(兜底);
+    - 未配置/不健康:仅 curated(现状行为,输出走"非真实案例检索"标注)。
+    """
+    retriever = MultiSourceRetriever()
+    retriever.add_source(CuratedCaseSource(), weight=1.0)
+    opensearch_source = OpenSearchCaseSource()
+    try:
+        import asyncio
+
+        healthy = asyncio.run(opensearch_source.healthcheck())
+    except Exception:  # noqa: BLE001 boundary-exception: 可选数据源
+        healthy = False
+    if healthy:
+        retriever.add_source(opensearch_source, weight=1.2)
+        _logger.info("类案多源检索:OpenSearch + curated 已启用")
+    else:
+        _logger.info("类案检索:OpenSearch 未配置/不可达,使用 curated 兜底")
+    return retriever
 
 
 class MultiSourceRetriever:
