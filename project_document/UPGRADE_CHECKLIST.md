@@ -121,13 +121,13 @@
 
 ## D. 评测(D3 真模型夜间评测)
 
-**U-14** - 真模型评测入口
+**[x]** **U-14** - 真模型评测入口 ✅ 373d45b(需仓库 secrets MODEL_GATEWAY_URL/API_KEY)
 - File: `tests/evals/live_eval.py`(新建)
 - 复用 pipeline_eval,`--require-real`:网关不可用直接退出码 2(区分于失败);指标含三报告 + 弃答率 + 成本/延迟分布;报告落 `outputs/evals/live-<date>.json`
 - 依赖:无
 - 验收:离线跑退出码 2;网关可用时产出报告
 
-**U-15** - 夜间 workflow
+**[x]** **U-15** - 夜间 workflow ✅ 373d45b(首跑待手动 dispatch 或 cron;漂移告警随 U-31 接入)
 - File: `.github/workflows/nightly-eval.yml`(新建)
 - cron 夜间 + workflow_dispatch;网关 secret 从仓库 secrets 注入;漂移对比(与最近 7 天均值)超阈值打 issue 标签;不阻塞 PR 门禁
 - 依赖:U-14

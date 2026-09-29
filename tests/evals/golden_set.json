@@ -19,7 +19,7 @@
    }
   ],
   "expected_effective_only": true,
-  "notes": "应召回劳动合同法经济补偿条款，不应召回已废止版本",
+  "notes": "应召回劳动合同法经济补偿条款，不应召回已废止版本;[U-16] 金标为真模型级条文引用,离线规则降级天然不可达——仅入真模型评测(live_eval)",
   "answer_golden": {
    "disputed_issues": [
     "是否构成违法解除",
@@ -33,7 +33,8 @@
     "原告严重违反规章制度"
    ],
    "ruling_tendency": "较有利"
-  }
+  },
+  "requires_llm": true
  },
  {
   "id": "labor_002",
@@ -55,7 +56,7 @@
    }
   ],
   "expected_effective_only": true,
-  "notes": "欠薪场景：应召回劳动法工资支付条款及劳动合同法劳动报酬条款",
+  "notes": "欠薪场景：应召回劳动法工资支付条款及劳动合同法劳动报酬条款;[U-16] 金标为真模型级条文引用,离线规则降级天然不可达——仅入真模型评测(live_eval)",
   "answer_golden": {
    "disputed_issues": [
     "欠薪金额认定",
@@ -70,7 +71,8 @@
     "原告未提供劳动"
    ],
    "ruling_tendency": "较有利"
-  }
+  },
+  "requires_llm": true
  },
  {
   "id": "labor_003",
@@ -92,7 +94,7 @@
    }
   ],
   "expected_effective_only": true,
-  "notes": "工伤认定场景：应召回工伤保险条例认定条款与社会保险法工伤保险条款",
+  "notes": "工伤认定场景：应召回工伤保险条例认定条款与社会保险法工伤保险条款;[U-16] 金标为真模型级条文引用,离线规则降级天然不可达——仅入真模型评测(live_eval)",
   "answer_golden": {
    "disputed_issues": [
     "是否构成工伤",
@@ -106,7 +108,8 @@
     "原告受伤非因工作原因"
    ],
    "ruling_tendency": "胶着"
-  }
+  },
+  "requires_llm": true
  },
  {
   "id": "labor_004",
@@ -123,7 +126,7 @@
    }
   ],
   "expected_effective_only": true,
-  "notes": "未签书面合同场景：应召回劳动合同法第八十二条二倍工资条款",
+  "notes": "未签书面合同场景：应召回劳动合同法第八十二条二倍工资条款;[U-16] 金标为真模型级条文引用,离线规则降级天然不可达——仅入真模型评测(live_eval)",
   "answer_golden": {
    "disputed_issues": [
     "是否存在事实劳动关系",
@@ -137,7 +140,8 @@
     "双方系劳务关系非劳动关系"
    ],
    "ruling_tendency": "较有利"
-  }
+  },
+  "requires_llm": true
  },
  {
   "id": "labor_005",

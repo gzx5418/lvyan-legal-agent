@@ -127,7 +127,19 @@ def run_pipeline_evaluation(
     """
     golden = load_golden_set(golden_path)
     if limit is not None and limit > 0:
+        # 截断在过滤前:limit 语义是"评测前 N 条金标"
         golden = golden[:limit]
+
+    # U-16:requires_llm 用例(金标为真模型级条文引用)不进离线聚合——
+    # 规则降级输出天然不可达,计入会污染 B 层管线指标;归入 live_eval。
+    llm_only = [it for it in golden if it.get("requires_llm")]
+    golden = [it for it in golden if not it.get("requires_llm")]
+    if llm_only:
+        print(
+            f"[PipelineEval] 跳过 {len(llm_only)} 条 requires_llm 用例"
+            f"({', '.join(it.get('id', '') for it in llm_only)}),归入真模型评测",
+            file=sys.stderr,
+        )
 
     report = PipelineReport(total_queries=len(golden))
     graph = build_graph()  # 用 MemorySaver，每个 thread 独立
