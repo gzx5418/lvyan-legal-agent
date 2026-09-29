@@ -53,20 +53,20 @@
 - 依赖:U-01
 - 验收:抽样 100 条转换零失败;当事人姓名零残留断言;charge 字段完整率断言
 
-**U-04** - `MultiSourceRetriever` 接入检索主链
+**[x]** **U-04** - `MultiSourceRetriever` 接入检索主链 ✅ 7afce8b(build_default_retriever 组源;节点透传 case_type;真实 OpenSearch 环境联调待 CI external-services)
 - File: `src/lvyan/retrieval/case_source.py`(已有多来源抽象,未接线)、`src/lvyan/tools/cases.py`
 - `search_cases` 切换:OpenSearch(可用时)→ curated 精编兜底;OpenSearch 不可用降级路径与现有"类案参考规则"标注兼容
 - `parallel_retrieval` 的类案 job 透传 `case_type`/`user_goal`(已有通道)
 - 依赖:U-02
 - 验收:OpenSearch 在/不在两种环境下节点测试双路径全过;输出标注随来源切换(真实案号 → "类案(i, 案号)";兜底 → "类案参考规则(非真实案例检索)")
 
-**U-05** - 类案引用审计器
+**[x]** **U-05** - 类案引用审计器 ✅ 6653b15
 - File: `src/lvyan/nodes/citation_verifier.py`、`src/lvyan/validators/`(新建 `case_citation.py`)
 - 案号存在性核验(输出中案号须在 `state.cases` 中,对齐法条 not_found→fabricated 语义)与案由一致性校验(类案案由 vs triage.case_type 偏离 → warning)
 - 依赖:U-04
 - 验收:伪造案号用例(输出含检索结果外的案号)被拦;`tests/security/test_citation_forgery.py` 增类案用例
 
-**U-06** - 类案效力分级呈现
+**[x]** **U-06** - 类案效力分级呈现 ✅ 2c8da0a
 - File: `src/lvyan/nodes/composer_common.py`(`_format_cases`)
 - 指导性案例 > 参考案例标注;节尾披露按来源区分(真实库 → "请核对人民法院案例库";curated → 维持现状文案)
 - 依赖:U-04
@@ -430,6 +430,7 @@
 
 > 格式:`- [ ] <日期> <一句话描述> (来源: <审查/评测/用户反馈>) —— 评估后编入某期或关闭`
 
+- [x] 2026-09-28 **ruff format(0.16+)会格式化 .json 并输出尾随逗号**,曾损坏 golden_set.json——修复并约定:ruff format 不再对 *.json 调用;JSON 一律用 python json.dumps 写回
 - [ ] 2026-09-28 `/tmp` 与 Windows Python 路径不兼容曾影响冒烟测试脚本(运维注意项,非代码问题)
 - [ ] 2026-09-28 离线模式运行时 LangGraph checkpoint 反序列化告警(unregistered type ×8)——评估显式注册 allowed_msgpack_modules(来源:启动冒烟)
 - [ ] 2026-09-28 `.env` 模型网关 key 失效(401)——运维:密钥轮转流程

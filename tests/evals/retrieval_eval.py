@@ -86,6 +86,11 @@ class EvalReport:
     # 其结论不能外推到生产网关配置，报告必须可辨识。
     embedding_mode: str = "unknown"  # real / stub / unknown
     rerank_mode: str = "unknown"  # real / stub / unknown
+    # U-07:类案维度(需 OpenSearch + 灌库数据;不可用时显式跳过)
+    case_eval_available: bool = False
+    case_queries_total: int = 0
+    case_queries_hit: int = 0
+    case_skipped_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -251,9 +256,15 @@ def evaluate_retrieval(
             file=sys.stderr,
         )
     report = EvalReport(top_k=top_k, label="baseline", embedding_mode=emb_mode, rerank_mode=rr_mode)
-    report.total_queries = len(golden)
+    # U-07:类案维度用例单独评测(需 OpenSearch + 数据),不混入法条指标
+    statute_items = [it for it in golden if not it.get("requires_case_library")]
+    case_items = [it for it in golden if it.get("requires_case_library")]
+    report.total_queries = len(statute_items)
 
-    for item in golden:
+    if case_items:
+        _evaluate_case_dimension(case_items, top_k, report)
+
+    for item in statute_items:
         qid = item.get("id", "")
         query = item.get("query", "")
         category = item.get("category", "")
@@ -437,6 +448,59 @@ def _format_report(report: EvalReport) -> str:
         )
     lines.append(sep)
     return "\n".join(lines)
+
+
+def _evaluate_case_dimension(
+    case_items: list[dict[str, Any]], top_k: int, report: "EvalReport"
+) -> None:
+    """类案维度评测(U-07):search_cases 检索 + case_type 兼容命中。
+
+    OpenSearch 未配置/不可达/索引为空时显式跳过(计入 skipped_reason),
+    不让类案用例的法条指标(恒 0)污染整体聚合。
+    """
+    report.case_queries_total = len(case_items)
+    try:
+        import asyncio
+
+        from lvyan.config import settings
+        from lvyan.retrieval.case_source import OpenSearchCaseSource
+        from lvyan.tools.cases import search_cases
+
+        if not settings.opensearch_url:
+            report.case_skipped_reason = "opensearch_not_configured"
+            return
+        # search_sync 失败静默降级空列表(不抛),健康判定必须用 ping
+        if not asyncio.run(OpenSearchCaseSource().healthcheck()):
+            report.case_skipped_reason = "opensearch_unreachable"
+            return
+        probe = search_cases("类案检索探针", top_k=1)
+        if not probe.success:
+            report.case_skipped_reason = "search_cases_unavailable"
+            return
+    except Exception as exc:  # noqa: BLE001 - 评测不因类案源失败中断
+        report.case_skipped_reason = f"error:{type(exc).__name__}"
+        return
+
+    report.case_eval_available = True
+    for item in case_items:
+        expected = item.get("expected_cases", []) or []
+        expected_types = [str(e.get("case_type", "")) for e in expected if e.get("case_type")]
+        try:
+            result = search_cases(item.get("query", ""), top_k=top_k)
+        except Exception:  # noqa: BLE001
+            continue
+        hits = getattr(result, "results", []) or []
+        for hit in hits:
+            hit_type = str(getattr(hit, "case_type", "") or "")
+            for et in expected_types:
+                if hit_type and (
+                    hit_type == et or hit_type.startswith(et) or et.startswith(hit_type)
+                ):
+                    report.case_queries_hit += 1
+                    break
+            else:
+                continue
+            break
 
 
 def _detect_modes() -> tuple[str, str]:

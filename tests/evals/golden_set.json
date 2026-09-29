@@ -581,5 +581,49 @@
    "网络用户",
    "通知"
   ]
+ },
+ {
+  "id": "case_retrieval_labor_001",
+  "category": "类案检索-劳动",
+  "query": "公司违法解除劳动合同 赔偿金 类案",
+  "expected_cases": [
+   {
+    "case_number_prefix": "劳动",
+    "case_type": "劳动争议",
+    "notes": "LeCaRDv2 灌库后经 search_cases 检索,验证 OpenSearch 通道"
+   }
+  ],
+  "expected_statutes": [],
+  "expected_effective_only": true,
+  "notes": "类案维度:检索通道与案由过滤验证(U-07);指标语义为'case_type 命中即计'",
+  "requires_case_library": true
+ },
+ {
+  "id": "case_retrieval_tort_001",
+  "category": "类案检索-侵权",
+  "query": "网络侵权 平台责任 判例",
+  "expected_cases": [
+   {
+    "case_type": "侵权"
+   }
+  ],
+  "expected_statutes": [],
+  "expected_effective_only": true,
+  "notes": "类案维度:侵权案由",
+  "requires_case_library": true
+ },
+ {
+  "id": "case_retrieval_lease_001",
+  "category": "类案检索-租赁",
+  "query": "房屋租赁 押金不退 起诉 判决书",
+  "expected_cases": [
+   {
+    "case_type": "租赁"
+   }
+  ],
+  "expected_statutes": [],
+  "expected_effective_only": true,
+  "notes": "类案维度:租赁案由",
+  "requires_case_library": true
  }
 ]

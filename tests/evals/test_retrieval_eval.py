@@ -43,13 +43,20 @@ def test_golden_set_loads_and_has_min_20():
 
 
 def test_golden_set_each_has_expected_statutes():
-    """每条金标应有非空 expected_statutes 字段。"""
+    """法条维度金标应有非空 expected_statutes;类案维度金标应有 expected_cases。"""
     golden = load_golden_set(DEFAULT_GOLDEN_PATH)
     assert golden, "金标集不应为空"
     for item in golden:
         assert "id" in item, f"缺少 id 字段: {item}"
         assert "query" in item, f"缺少 query 字段: {item.get('id')}"
         assert "category" in item, f"缺少 category 字段: {item.get('id')}"
+        # U-07:类案维度用例(requires_case_library)合法地无 expected_statutes
+        if item.get("requires_case_library"):
+            expected_cases = item.get("expected_cases")
+            assert isinstance(expected_cases, list) and expected_cases, (
+                f"类案维度金标应有非空 expected_cases: {item.get('id')}"
+            )
+            continue
         assert "expected_statutes" in item, f"缺少 expected_statutes 字段: {item.get('id')}"
         expected = item["expected_statutes"]
         assert isinstance(expected, list) and expected, (
