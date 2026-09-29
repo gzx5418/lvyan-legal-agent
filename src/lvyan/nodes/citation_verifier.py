@@ -339,6 +339,22 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
         _logger.exception("grounding 验证器异常: %s", exc)
         verification_error = True
 
+    # --- U-05:类案引用审计(案号存在性 error + 案由一致性 warning)---
+    cases = _get(state, "cases", []) or []
+    node_case_type = str(_get(state, "case_type", "") or "").strip() or None
+    case_report = None
+    try:
+        from lvyan.validators.case_citation import validate_case_citations
+
+        case_report = validate_case_citations(
+            str(audit_subject) if audit_subject is not None else "", cases, node_case_type
+        )
+    except Exception as exc:  # noqa: BLE001 验证器异常 → fail-closed
+        _logger.exception("case_citation 验证器异常: %s", exc)
+        case_report = None
+    if case_report is not None and int(_get(case_report, "not_found", 0) or 0) > 0:
+        verification_error = True  # 虚构案号与验证器异常同级,阻断通过
+
     # 任一验证器异常时构造 fail-closed 占位报告（passed=False）
     if verification_error:
         from lvyan.validators.citation import CitationValidationReport
@@ -431,6 +447,19 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
     audit = _summarize_audit(
         details, citation_report, authority_report, grounding_report, retrieval_iteration
     )
+
+    # U-05:类案虚构案号必须让 audit.passed=False(三报告不覆盖类案维度)
+    if case_report is not None:
+        case_not_found = int(_get(case_report, "not_found", 0) or 0)
+        if case_not_found > 0 and audit.passed:
+            audit = audit.model_copy(update={"passed": False})
+        if case_report.issues:
+            _logger.info(
+                "类案引用审计:%d 案号 / %d 缺失 / %d 案由偏离",
+                int(_get(case_report, "total_case_numbers", 0) or 0),
+                case_not_found,
+                int(_get(case_report, "mismatches", 0) or 0),
+            )
 
     passed = audit.passed
     # spec 约束：citation_verifier 内部限制为 2 次（取 min(settings.max_retrieval_iterations, 2)）

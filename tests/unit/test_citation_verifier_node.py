@@ -438,3 +438,80 @@ def test_route_after_citation_internal_cap_is_two(monkeypatch: pytest.MonkeyPatc
         "iteration": 1,
     }
     assert route_after_citation(state_below) == "reretrieve"
+
+
+# ---------------------------------------------------------------------------
+# U-05:类案引用审计(虚构案号 → audit.passed=False)
+# ---------------------------------------------------------------------------
+def test_fabricated_case_number_blocks_audit(monkeypatch):
+    """输出含检索结果外的案号 → 类案审计 error → passed=False,触发重检索。"""
+    from lvyan.nodes.citation_verifier import citation_verifier
+    from lvyan.schemas.evidence import CaseAuthority
+
+    state = _make_state(iteration=0)
+    state["cases"] = [
+        CaseAuthority(
+            case_id="c1",
+            case_number="(2022)京01民终123号",
+            court="北京一中院",
+            case_type="劳动争议",
+            brief_facts="f",
+            ruling_summary="r",
+            similarity_score=0.9,
+        )
+    ]
+    # final_output 携带虚构案号(不在 cases 中)
+    state["final_output"] = (
+        "## 结论\n用人单位应支付赔偿金。"
+        "同类案件参见(2021)沪0105民初8888号民事判决。\n\n"
+        "## 法律依据\n《劳动合同法》第八十七条。"
+    )
+    monkeypatch.setattr(
+        "lvyan.validators.citation.verify_statute_status", _mock_verify("effective")
+    )
+    monkeypatch.setattr(
+        "lvyan.validators.authority_status.verify_statute_status", _mock_verify("effective")
+    )
+
+    result = citation_verifier(state)
+    audit = result["citation_audit"]
+    # 虚构案号 → 不通过 → 迭代 0 < 上限 → 触发重检索(返回含 retrieval_iteration+1)
+    assert audit["passed"] is False
+    assert result["retrieval_iteration"] == 1
+
+
+def test_known_case_number_passes_audit(monkeypatch):
+    """输出案号在检索结果中 → 类案审计通过,不阻断。"""
+    from lvyan.nodes.citation_verifier import citation_verifier
+    from lvyan.schemas.evidence import CaseAuthority
+
+    state = _make_state(iteration=0)
+    state["cases"] = [
+        CaseAuthority(
+            case_id="c1",
+            case_number="(2022)京01民终123号",
+            court="北京一中院",
+            case_type="劳动争议",
+            brief_facts="f",
+            ruling_summary="r",
+            similarity_score=0.9,
+        )
+    ]
+    state["final_output"] = (
+        "## 结论\n对方不履行合同义务应当承担违约责任。"
+        "同类案件(2022)京01民终123号亦作此认定。\n\n"
+        "## 法律依据\n《中华人民共和国民法典》第五百七十七条,"
+        "对方应当承担继续履行或者赔偿损失等违约责任。"
+    )
+    monkeypatch.setattr(
+        "lvyan.validators.citation.verify_statute_status", _mock_verify("effective")
+    )
+    monkeypatch.setattr(
+        "lvyan.validators.authority_status.verify_statute_status", _mock_verify("effective")
+    )
+
+    result = citation_verifier(state)
+    audit = result["citation_audit"]
+    # 法条引用正常 + 案号真实 → 通过(不再重检索)
+    assert audit["passed"] is True
+    assert "retrieval_iteration" not in result

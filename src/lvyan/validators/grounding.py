@@ -315,4 +315,4 @@ def _llm_grounding_issues(
                 detail=f"语义蕴含审查未通过：{str(item.get('reason', '条文不直接支持结论'))[:300]}",
             )
         )
-    return result
+    return result, True, None
