@@ -284,3 +284,37 @@ def test_no_irreversible_op_no_interrupt(hitl_enabled, monkeypatch: pytest.Monke
 
     assert called["count"] == 0
     assert "pending_human_approval" not in result
+
+
+# ---------------------------------------------------------------------------
+# U-12/U-13:弃答语义(检索不足以支撑结论)
+# ---------------------------------------------------------------------------
+def test_abstain_recommended_skips_retry_and_injects_note(monkeypatch):
+    """弃答置位 → 不因引用缺失重试,注入弃答说明,分析正文保留。"""
+    from lvyan.nodes.output_guardrail import output_guardrail
+
+    monkeypatch.setattr("lvyan.nodes.output_guardrail.settings.hitl_enabled", False)
+    state = _make_state()
+    # 去掉默认 goal 的不可逆操作词,聚焦弃答路径
+    state.user_goal = "咨询合同违约责任"
+    state.citation_audit = {
+        "abstain_recommended": True,
+        "unverifiable_citations": ["《合同法》第9999条"],
+    }
+    result = output_guardrail(state)
+    # 不重试
+    assert result["output_retry_needed"] is False
+    # 弃答说明注入,分析正文保留
+    assert "现有检索结果不足以支撑明确结论" in result["final_output"]
+    assert "《合同法》第9999条" in result["final_output"]
+    assert "重新提问" in result["final_output"]
+
+
+def test_abstain_not_recommended_keeps_retry_path():
+    """未置弃答 → 既有重试路径不变(回归)。"""
+    from lvyan.nodes.output_guardrail import output_guardrail
+
+    # 缺章节输出,无弃答标志 → 重试
+    state = _make_state("只有一句话的分析。")
+    result = output_guardrail(state)
+    assert result["output_retry_needed"] is True

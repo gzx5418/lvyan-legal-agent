@@ -492,8 +492,24 @@ def citation_verifier(state: CaseState) -> dict[str, Any]:
             # get_compat_counter 处理，本节点只维护 retrieval_iteration。
         }
 
-    # --- 4. 不通过且已达上限：强制通过，标记高风险 ---
+    # --- 4. 不通过且已达上限：不再静默"强制通过"——置弃答建议(U-12)。
+    # 输出层(guardrail/composer)据此把结论降级为"检索结果不足以支撑",
+    # 分析正文保留;确定性风险标注维持。
     if not passed and retrieval_iteration >= max_iterations:
+        unverifiable = sorted(
+            {
+                str(issue.get("citation_id", "") or "")
+                for issue in (_get(audit, "details", []) or [])
+                if isinstance(issue, dict) and str(issue.get("status", "")) != "verified"
+            }
+            - {""}
+        )
+        audit = audit.model_copy(
+            update={
+                "abstain_recommended": True,
+                "unverifiable_citations": unverifiable[:10],
+            }
+        )
         return {
             "citation_audit": audit.model_dump(),
             "risk_level": "high",

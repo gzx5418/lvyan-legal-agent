@@ -288,6 +288,18 @@ def _build_summary(state: CaseState) -> ExecutiveSummary:
     )
 
 
+def _abstained_from_state(state: Any) -> bool:
+    """从 CaseState(对象或 dict)读取 citation_audit.abstain_recommended。"""
+    audit = (
+        state.get("citation_audit")
+        if isinstance(state, dict)
+        else getattr(state, "citation_audit", None)
+    )
+    if isinstance(audit, dict):
+        return bool(audit.get("abstain_recommended", False))
+    return bool(getattr(audit, "abstain_recommended", False)) if audit is not None else False
+
+
 def build_legal_answer(state: CaseState) -> LegalAnswerV1:
     """从 CaseState 构建 LegalAnswerV1 结构化输出。"""
     meta = AnswerMeta(
@@ -302,6 +314,8 @@ def build_legal_answer(state: CaseState) -> LegalAnswerV1:
             else ("partial" if len(state.missing_facts) <= 2 else "insufficient")
         ),
         analysis_mode=state.complexity,
+        # U-13:弃答标志从引用审计透传(供前端渲染弃答卡)
+        abstained=_abstained_from_state(state),
     )
     return LegalAnswerV1(
         meta=meta,

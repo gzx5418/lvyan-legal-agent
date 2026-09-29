@@ -26,6 +26,8 @@ class AnswerMeta(BaseModel):
     risk_level: Literal["low", "medium", "high"]
     material_completeness: Literal["complete", "partial", "insufficient"]
     analysis_mode: Literal["light", "deep", "document"] = "deep"
+    # U-13:检索不足以支撑结论(弃答)——前端据此渲染弃答卡而非结论区
+    abstained: bool = False
 
 
 class ExecutiveSummary(BaseModel):

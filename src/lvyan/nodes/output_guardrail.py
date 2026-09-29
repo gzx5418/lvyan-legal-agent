@@ -162,6 +162,20 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
     statutes = _get(state, "statutes", []) or []
     risk_level = str(_get(state, "risk_level", "low") or "low")
     output_iteration = int(_get(state, "output_iteration", 0) or 0)
+    # U-13:弃答语义——citation_verifier 重检索达上限仍不通过时,引用缺失
+    # 是弃答的预期形态而非输出缺陷:跳过结构/引用缺失触发的重试,由本节点
+    # 注入弃答说明(分析正文保留,结论不硬答)。
+    citation_audit = _get(state, "citation_audit", None) or {}
+    abstain_recommended = bool(
+        citation_audit.get("abstain_recommended")
+        if isinstance(citation_audit, dict)
+        else _get(citation_audit, "abstain_recommended", False)
+    )
+    unverifiable: list[str] = (
+        list(citation_audit.get("unverifiable_citations", []) or [])
+        if isinstance(citation_audit, dict)
+        else []
+    )
 
     notes: list[str] = []
     irreversible_ops = _detect_irreversible_ops(final_output)
@@ -193,6 +207,10 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
             final_output = _remove_invalid_citation(final_output, err.detail)
             notes.append(f"已移除无效引用并标注警告：{err.detail}")
         elif err.error_type in ("missing_section", "missing_citation"):
+            if abstain_recommended:
+                # U-13 弃答场景:引用/章节缺失是预期形态,不重试(无信息增益)
+                notes.append(f"弃答场景,保留结构提示不做重试:{err.detail}")
+                continue
             # 结构性缺失：回退 composer 重写（受 MAX_OUTPUT_ITERATIONS 约束）
             # 已进入人工审批的旧会话可能来自旧版输出模板。此时应优先完成
             # fail-closed 的人工确认，不能因新增章节要求绕过或丢失审批状态。
@@ -205,6 +223,22 @@ def output_guardrail(state: CaseState) -> dict[str, Any]:
                 retry_reasons.append(err.detail)
             else:
                 notes.append(f"已达输出重试上限，强制放行；遗留问题：{err.detail}（需人工复核）")
+
+    # --- 3.5 U-13:弃答说明注入(在重试判定后、HITL 前) ---
+    if abstain_recommended:
+        missing_items = "、".join(unverifiable[:5]) if unverifiable else "关键法条/类案引用"
+        abstain_note = (
+            "\n\n---\n"
+            "⚠ **现有检索结果不足以支撑明确结论**\n\n"
+            f"以下引用经多轮检索仍无法核验:{missing_items}。"
+            "为避免误导,本回答不给出确定性结论;上方分析仅供理解争议框架。\n\n"
+            "**建议补充以下信息后重新提问:**\n"
+            "- 补充案件关键事实(时间、金额、行为、证据)\n"
+            "- 上传相关材料(合同、通知、判决书等)供证据分析\n"
+            "- 或咨询执业律师获取正式意见"
+        )
+        final_output = final_output.rstrip() + abstain_note
+        notes.append("已注入弃答说明:检索不足以支撑结论,建议补充信息")
 
     # --- 4. 回退 composer 重新生成 ---
     if retry_needed:

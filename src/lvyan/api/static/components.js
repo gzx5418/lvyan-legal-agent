@@ -59,9 +59,12 @@ function esc(text) {
 
 function renderLegalAnswer(answer) {
   if (!answer || answer.schema_version !== 'legal_answer_v1') return '';
+  // U-13:弃答卡置顶——检索不足以支撑结论时,不渲染确定性结论区
+  const abstainCard = answer.meta && answer.meta.abstained ? renderAbstainCard(answer) : '';
   const parts = [
     renderReportHeader(answer.meta),
-    renderSummaryGrid(answer.executive_summary, answer.risks || [], answer.meta),
+    abstainCard,
+    abstainCard ? '' : renderSummaryGrid(answer.executive_summary, answer.risks || [], answer.meta),
     renderImmediateActions(answer.action_plan || []),
     renderFacts(answer.facts || []),
     renderIssues(answer.issues || []),
@@ -74,6 +77,31 @@ function renderLegalAnswer(answer) {
     renderDisclaimer(answer.disclaimer),
   ];
   return '<div class="legal-answer">' + parts.join('') + '</div>';
+}
+
+function renderAbstainCard(answer) {
+  const meta = (answer.meta || {});
+  const unverifiable = (answer.citations || [])
+    .filter(c => c.status && c.status !== 'effective')
+    .map(c => `《${esc(c.full_name || '')}》${esc(c.article_number || '')}`.trim())
+    .slice(0, 5);
+  const items = unverifiable.length
+    ? `<ul class="la-abstain-list">${unverifiable.map(t => `<li>${t}</li>`).join('')}</ul>`
+    : '<p class="la-abstain-hint">关键法条/类案引用经多轮检索仍无法核验。</p>';
+  return `
+    <div class="la-abstain-card" role="alert">
+      <div class="la-abstain-title">⚠ 现有检索结果不足以支撑明确结论</div>
+      <p>为避免误导,本回答不给出确定性结论;下方分析仅供理解争议框架。</p>
+      ${items}
+      <div class="la-abstain-actions">
+        <p><strong>建议补充以下信息后重新提问:</strong></p>
+        <ul>
+          <li>补充案件关键事实(时间、金额、行为、证据)</li>
+          <li>上传相关材料(合同、通知、判决书等)供证据分析</li>
+          <li>或咨询执业律师获取正式意见</li>
+        </ul>
+      </div>
+    </div>`;
 }
 
 function renderReportHeader(meta) {

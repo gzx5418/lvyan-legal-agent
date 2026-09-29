@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CitationDetail(BaseModel):
@@ -39,6 +39,11 @@ class CitationAudit(BaseModel):
     # 输出层应向用户披露该限制。
     llm_semantic_reviewed: bool | None = None
     llm_degraded_reason: str | None = None
+    # U-12 弃答语义:重检索达上限仍不通过时置位——输出层据此把结论区
+    # 替换为"现有检索结果不足以支撑结论"而非硬答;分析正文保留。
+    abstain_recommended: bool = False
+    # 无法核验的引用清单(citation_id / 案号),供弃答卡片展示"缺什么"
+    unverifiable_citations: list[str] = Field(default_factory=list)
 
 
 class ReasoningResult(BaseModel):

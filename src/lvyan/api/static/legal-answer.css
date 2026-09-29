@@ -252,3 +252,33 @@
   background: var(--surface-subtle);
   padding: 16px 32px;
 }
+
+/* U-13:弃答卡(检索不足以支撑结论) */
+.la-abstain-card {
+  border: 1px solid var(--warning, #b45309);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: var(--surface-subtle, #fffbeb);
+  padding: 16px 20px;
+  margin: 12px 0;
+}
+
+.la-abstain-card .la-abstain-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.la-abstain-card .la-abstain-list {
+  margin: 8px 0 8px 20px;
+  padding: 0;
+}
+
+.la-abstain-card .la-abstain-actions {
+  margin-top: 8px;
+  font-size: 14px;
+}
+
+.la-abstain-card .la-abstain-actions ul {
+  margin: 4px 0 0 20px;
+  padding: 0;
+}

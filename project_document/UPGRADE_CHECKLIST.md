@@ -92,13 +92,13 @@
 - 依赖:无
 - 验收:时效临近场景("超过诉讼时效了吗")触发 blocking 追问的端到端用例;非紧迫场景不追问(回归)
 
-**U-10** - evidence_analyzer LLM 化
+**[x]** **U-10** - evidence_analyzer LLM 化 ✅ c989aca
 - File: `src/lvyan/nodes/evidence_analyzer.py`(LLM 只能在既有 requirement_id 内修正——保持)
 - 依赖 checklist 覆盖 12 案由(已补合同纠纷/婚姻家庭/知识产权);LLM 置信度修正带去重合并
 - 依赖:无
 - 验收:三案由清单生成快照;未知 ID 丢弃回归不破
 
-**U-11** - authority_resolver LLM 化
+**[x]** **U-11** - authority_resolver LLM 化 ✅ c989aca
 - File: `src/lvyan/nodes/evidence_analyzer.py`(authority_resolver 同文件)
 - LLM 辅助多版本/层级冲突的裁决建议;确定性 `verify_statute_status` 仍握否决权(版本判定单一来源已统一到 version_aware)
 - 依赖:无
