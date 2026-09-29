@@ -160,18 +160,28 @@ def _format_cases(cases: list[Any]) -> str:
     lines: list[str] = []
     curated_seen = False
     real_seen = False
+    guiding_seen = False
+    # U-06:效力分级标注(指导性案例 > 参考案例 > 普通)
+    level_labels = {
+        "guiding": "【指导性案例·参照效力最强】",
+        "reference": "【参考案例】",
+    }
     for i, c in enumerate(cases, 1):
         case_number = str(_get(c, "case_number", "") or "").strip()
         court = str(_get(c, "court", "") or "").strip()
         ruling = str(_get(c, "ruling_summary", "") or "").strip()
         facts = str(_get(c, "brief_facts", "") or "").strip()
         source = str(_get(c, "source", "") or "").strip()
+        level = str(_get(c, "effective_level", "unknown") or "unknown")
         if source == "curated_knowledge" or not case_number:
             curated_seen = True
             head = f"### 类案参考规则{i}（精编裁判规则，非真实案例检索）"
         else:
             real_seen = True
-            head = f"### 类案{i}（{case_number}）"
+            if level == "guiding":
+                guiding_seen = True
+            label = level_labels.get(level, "")
+            head = f"### 类案{i}（{case_number}）{label}".rstrip()
         lines.append(head)
         if court:
             lines.append(f"- 法院：{court}")
@@ -179,7 +189,13 @@ def _format_cases(cases: list[Any]) -> str:
             lines.append(f"- 简要事实：{facts}")
         if ruling:
             lines.append(f"- 裁判要旨：{ruling}")
-    if curated_seen and not real_seen:
+    if real_seen:
+        lines.append("")
+        tail = "> 以上为检索到的真实案例；具体案件请核对人民法院案例库（rmfyalk.court.gov.cn）。"
+        if guiding_seen:
+            tail += "其中标注【指导性案例】的，各级法院审判类似案件时应当参照。"
+        lines.append(tail)
+    elif curated_seen:
         lines.append("")
         lines.append(
             "> 以上为精编裁判规则归纳，非个案检索结果；具体案件请核对"

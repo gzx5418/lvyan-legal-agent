@@ -104,4 +104,5 @@ class CaseDocument(BaseModel):
             ruling_date=self.judgment_date,
             similarity_score=similarity_score,
             source_url=self.source_url,
+            effective_level=self.effective_level,
         )

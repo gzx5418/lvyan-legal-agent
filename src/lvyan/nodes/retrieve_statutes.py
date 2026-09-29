@@ -84,6 +84,7 @@ def _to_case_authority(hit: Any) -> CaseAuthority:
         ruling_summary=str(_get(hit, "ruling_summary", "") or ""),
         similarity_score=float(_get(hit, "similarity_score", 0.0) or 0.0),
         source_url=_get(hit, "source_url", None),
+        effective_level=str(_get(hit, "effective_level", "unknown") or "unknown"),
     )
 
 

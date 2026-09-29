@@ -43,7 +43,8 @@ class CaseHit(BaseModel):
     brief_facts: str
     ruling_summary: str
     similarity_score: float = 0.0
-    source: str = "curated_knowledge"  # "curated_knowledge" | "database"
+    source: str = "curated_knowledge"  # "curated_knowledge" | "opensearch"
+    effective_level: str = "unknown"  # guiding | reference | normal | unknown
 
 
 class CaseSearchResult(ToolResult):
@@ -214,6 +215,7 @@ def _search_opensearch_hits(query: str, top_k: int, case_type: str | None) -> li
                 ruling_summary=result.summary,
                 similarity_score=float(result.score or 0.0),
                 source="opensearch",
+                effective_level=str(metadata.get("effective_level", "unknown") or "unknown"),
             )
         )
     return hits

@@ -25,6 +25,8 @@ class CaseAuthority(BaseModel):
     ruling_date: date | None = None
     similarity_score: float
     source_url: str | None = None
+    # U-06:效力级别(指导性案例 > 参考案例 > 普通);来源见 CaseDocument
+    effective_level: Literal["guiding", "reference", "normal", "unknown"] = "unknown"
 
 
 class EvidenceRequirement(BaseModel):
