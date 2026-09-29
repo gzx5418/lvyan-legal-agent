@@ -1,0 +1,66 @@
+# U-15:真模型夜间评测
+# ============================================================
+# 对金标全集跑真模型管线(live_eval),报告作为 artifact 保留并写入
+# job summary。不阻塞 PR 门禁;--require-real 保证"网关不可用"与
+# "评测失败"可区分(退出码 2 vs 1)。
+#
+# 前置 secrets(仓库 Settings → Secrets → Actions):
+#   MODEL_GATEWAY_URL / MODEL_GATEWAY_API_KEY
+# 漂移告警(与近 7 日均值对比)在报告累积后接入(U-31 聚合页同期)。
+name: Nightly Live Eval
+
+on:
+  schedule:
+    - cron: "0 19 * * *" # 每日 19:00 UTC(北京时间凌晨 3 点,避开高峰)
+  workflow_dispatch: {} # 支持手动触发首跑
+
+concurrency:
+  group: nightly-live-eval
+  cancel-in-progress: false
+
+jobs:
+  live-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true # 法律全文库(检索指标需要)
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra documents
+
+      - name: Run live eval (real gateway)
+        env:
+          MODEL_GATEWAY_URL: ${{ secrets.MODEL_GATEWAY_URL }}
+          MODEL_GATEWAY_API_KEY: ${{ secrets.MODEL_GATEWAY_API_KEY }}
+        run: |
+          uv run python tests/evals/live_eval.py \
+            --require-real \
+            --json "outputs/evals/live-$(date -u +%F).json" \
+            --json-summary "outputs/evals/summary.md" || code=$?
+          # 退出码语义:0=全过;1=有失败(仍保留报告);2=网关不可用(没测成)
+          if [ "${code:-0}" = "2" ]; then
+            echo "### Live Eval: 网关不可用,本次未执行" >> "$GITHUB_STEP_SUMMARY"
+            exit 0 # 没测成不算 CI 红,但无 artifact 可辨
+          fi
+          exit "${code:-0}"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ -f outputs/evals/summary.md ]; then
+            cat outputs/evals/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-eval-${{ github.run_id }}
+          path: outputs/evals/
+          retention-days: 30

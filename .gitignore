@@ -75,3 +75,4 @@ checkpoints.db
 .qoder/
 hitl_req.json
 *.log
+outputs/evals/

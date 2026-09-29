@@ -106,13 +106,13 @@
 
 ## B. 模型层(B4 弃答语义)
 
-**U-12** - 弃答状态与审计字段
+**[x]** **U-12** - 弃答状态与审计字段 ✅ f00cbbf
 - File: `src/lvyan/schemas/output.py`、`src/lvyan/graph/state.py`、`src/lvyan/nodes/citation_verifier.py`
 - `citation_audit` 增 `abstain_recommended: bool` 与 `unverifiable_citations: list[str]`;2 轮重检索后仍不通过时置位(替代现行"强制通过",风险标注保留)
 - 依赖:无
 - 验收:强制通过路径的既有测试改为弃答断言;`route_after_citation` 不受影响(路由仍进 guardrail)
 
-**U-13** - composer/finalizer 弃答渲染
+**[x]** **U-13** - composer/finalizer 弃答渲染 ✅ f00cbbf(前端弃答卡;U-52 置信度信号后续接入触发条件)
 - File: `src/lvyan/nodes/composer.py`、`composer_light.py`、`composer_deep.py`、`legal_answer_finalizer.py`
 - 弃答卡片:分析正文完整保留 + 结论区替换为"现有检索结果不足以支撑结论" + 缺失引用清单 + 补充建议(哪些案情/证据能解锁);`legal_answer.abstained` 结构化字段;SSE 事件透传
 - File(前端): `templates/static/app.js` 弃答卡片渲染
