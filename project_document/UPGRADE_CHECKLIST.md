@@ -141,7 +141,7 @@
 
 ## F. 工程收尾
 
-**U-17** - server.py 附件链路拆分(F5)
+**[x]** **U-17** - server.py 附件链路拆分(F5) ✅ 56437ed
 - File: 新建 `src/lvyan/api/attachments.py`;`server.py` run/upload 端点的附件校验/vault 写入/回滚内联逻辑(~230 行)迁出
 - 行为等价重构,现有 `test_attachment_markdown.py`/`test_api_safety.py` 全过为准;纯机械传参,不改语义
 - 依赖:无
