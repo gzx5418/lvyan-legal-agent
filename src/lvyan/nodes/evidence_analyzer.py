@@ -470,7 +470,11 @@ def authority_resolver(state: CaseState) -> dict[str, Any]:
     # --- 冲突检测 ---
     version_conflicts = _detect_version_conflicts(verified)
     hierarchy_conflicts = _detect_hierarchy_conflicts(verified)
-    conflicts = version_conflicts + hierarchy_conflicts
+    conflicts = _llm_conflict_resolution_advice(
+        version_conflicts + hierarchy_conflicts,
+        user_goal=str(_get(state, "user_goal", "") or ""),
+        as_of=_get(state, "law_as_of_date", None),
+    )
 
     # --- 效力层级排序 ---
     sorted_statutes = _sort_by_authority_level(verified)
@@ -486,6 +490,85 @@ def _authority_key(authority: Authority) -> str:
     source_id = str(_get(authority, "source_id", "") or "")
     article = str(_get(authority, "article_number", "") or "")
     return f"{source_id}#{article}" if article else source_id
+
+
+def _llm_conflict_resolution_advice(
+    conflicts: list[AuthorityConflict],
+    *,
+    user_goal: str,
+    as_of: Any = None,
+) -> list[AuthorityConflict]:
+    """U-11:LLM 为已检出的法规冲突生成适用裁决建议(填 ``resolution``)。
+
+    治理边界(与 evidence LLM 修正同款门控):
+    - 冲突本身由确定性规则检出,LLM **只能**对既有 conflict_id 给出
+      ``resolution`` 建议文本,不能创建/删除冲突、不能改变类型;
+    - 适用性的最终判定仍由确定性 ``verify_statute_status``(时间窗)与
+      引用审计执行——本建议是面向用户的解释性文本;
+    - ``as_of`` 存在时提示按历史时点适用(新法/旧法可能都曾有效);
+    - LLM 不可用/异常时原样返回(resolution 保持 None,规则描述已足够)。
+    """
+    if not conflicts:
+        return conflicts
+    from lvyan.llm import chat_json, llm_available
+    from lvyan.llm.prompt_security import delimit_untrusted
+    from lvyan.llm.prompt_registry import get_prompt
+    from lvyan.observability.metrics import record_llm_fallback
+
+    if not llm_available():
+        record_llm_fallback("authority_resolver", "conflict_advice_unavailable")
+        return conflicts
+    allowed = {c.conflict_id: c for c in conflicts[:5]}
+    input_items = [c.model_dump(mode="json") for c in allowed.values()]
+    as_of_text = (
+        f"历史时点查询:适用日期 {as_of}——请注意新旧版本在该时点的有效性"
+        if as_of
+        else "当前时点适用(以现行有效版本为准)"
+    )
+    spec = get_prompt("authority_resolver")
+    try:
+        payload = chat_json(
+            messages=[
+                {"role": "system", "content": f"{spec.system}\nprompt_version={spec.version}"},
+                {
+                    "role": "user",
+                    "content": (
+                        f"{delimit_untrusted(user_goal or '无', 'user_input')}\n"
+                        f"适用口径:{as_of_text}\n"
+                        f"{delimit_untrusted(input_items, 'authority_conflicts')}\n"
+                        '输出 {"items":[{"conflict_id":"原ID",'
+                        '"resolution":"本案权威适用建议(引用检出条目的版本/位阶,50字内)"}]}'
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=500,
+        )
+    except Exception:  # noqa: BLE001 boundary-exception: LLM 降级边界
+        record_llm_fallback("authority_resolver", "conflict_advice_error")
+        return conflicts
+    raw = payload.get("items", []) if isinstance(payload, dict) else []
+    if not isinstance(raw, list):
+        record_llm_fallback("authority_resolver", "conflict_advice_invalid")
+        return conflicts
+    updates: dict[str, str] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        cid = str(item.get("conflict_id", ""))
+        resolution = str(item.get("resolution", "")).strip()
+        if cid in allowed and resolution:
+            updates[cid] = resolution[:200]
+    if not updates:
+        if raw:
+            record_llm_fallback("authority_resolver", "conflict_advice_ungrounded")
+        return conflicts
+    return [
+        c.model_copy(update={"resolution": updates[c.conflict_id]})
+        if c.conflict_id in updates
+        else c
+        for c in conflicts
+    ]
 
 
 def _llm_rank_authorities(authorities: list[Authority], user_goal: str) -> list[Authority]:

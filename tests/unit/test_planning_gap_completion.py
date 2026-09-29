@@ -198,3 +198,85 @@ def test_quality_gate_rejects_unknown_status():
     report = assess_version_quality([metadata])
     assert report.ready is False
     assert report.unknown_status == 1
+
+
+# ---------------------------------------------------------------------------
+# U-10:evidence checklist 全案由覆盖 + LLM 修正去重
+# ---------------------------------------------------------------------------
+def test_evidence_checklist_all_case_types_generate():
+    """12 案由证据清单全部可生成(U-10 验收:合同纠纷/婚姻家庭/知识产权补齐)。"""
+    from lvyan.tools.calculators import _EVIDENCE_CHECKLIST, generate_evidence_checklist
+
+    assert len(_EVIDENCE_CHECKLIST) >= 12
+    for case_type in sorted(_EVIDENCE_CHECKLIST):
+        result = generate_evidence_checklist(case_type, [])
+        assert result.success, f"{case_type} 清单生成失败"
+        assert len(result.required_evidence) >= 5, f"{case_type} 必备证据不足"
+
+
+def test_llm_refine_duplicate_id_last_write_wins(monkeypatch):
+    """LLM 修正同一 requirement_id 重复出现 → 后一次生效(去重合并)。"""
+    from lvyan.schemas.evidence import EvidenceRequirement
+    from lvyan.nodes.evidence_analyzer import _llm_refine_evidence
+    import lvyan.llm as llm_mod
+
+    requirement = EvidenceRequirement(
+        requirement_id="req-1",
+        fact_to_prove="劳动关系",
+        evidence_types=["劳动合同"],
+        current_status="missing",
+    )
+    monkeypatch.setattr(llm_mod, "llm_available", lambda: True)
+    monkeypatch.setattr(
+        "lvyan.llm.chat_json",
+        lambda **kw: {
+            "items": [
+                {
+                    "requirement_id": "req-1",
+                    "current_status": "partial",
+                    "gap_description": "第一次",
+                },
+                {"requirement_id": "req-1", "current_status": "met", "gap_description": "第二次"},
+            ]
+        },
+    )
+    result = _llm_refine_evidence([requirement], [])
+    assert len(result) == 1
+    assert result[0].current_status == "met"  # 后写胜
+    assert result[0].gap_description == "第二次"
+
+
+def test_llm_refine_unknown_id_dropped_regression():
+    """未知 requirement_id 丢弃回归(U-10 验收项)。"""
+    from lvyan.schemas.evidence import EvidenceRequirement
+    from lvyan.nodes.evidence_analyzer import _llm_refine_evidence
+    import lvyan.llm as llm_mod
+
+    requirement = EvidenceRequirement(
+        requirement_id="req-1",
+        fact_to_prove="劳动关系",
+        evidence_types=["劳动合同"],
+        current_status="missing",
+    )
+    monkeypatch = None
+    import pytest
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(llm_mod, "llm_available", lambda: True)
+        monkeypatch.setattr(
+            "lvyan.llm.chat_json",
+            lambda **kw: {
+                "items": [
+                    {
+                        "requirement_id": "unknown-id",
+                        "current_status": "met",
+                        "gap_description": "x",
+                    },
+                ]
+            },
+        )
+        result = _llm_refine_evidence([requirement], [])
+        assert result[0].current_status == "missing"  # 未知 ID 不生效
+    finally:
+        monkeypatch.undo()

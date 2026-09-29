@@ -72,7 +72,7 @@
 - 依赖:U-04
 - 验收:两类来源快照测试
 
-**U-07** - 金标集类案维度用例
+**[x]** **U-07** - 金标集类案维度用例 ✅ 2d16008(类案命中指标待 CI 真实 OpenSearch 出首份报告)
 - File: `tests/evals/golden_set.json`
 - 新增 ≥10 条类案检索用例(案由覆盖与既有 7 类一致 + 刑事起步),`expected_cases` 字段(对齐 `expected_statutes` 结构)
 - 依赖:U-05
@@ -80,13 +80,13 @@
 
 ## B. 模型层(B1 四节点 LLM 化,向 IssueFrame 收敛)
 
-**U-08** - jurisdiction_triage LLM 化收尾
+**[x]** **U-08** - jurisdiction_triage LLM 化收尾 ✅ 8c2ecc8
 - File: `src/lvyan/nodes/triage.py`(已有 `_try_llm_triage`,补交叉校验缺口)
 - LLM 案由/复杂度与规则结果冲突时的双向消解(现状:仅 LLM 误判 document 可降级;规则误判不可纠正——二轮审查确认);负向用例("收到律师函怎么办"不得判 document)
 - 依赖:无(prompt_registry 已有)
 - 验收:`tests/agent/test_triage_fact.py` 增冲突消解双向用例;离线降级路径不变
 
-**U-09** - missing_fact_assessor LLM 化 + 追问路径激活
+**[x]** **U-09** - missing_fact_assessor LLM 化 + 追问路径激活 ✅ 9b49a34
 - File: `src/lvyan/nodes/planner.py`(`missing_fact_assessor` 现状:missing_facts 非空即早退,LLM 几乎不运行)
 - LLM 评估在"案由已识别但关键事实缺失"时运行;blocking 白名单仅限时效起算类字段(injury_date/breach_date 等,复用 triage 的 urgency 信号)
 - 依赖:无
